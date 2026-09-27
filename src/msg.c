@@ -375,8 +375,10 @@ int msg_parse(json_t obj, msg_t *out)
     }
 
     json_get(obj, "mentions", &mentions);
-    if (json_get(obj, "content", &v) && json_str(v, &raw))
+    if (json_get(obj, "content", &v) && json_str(v, &raw)) {
         format_content(raw.data ? raw.data : "", raw.len, mentions, &out->text);
+        sb_addn(&out->content, raw.data ? raw.data : "", raw.len);
+    }
     sb_free(&raw);
 
     if (json_get(obj, "attachments", &list))
@@ -464,6 +466,7 @@ void msg_free(msg_t *m)
     sb_free(&m->author);
     sb_free(&m->text);
     sb_free(&m->reply);
+    sb_free(&m->content);
     sb_free(&m->member_roles);
     msg_free_extras(m);
 }
