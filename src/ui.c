@@ -86,9 +86,22 @@ typedef struct {
     int hover_kind, hover_index;
     image_t *images;
     int nimages, cap_images;
+
+    /* Messages of the open channel, oldest first. */
+    msg_t *msgs;
+    int nmsgs, cap_msgs;
+    char msgs_channel[24];
+    int msgs_loading, msgs_older_loading, msgs_has_more, msgs_status;
+    int msg_scroll;            /* distance from the bottom, in pixels */
+    int layout_w;              /* width the cached heights were computed for */
+    int hover_msg;
+    sb_t send_error;
+    HWND composer;
+    WNDPROC composer_proc;
+    HBRUSH b_composer;
 } ui_t;
 
-static ui_t g_ui = {.guild = -1, .channel = -1};
+static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1};
 
 static const unsigned char k_word[8][7] = {
     {0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E}, {0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E},
@@ -129,6 +142,12 @@ void ui_post_model(model_t *model)
 {
     if (!PostMessageW(g_ui.wnd, UI_READY, 0, (LPARAM)model))
         model_free(model);
+}
+
+void ui_post_batch(msg_batch_t *batch)
+{
+    if (!PostMessageW(g_ui.wnd, UI_MESSAGES, 0, (LPARAM)batch))
+        msg_batch_free(batch);
 }
 
 static void set_text(sb_t *dst, const char *text)
@@ -649,6 +668,477 @@ static void paint_side(RECT rc)
     paint_user_panel(rc);
 }
 
+/* ---- Messages ---- */
+
+static void place_composer(void);
+
+#define GROUP_MS (7 * 60 * 1000)
+#define COMPOSER_H 44
+#define WELCOME_H 190
+
+static int is_voice_type(int type)
+{
+    return type == CH_VOICE || type == CH_STAGE;
+}
+
+static int open_is_text(void)
+{
+    return g_ui.model && g_ui.channel >= 0 && !is_voice_type(chan(g_ui.channel)->type);
+}
+
+/* Local SYSTEMTIME of a snowflake. */
+static SYSTEMTIME local_time(const char *id)
+{
+    ULARGE_INTEGER t;
+    FILETIME ft;
+    SYSTEMTIME utc, local;
+
+    t.QuadPart = ((unsigned long long)snowflake_ms(id) + 11644473600000ull) * 10000ull;
+    ft.dwLowDateTime = t.LowPart;
+    ft.dwHighDateTime = t.HighPart;
+    FileTimeToSystemTime(&ft, &utc);
+    SystemTimeToTzSpecificLocalTime(NULL, &utc, &local);
+    return local;
+}
+
+static int same_day(SYSTEMTIME a, SYSTEMTIME b)
+{
+    return a.wYear == b.wYear && a.wMonth == b.wMonth && a.wDay == b.wDay;
+}
+
+/* "Today at 14:05", "Yesterday at 09:12" or "27/09/2026 14:05" in the user's locale. */
+static void format_time(const char *id, wchar_t *out, int n)
+{
+    SYSTEMTIME st = local_time(id), now, yesterday;
+    FILETIME ft;
+    ULARGE_INTEGER t;
+    wchar_t clock[32];
+    int len = 0;
+
+    GetLocalTime(&now);
+    SystemTimeToFileTime(&now, &ft);
+    t.LowPart = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    t.QuadPart -= 24ull * 3600 * 10000000;
+    ft.dwLowDateTime = t.LowPart;
+    ft.dwHighDateTime = t.HighPart;
+    FileTimeToSystemTime(&ft, &yesterday);
+
+    GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, NULL, clock, ARRAYSIZE(clock));
+    if (same_day(st, now)) {
+        lstrcpynW(out, L"Today at ", n);
+    } else if (same_day(st, yesterday)) {
+        lstrcpynW(out, L"Yesterday at ", n);
+    } else {
+        len = GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &st, NULL, out, n, NULL);
+        if (len > 0 && len < n) {
+            out[len - 1] = L' ';
+            out[len] = 0;
+        }
+    }
+    len = lstrlenW(out);
+    lstrcpynW(out + len, clock, n - len);
+}
+
+static RECT message_area(void)
+{
+    RECT rc, r;
+
+    GetClientRect(g_ui.wnd, &rc);
+    r.left = S(RAIL_W + SIDE_W);
+    r.right = rc.right;
+    r.top = S(HEADER_H);
+    r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8);
+    return r;
+}
+
+static int text_x(void)
+{
+    return S(RAIL_W + SIDE_W) + S(72);
+}
+
+static int text_w_px(void)
+{
+    RECT a = message_area();
+    return a.right - S(24) - text_x();
+}
+
+static int text_height(const sb_t *s, int width)
+{
+    wchar_t *w;
+    RECT r = {0, 0, width, 0};
+
+    if (!s->len)
+        return 0;
+    if (!g_ui.back)
+        return S(20);
+    w = utf8_to_wide(s->data, s->len);
+    SelectObject(g_ui.back, g_ui.f_body);
+    DrawTextW(g_ui.back, w, -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+    mem_free(w);
+    return r.bottom;
+}
+
+/* grouped: 0 = starts a group, 1 = continues it, 2 = starts a group after a date divider. */
+static void update_grouping(void)
+{
+    for (int i = 0; i < g_ui.nmsgs; i++) {
+        msg_t *m = &g_ui.msgs[i], *p = i ? &g_ui.msgs[i - 1] : NULL;
+        SYSTEMTIME a, b;
+
+        m->height_w = 0;
+        if (!p) {
+            m->grouped = 0;
+            continue;
+        }
+        a = local_time(m->id);
+        b = local_time(p->id);
+        if (!same_day(a, b))
+            m->grouped = 2;
+        else if (!m->system && !p->system && !m->reply.len && lstrcmpA(m->author_id, p->author_id) == 0 &&
+                 snowflake_ms(m->id) - snowflake_ms(p->id) < GROUP_MS)
+            m->grouped = 1;
+        else
+            m->grouped = 0;
+    }
+}
+
+static int msg_height(msg_t *m)
+{
+    int w = text_w_px();
+
+    if (m->height_w != w) {
+        int h = text_height(&m->text, w);
+        if (m->system)
+            h = S(16) + S(22);
+        else if (m->grouped == 1)
+            h = S(2) + (h ? h : S(20)) + S(2);
+        else
+            h = S(16) + (m->reply.len ? S(22) : 0) + S(22) + h + S(2);
+        if (m->grouped == 2)
+            h += S(44);
+        m->height = h;
+        m->height_w = g_ui.back ? w : 0; /* measure again once there is a DC */
+    }
+    return m->height;
+}
+
+static int messages_height(void)
+{
+    int h = S(16);
+
+    for (int i = 0; i < g_ui.nmsgs; i++)
+        h += msg_height(&g_ui.msgs[i]);
+    if (!g_ui.msgs_has_more)
+        h += S(WELCOME_H);
+    return h;
+}
+
+static void clamp_msg_scroll(void)
+{
+    RECT a = message_area();
+    int max = messages_height() - (a.bottom - a.top);
+
+    if (g_ui.msg_scroll > max)
+        g_ui.msg_scroll = max;
+    if (g_ui.msg_scroll < 0)
+        g_ui.msg_scroll = 0;
+}
+
+static void maybe_load_older(void)
+{
+    RECT a = message_area();
+
+    if (!g_ui.msgs_has_more || g_ui.msgs_loading || g_ui.msgs_older_loading || !g_ui.nmsgs)
+        return;
+    /* Fetch before the user reaches the top. */
+    if (messages_height() - (a.bottom - a.top) - g_ui.msg_scroll < S(600)) {
+        g_ui.msgs_older_loading = 1;
+        app_fetch_messages(g_ui.msgs_channel, g_ui.msgs[0].id);
+    }
+}
+
+/* Replaces <#id> with #name using the channel list. */
+static void resolve_channels(msg_t *m)
+{
+    sb_t out = {0};
+    const char *s = m->text.data;
+    size_t n = m->text.len, i = 0;
+    int changed = 0;
+
+    while (i < n) {
+        if (s[i] == '<' && i + 2 < n && s[i + 1] == '#') {
+            size_t j = i + 2;
+            while (j < n && s[j] >= '0' && s[j] <= '9')
+                j++;
+            if (j < n && s[j] == '>' && j - i - 2 < 24) {
+                char id[24];
+                int found = 0;
+                lstrcpynA(id, s + i + 2, (int)(j - i - 1));
+                for (unsigned c = 0; g_ui.model && c < g_ui.model->nchannels; c++)
+                    if (lstrcmpA(g_ui.model->channels[c].id, id) == 0) {
+                        sb_add(&out, "#");
+                        sb_add(&out, model_str(g_ui.model, g_ui.model->channels[c].name));
+                        found = 1;
+                        break;
+                    }
+                if (!found)
+                    sb_add(&out, "#unknown");
+                i = j + 1;
+                changed = 1;
+                continue;
+            }
+        }
+        sb_addn(&out, s + i, 1);
+        i++;
+    }
+    if (changed) {
+        sb_free(&m->text);
+        m->text = out;
+    } else {
+        sb_free(&out);
+    }
+}
+
+static void free_messages(void)
+{
+    for (int i = 0; i < g_ui.nmsgs; i++)
+        msg_free(&g_ui.msgs[i]);
+    g_ui.nmsgs = 0;
+}
+
+static int find_msg(const char *id)
+{
+    for (int i = g_ui.nmsgs; i-- > 0;)
+        if (lstrcmpA(g_ui.msgs[i].id, id) == 0)
+            return i;
+    return -1;
+}
+
+static void reserve_msgs(int extra)
+{
+    if (g_ui.nmsgs + extra <= g_ui.cap_msgs)
+        return;
+    while (g_ui.cap_msgs < g_ui.nmsgs + extra)
+        g_ui.cap_msgs = g_ui.cap_msgs ? g_ui.cap_msgs * 2 : 128;
+    g_ui.msgs = mem_realloc(g_ui.msgs, (size_t)g_ui.cap_msgs * sizeof *g_ui.msgs);
+}
+
+static void on_batch(msg_batch_t *b)
+{
+    if (lstrcmpA(b->channel_id, g_ui.msgs_channel) != 0) {
+        msg_batch_free(b);
+        return;
+    }
+    for (int i = 0; i < b->n; i++)
+        resolve_channels(&b->msgs[i]);
+
+    switch (b->kind) {
+    case BATCH_HISTORY:
+        free_messages();
+        g_ui.msgs_loading = 0;
+        g_ui.msgs_status = b->status;
+        g_ui.msgs_has_more = b->has_more;
+        g_ui.msg_scroll = 0;
+        reserve_msgs(b->n);
+        for (int i = 0; i < b->n; i++)
+            g_ui.msgs[g_ui.nmsgs++] = b->msgs[i];
+        b->n = 0;
+        break;
+    case BATCH_OLDER:
+        g_ui.msgs_older_loading = 0;
+        if (b->status || !g_ui.nmsgs || lstrcmpA(b->before, g_ui.msgs[0].id) != 0)
+            break;
+        g_ui.msgs_has_more = b->has_more;
+        reserve_msgs(b->n);
+        memmove(g_ui.msgs + b->n, g_ui.msgs, (size_t)g_ui.nmsgs * sizeof *g_ui.msgs);
+        for (int i = 0; i < b->n; i++)
+            g_ui.msgs[i] = b->msgs[i];
+        g_ui.nmsgs += b->n;
+        b->n = 0;
+        break;
+    case BATCH_NEW:
+        if (g_ui.msgs_loading || find_msg(b->msgs[0].id) >= 0)
+            break;
+        reserve_msgs(1);
+        g_ui.msgs[g_ui.nmsgs++] = b->msgs[0];
+        b->n = 0;
+        break;
+    case BATCH_UPDATE: {
+        int i = find_msg(b->msgs[0].id);
+        /* Partial updates (embeds resolving) carry no author: keep the text we have. */
+        if (i >= 0 && b->msgs[0].author_id[0]) {
+            sb_free(&g_ui.msgs[i].text);
+            g_ui.msgs[i].text = b->msgs[0].text;
+            b->msgs[0].text = (sb_t){0};
+        }
+        break;
+    }
+    case BATCH_DELETE: {
+        int i = find_msg(b->msgs[0].id);
+        if (i >= 0) {
+            msg_free(&g_ui.msgs[i]);
+            memmove(g_ui.msgs + i, g_ui.msgs + i + 1, (size_t)(g_ui.nmsgs - i - 1) * sizeof *g_ui.msgs);
+            g_ui.nmsgs--;
+        }
+        break;
+    }
+    }
+    msg_batch_free(b);
+    update_grouping();
+    clamp_msg_scroll();
+    maybe_load_older();
+    place_composer();
+}
+
+static void paint_welcome(int x0, int y, int w, const char *name, int voice)
+{
+    char title[160];
+
+    gfx_circle(g_ui.g, x0 + S(16), y, S(68), ARGB(C_ITEM));
+    if (voice)
+        text_w(g_ui.f_icon_big, C_INK, rect(x0 + S(16), y, S(68), S(68)), ICON_VOLUME, -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    else
+        text(g_ui.f_title, C_INK, rect(x0 + S(16), y, S(68), S(68)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    wsprintfA(title, "Welcome to %s%.120s", voice ? "" : "#", name);
+    text(g_ui.f_title, C_INK, rect(x0 + S(16), y + S(84), w - S(32), S(32)), title,
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    wsprintfA(title, voice ? "Voice channels are not supported yet." : "This is the start of the #%.120s channel.", name);
+    text(g_ui.f_body, C_MUTED, rect(x0 + S(16), y + S(122), w - S(32), S(24)), title,
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static void paint_divider(int x0, int y, int w, const char *id)
+{
+    SYSTEMTIME st = local_time(id);
+    wchar_t date[64];
+    RECT r;
+    int tw;
+
+    GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, &st, NULL, date, ARRAYSIZE(date), NULL);
+    r = rect(0, 0, 1000, 100);
+    SelectObject(g_ui.back, g_ui.f_cat);
+    DrawTextW(g_ui.back, date, -1, &r, DT_CALCRECT | DT_SINGLELINE);
+    tw = r.right + S(16);
+    fill(x0 + S(16), y + S(22), w - S(32), 1, C_LINE);
+    fill(x0 + (w - tw) / 2, y + S(12), tw, S(20), C_MAIN);
+    text_w(g_ui.f_cat, C_FAINT, rect(x0 + (w - tw) / 2, y + S(12), tw, S(20)), date, -1,
+           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void paint_message(int i, int x0, int y, int w)
+{
+    msg_t *m = &g_ui.msgs[i];
+    int tx = text_x(), tw = w - (tx - x0) - S(24), h = msg_height(m);
+    wchar_t *body;
+
+    if (m->grouped == 2) {
+        paint_divider(x0, y, w, m->id);
+        y += S(44);
+        h -= S(44);
+    }
+    if (g_ui.hover_msg == i)
+        fill(x0, y + (m->grouped == 1 ? 0 : S(12)), w, h - (m->grouped == 1 ? 0 : S(12)), C_HOVER);
+
+    if (m->system) {
+        char line[160];
+        text(g_ui.f_body, C_GREEN, rect(x0 + S(16), y + S(16), S(40), S(22)), "\xE2\x86\x92", DT_CENTER | DT_SINGLELINE);
+        wsprintfA(line, "%.60s %.90s", m->author.data ? m->author.data : "", m->text.data ? m->text.data : "");
+        text(g_ui.f_body, C_MUTED, rect(tx, y + S(16), tw, S(22)), line, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    if (m->grouped != 1) {
+        wchar_t when[64];
+        gfx_image_t *img;
+        int ny = y + S(16);
+        RECT nr;
+
+        if (m->reply.len) {
+            fill(x0 + S(36), ny + S(10), S(2), S(14), C_LINE);
+            fill(x0 + S(36), ny + S(10), S(26), S(2), C_LINE);
+            text(g_ui.f_small, C_MUTED, rect(tx, ny, tw, S(20)), m->reply.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            ny += S(22);
+        }
+        img = m->author_id[0] ? user_avatar(m->author_id, m->avatar) : NULL;
+        if (img)
+            gfx_image(g_ui.g, img, x0 + S(16), ny, S(40), S(40), S(20));
+        else
+            gfx_circle(g_ui.g, x0 + S(16), ny, S(40), ARGB(C_ITEM));
+        nr = rect(tx, ny, tw, S(22));
+        text(g_ui.f_h, C_INK, nr, m->author.data ? m->author.data : "", DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        format_time(m->id, when, ARRAYSIZE(when));
+        nr.left += text_width(g_ui.f_h, m->author.data ? m->author.data : "") + S(10);
+        text_w(g_ui.f_small, C_FAINT, rect(nr.left, ny + S(3), tw, S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
+        y = ny + S(22);
+    } else {
+        if (g_ui.hover_msg == i) {
+            SYSTEMTIME st = local_time(m->id);
+            wchar_t clock[16];
+            GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, NULL, clock, ARRAYSIZE(clock));
+            text_w(g_ui.f_small, C_FAINT, rect(x0, y + S(3), S(64), S(18)), clock, -1, DT_CENTER | DT_SINGLELINE);
+        }
+        y += S(2);
+    }
+    if (m->text.len) {
+        body = utf8_to_wide(m->text.data, m->text.len);
+        text_w(g_ui.f_body, C_INK, rect(tx, y, tw, S(4000)), body, -1, DT_LEFT | DT_WORDBREAK | DT_EDITCONTROL);
+        mem_free(body);
+    }
+}
+
+static void paint_messages(RECT rc, const char *name)
+{
+    RECT a = message_area();
+    int x0 = a.left, w = a.right - a.left;
+    int y = a.bottom + g_ui.msg_scroll - S(16);
+    HRGN clip;
+
+    if (g_ui.msgs_loading && !g_ui.nmsgs) {
+        text(g_ui.f_body, C_MUTED, a, "Loading messages\xE2\x80\xA6", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    if (g_ui.msgs_status) {
+        text(g_ui.f_body, C_MUTED, a,
+             g_ui.msgs_status == 403 ? "You do not have access to this channel." : "Could not load the messages.",
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    (void)rc;
+    clip = CreateRectRgn(a.left, a.top, a.right, a.bottom);
+    gfx_end(g_ui.g);
+    SelectClipRgn(g_ui.back, clip);
+    g_ui.g = gfx_begin(g_ui.back);
+
+    for (int i = g_ui.nmsgs; i-- > 0;) {
+        int h = msg_height(&g_ui.msgs[i]);
+        y -= h;
+        if (y + h < a.top)
+            break;
+        if (y < a.bottom)
+            paint_message(i, x0, y, w);
+    }
+    if (!g_ui.msgs_has_more && y > a.top - S(WELCOME_H))
+        paint_welcome(x0, y - S(WELCOME_H) + S(24), w, name, 0);
+
+    gfx_end(g_ui.g);
+    SelectClipRgn(g_ui.back, NULL);
+    DeleteObject(clip);
+    g_ui.g = gfx_begin(g_ui.back);
+
+    /* Scrollbar */
+    {
+        int content = messages_height(), view = a.bottom - a.top;
+        if (content > view) {
+            int th = view * view / content, ty;
+            if (th < S(32))
+                th = S(32);
+            ty = a.top + (view - th) - (view - th) * g_ui.msg_scroll / (content - view);
+            gfx_round_rect(g_ui.g, a.right - S(10), ty, S(6), th, S(3), 0xFF2A2A2A);
+        }
+    }
+}
+
 static void paint_main(RECT rc)
 {
     int x0 = S(RAIL_W + SIDE_W), w = rc.right - x0;
@@ -659,9 +1149,7 @@ static void paint_main(RECT rc)
     if (g_ui.model && g_ui.channel >= 0) {
         const channel_t *c = chan(g_ui.channel);
         const char *name = model_str(g_ui.model, c->name);
-        int voice = c->type == CH_VOICE || c->type == CH_STAGE;
-        int by = rc.bottom - S(24) - S(44) - S(24) - S(170);
-        char title[160];
+        int voice = is_voice_type(c->type);
 
         if (voice)
             text_w(g_ui.f_icon, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), ICON_VOLUME, -1,
@@ -671,28 +1159,19 @@ static void paint_main(RECT rc)
         text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, w - S(62), S(HEADER_H)), name,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        /* Start-of-channel welcome, like the top of an empty history. */
-        gfx_circle(g_ui.g, x0 + S(24), by, S(68), ARGB(C_ITEM));
-        if (voice)
-            text_w(g_ui.f_icon_big, C_INK, rect(x0 + S(24), by, S(68), S(68)), ICON_VOLUME, -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        else
-            text(g_ui.f_title, C_INK, rect(x0 + S(24), by, S(68), S(68)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        wsprintfA(title, "Welcome to %s%.120s", voice ? "" : "#", name);
-        text(g_ui.f_title, C_INK, rect(x0 + S(24), by + S(84), w - S(48), S(32)), title,
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        text(g_ui.f_body, C_MUTED, rect(x0 + S(24), by + S(122), w - S(48), S(24)),
-             voice ? "Voice channels are not supported yet." : "Reading and sending messages arrives in the next version.",
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (voice) {
+            paint_welcome(x0 + S(8), rc.bottom - S(24) - S(WELCOME_H), w, name, 1);
+            return;
+        }
+        paint_messages(rc, name);
 
-        /* Composer, not wired yet. */
-        if (!voice) {
-            char hint[160];
-            int cy = rc.bottom - S(24) - S(44);
-            gfx_round_rect(g_ui.g, x0 + S(16), cy, w - S(32), S(44), S(10), 0xFF1F1F1F);
-            wsprintfA(hint, "Message #%.120s", name);
-            text(g_ui.f_body, C_FAINT, rect(x0 + S(32), cy, w - S(64), S(44)), hint,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        /* Composer frame; the edit control sits inside it. */
+        {
+            int cy = rc.bottom - S(24) - S(COMPOSER_H);
+            gfx_round_rect(g_ui.g, x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
+            if (g_ui.send_error.len)
+                text(g_ui.f_small, C_AMBER, rect(x0 + S(20), cy - S(20), w - S(40), S(18)), g_ui.send_error.data,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     } else {
         int unit = S(4);
@@ -703,6 +1182,25 @@ static void paint_main(RECT rc)
         text(g_ui.f_body, C_MUTED, rect(x0, y + S(84), w, S(24)),
              "Native, tiny, and asleep until something happens.", DT_CENTER | DT_SINGLELINE);
     }
+}
+
+/* Hit test for message hover: index of the message under y, or -1. */
+static int message_at(int x, int y)
+{
+    RECT a = message_area();
+    int yy = a.bottom + g_ui.msg_scroll - S(16);
+
+    if (!open_is_text() || x < a.left || y < a.top || y >= a.bottom)
+        return -1;
+    for (int i = g_ui.nmsgs; i-- > 0;) {
+        int h = msg_height(&g_ui.msgs[i]);
+        yy -= h;
+        if (y >= yy && y < yy + h)
+            return i;
+        if (yy < a.top)
+            break;
+    }
+    return -1;
 }
 
 static void paint_tooltip(void)
@@ -800,6 +1298,8 @@ static void make_fonts(void)
     g_ui.f_icon_big = make_font(L"Segoe MDL2 Assets", 32, FW_NORMAL);
     g_ui.f_initial = make_font(L"Segoe UI", 17, FW_SEMIBOLD);
     g_ui.f_initial_small = make_font(L"Segoe UI", 13, FW_SEMIBOLD);
+    if (g_ui.composer)
+        SendMessageW(g_ui.composer, WM_SETFONT, (WPARAM)g_ui.f_body, TRUE);
 }
 
 static HICON make_icon(int px)
@@ -836,6 +1336,56 @@ static HICON make_icon(int px)
 
 /* ---- Selection ---- */
 
+static void place_composer(void)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), show = g_ui.view == VIEW_APP && open_is_text() && !g_ui.msgs_status;
+
+    GetClientRect(g_ui.wnd, &rc);
+    if (show) {
+        int cy = rc.bottom - S(24) - S(COMPOSER_H);
+        int eh = S(22);
+        MoveWindow(g_ui.composer, x0 + S(32), cy + (S(COMPOSER_H) - eh) / 2, rc.right - x0 - S(64), eh, TRUE);
+    }
+    ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
+}
+
+static void open_channel(int index)
+{
+    const channel_t *c;
+    wchar_t *hint;
+    char text[160];
+
+    g_ui.channel = index;
+    free_messages();
+    g_ui.msg_scroll = 0;
+    g_ui.msgs_status = 0;
+    g_ui.msgs_older_loading = 0;
+    g_ui.hover_msg = -1;
+    sb_clear(&g_ui.send_error);
+    g_ui.msgs_channel[0] = 0;
+    if (index < 0 || !g_ui.model || is_voice_type(chan(index)->type)) {
+        g_ui.msgs_loading = 0;
+        app_open_channel("");
+        place_composer();
+        return;
+    }
+    c = chan(index);
+    lstrcpynA(g_ui.msgs_channel, c->id, sizeof g_ui.msgs_channel);
+    g_ui.msgs_loading = 1;
+    g_ui.msgs_has_more = 1;
+    app_open_channel(c->id);
+    app_fetch_messages(c->id, NULL);
+
+    wsprintfA(text, "Message #%.120s", model_str(g_ui.model, c->name));
+    hint = utf8_to_wide(text, lstrlenA(text));
+    SendMessageW(g_ui.composer, EM_SETCUEBANNER, TRUE, (LPARAM)hint);
+    mem_free(hint);
+    SetWindowTextW(g_ui.composer, L"");
+    place_composer();
+}
+
+
 static void select_guild(int i)
 {
     if (!g_ui.model)
@@ -851,6 +1401,7 @@ static void select_guild(int i)
                 break;
             }
     }
+    open_channel(g_ui.channel);
     redraw();
 }
 
@@ -867,9 +1418,9 @@ static void on_click(int kind, int index)
         if (chan(index)->type == CH_CATEGORY) {
             g_ui.collapsed[index] ^= 1;
             clamp_scroll();
-        } else {
-            g_ui.channel = index;
+        } else if (index != g_ui.channel) {
             g_ui.last_channel[g_ui.guild] = index;
+            open_channel(index);
         }
         redraw();
         break;
@@ -895,7 +1446,8 @@ static void set_model(model_t *m)
     for (unsigned i = 0; i < m->nguilds; i++)
         g_ui.last_channel[i] = -1;
     g_ui.collapsed = mem_alloc((size_t)m->nchannels + 1);
-    g_ui.guild = g_ui.channel = -1;
+    g_ui.guild = -1;
+    open_channel(-1);
     g_ui.rail_scroll = g_ui.side_scroll = 0;
 }
 
@@ -906,7 +1458,8 @@ static void clear_session(void)
         g_ui.model = NULL;
     }
     images_clear();
-    g_ui.guild = g_ui.channel = -1;
+    g_ui.guild = -1;
+    open_channel(-1);
     g_ui.hover_kind = HIT_NONE;
     sb_clear(&g_ui.account);
 }
@@ -917,6 +1470,12 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
 {
     sb_t *p = (sb_t *)lp;
     const char *s = p && p->data ? p->data : "";
+
+    if (msg == UI_MESSAGES) {
+        on_batch((msg_batch_t *)lp);
+        redraw();
+        return;
+    }
 
     switch (msg) {
     case UI_QR:
@@ -947,6 +1506,7 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         set_text(&g_ui.status, "Connecting\xE2\x80\xA6");
         g_ui.disconnected = 0;
         g_ui.view = VIEW_APP;
+        place_composer();
         break;
     case UI_READY:
         set_model((model_t *)lp);
@@ -958,6 +1518,9 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         g_ui.disconnected = 1;
         set_text(&g_ui.status, s);
         g_ui.view = VIEW_APP;
+        break;
+    case UI_SEND_FAILED:
+        set_text(&g_ui.send_error, s);
         break;
     case UI_IMAGE: {
         image_t *im = image_find(s);
@@ -988,6 +1551,7 @@ void ui_show_login(void)
     set_text(&g_ui.status, "");
     g_ui.disconnected = 0;
     g_ui.view = VIEW_LOGIN;
+    place_composer();
     redraw();
 }
 
@@ -995,16 +1559,63 @@ void ui_show_loading(const char *s)
 {
     set_text(&g_ui.status, s);
     g_ui.view = VIEW_LOADING;
+    place_composer();
     redraw();
+}
+
+/* ---- Composer ---- */
+
+static void send_composer(void)
+{
+    int n = GetWindowTextLengthW(g_ui.composer);
+    wchar_t *w;
+    sb_t text = {0};
+    size_t a = 0, b;
+
+    if (n <= 0 || !open_is_text())
+        return;
+    w = mem_alloc(((size_t)n + 1) * sizeof(wchar_t));
+    GetWindowTextW(g_ui.composer, w, n + 1);
+    wide_to_utf8(w, (size_t)n, &text);
+    mem_free(w);
+    b = text.len;
+    while (a < b && (text.data[a] == ' ' || text.data[a] == '	'))
+        a++;
+    while (b > a && (text.data[b - 1] == ' ' || text.data[b - 1] == '	'))
+        b--;
+    if (b > a) {
+        text.data[b] = 0;
+        sb_clear(&g_ui.send_error);
+        app_send_message(g_ui.msgs_channel, text.data + a);
+        SetWindowTextW(g_ui.composer, L"");
+        g_ui.msg_scroll = 0;
+        redraw();
+    }
+    sb_free(&text);
+}
+
+static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_CHAR && wp == VK_RETURN) {
+        send_composer();
+        return 0;
+    }
+    if (msg == WM_MOUSEWHEEL)
+        return SendMessageW(g_ui.wnd, msg, wp, lp);
+    return CallWindowProcW(g_ui.composer_proc, h, msg, wp, lp);
 }
 
 /* ---- Window procedure ---- */
 
 static void update_hover(int x, int y)
 {
-    int kind, index;
+    int kind, index, m = message_at(x, y);
 
     hit_test(x, y, &kind, &index);
+    if (m != g_ui.hover_msg) {
+        g_ui.hover_msg = m;
+        redraw();
+    }
     if (kind != g_ui.hover_kind || index != g_ui.hover_index) {
         g_ui.hover_kind = kind;
         g_ui.hover_index = index;
@@ -1019,13 +1630,23 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         g_ui.wnd = wnd;
         g_ui.dpi = GetDpiForWindow(wnd);
+        g_ui.b_composer = CreateSolidBrush(RGB(0x1F, 0x1F, 0x1F));
+        g_ui.composer = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, wnd, NULL, NULL, NULL);
+        g_ui.composer_proc = (WNDPROC)SetWindowLongPtrW(g_ui.composer, GWLP_WNDPROC, (LONG_PTR)composer_proc);
+        SendMessageW(g_ui.composer, EM_LIMITTEXT, 2000, 0);
         make_fonts();
         img_init(wnd, UI_IMAGE);
         return 0;
     case WM_SIZE:
         clamp_scroll();
+        clamp_msg_scroll();
+        place_composer();
         redraw();
         return 0;
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, GDI(C_INK));
+        SetBkColor((HDC)wp, RGB(0x1F, 0x1F, 0x1F));
+        return (LRESULT)g_ui.b_composer;
     case WM_GETMINMAXINFO:
         ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(940, GetDpiForWindow(wnd), 96);
         ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(620, GetDpiForWindow(wnd), 96);
@@ -1076,10 +1697,15 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         ScreenToClient(wnd, &pt);
         if (g_ui.view != VIEW_APP)
             return 0;
-        if (pt.x < S(RAIL_W))
+        if (pt.x < S(RAIL_W)) {
             g_ui.rail_scroll += delta;
-        else if (pt.x < S(RAIL_W + SIDE_W))
+        } else if (pt.x < S(RAIL_W + SIDE_W)) {
             g_ui.side_scroll += delta;
+        } else if (open_is_text()) {
+            g_ui.msg_scroll -= delta;
+            clamp_msg_scroll();
+            maybe_load_older();
+        }
         clamp_scroll();
         update_hover(pt.x, pt.y);
         redraw();
@@ -1092,7 +1718,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_IMAGE) {
+        if (msg >= UI_QR && msg <= UI_SEND_FAILED) {
             on_worker(msg, wp, lp);
             return 0;
         }

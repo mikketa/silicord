@@ -7,6 +7,7 @@
 #include "json.h"
 #include "mem.h"
 #include "model.h"
+#include "msg.h"
 #include "ra.h"
 #include "sb.h"
 #include "ui.h"
@@ -20,6 +21,8 @@ static HANDLE g_login_wake;
 static volatile LONG g_login_stop;
 static HANDLE g_session_thread;
 static volatile LONG g_session_id;   /* bumped to silence a session that is being stopped */
+static CRITICAL_SECTION g_open_lock;
+static char g_open_channel[24];     /* live messages are forwarded for this channel only */
 
 static void log_line(const char *prefix, const char *text)
 {
@@ -206,6 +209,37 @@ static void log_ready_shape(json_t d)
         log_keys("user:", v);
 }
 
+static int is_open(const char *channel_id)
+{
+    int open;
+
+    EnterCriticalSection(&g_open_lock);
+    open = g_open_channel[0] && lstrcmpA(g_open_channel, channel_id) == 0;
+    LeaveCriticalSection(&g_open_lock);
+    return open;
+}
+
+static void on_dispatch(void *ctx, json_t t, json_t d)
+{
+    session_t *s = ctx;
+    int kind;
+    msg_batch_t *b;
+
+    if (json_str_eq(t, "MESSAGE_CREATE"))
+        kind = BATCH_NEW;
+    else if (json_str_eq(t, "MESSAGE_UPDATE"))
+        kind = BATCH_UPDATE;
+    else if (json_str_eq(t, "MESSAGE_DELETE"))
+        kind = BATCH_DELETE;
+    else
+        return;
+    b = msg_batch_one(d, kind);
+    if (b->n && current(s) && is_open(b->channel_id))
+        ui_post_batch(b);
+    else
+        msg_batch_free(b);
+}
+
 static void on_ready(void *ctx, json_t d)
 {
     session_t *s = ctx;
@@ -238,7 +272,7 @@ static DWORD check_token(const char *token, sb_t *name)
 static DWORD WINAPI session_main(LPVOID arg)
 {
     session_t *s = arg;
-    gw_events_t ev = {s, on_gw_status, on_ready};
+    gw_events_t ev = {s, on_gw_status, on_ready, on_dispatch};
     sb_t name = {0}, text = {0};
     DWORD status = check_token(s->token.data, &name);
 
@@ -294,6 +328,105 @@ static void start_session(void)
     g_session_thread = CreateThread(NULL, 0, session_main, s, 0, NULL);
 }
 
+/* ---- Messages over REST ---- */
+
+typedef struct {
+    sb_t token;
+    sb_t text;
+    char channel[24];
+    char before[24];
+} rest_job_t;
+
+static rest_job_t *new_job(const char *channel_id)
+{
+    rest_job_t *j = mem_alloc(sizeof *j);
+
+    sb_addn(&j->token, g_token.data, g_token.len);
+    lstrcpynA(j->channel, channel_id, sizeof j->channel);
+    return j;
+}
+
+static void free_job(rest_job_t *j)
+{
+    sb_free(&j->token);
+    sb_free(&j->text);
+    mem_free(j);
+}
+
+static DWORD WINAPI fetch_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    msg_batch_t *b = NULL;
+    json_t root;
+    char path[128];
+    int kind = j->before[0] ? BATCH_OLDER : BATCH_HISTORY;
+
+    if (j->before[0])
+        wsprintfA(path, "/channels/%s/messages?limit=50&before=%s", j->channel, j->before);
+    else
+        wsprintfA(path, "/channels/%s/messages?limit=50", j->channel);
+    if (http_request("GET", path, j->token.data, NULL, 0, &resp) && resp.status == 200 &&
+        json_parse(resp.body.data, resp.body.len, &root))
+        b = msg_batch_from_array(root, kind, j->channel, 50);
+    if (!b) {
+        b = mem_alloc(sizeof *b);
+        b->kind = kind;
+        lstrcpynA(b->channel_id, j->channel, sizeof b->channel_id);
+        b->status = resp.status ? (int)resp.status : -1;
+    }
+    lstrcpynA(b->before, j->before, sizeof b->before);
+    ui_post_batch(b);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+static DWORD WINAPI send_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t body = {0};
+    json_t root;
+    char path[96];
+    FILETIME ft;
+    ULARGE_INTEGER now;
+    unsigned long long nonce;
+
+    /* A snowflake for now: lets Discord drop duplicates if the request is retried. */
+    GetSystemTimeAsFileTime(&ft);
+    now.LowPart = ft.dwLowDateTime;
+    now.HighPart = ft.dwHighDateTime;
+    nonce = (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22;
+
+    wsprintfA(path, "/channels/%s/messages", j->channel);
+    sb_add(&body, "{\"content\":");
+    sb_json_str(&body, j->text.data, j->text.len);
+    sb_add(&body, ",\"nonce\":\"");
+    sb_u64(&body, nonce);
+    sb_add(&body, "\",\"tts\":false}");
+
+    if (!http_request("POST", path, j->token.data, body.data, body.len, &resp)) {
+        ui_post(UI_SEND_FAILED, ui_text("Could not reach discord.com"));
+    } else if (resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root)) {
+        msg_batch_t *b = msg_batch_one(root, BATCH_NEW);
+        ui_post_batch(b);
+    } else {
+        char text[96];
+        if (resp.status == 429)
+            lstrcpyA(text, "You are sending messages too fast");
+        else if (resp.status == 403)
+            lstrcpyA(text, "You cannot send messages in this channel");
+        else
+            wsprintfA(text, "Message not sent (HTTP %u)", resp.status);
+        ui_post(UI_SEND_FAILED, ui_text(text));
+    }
+    sb_free(&body);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
 /* ---- Called by the UI ---- */
 
 void app_login_token(const char *token)
@@ -316,6 +449,30 @@ void app_logout(void)
 void app_reconnect(void)
 {
     start_session();
+}
+
+void app_open_channel(const char *channel_id)
+{
+    EnterCriticalSection(&g_open_lock);
+    lstrcpynA(g_open_channel, channel_id ? channel_id : "", sizeof g_open_channel);
+    LeaveCriticalSection(&g_open_lock);
+}
+
+void app_fetch_messages(const char *channel_id, const char *before)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    if (before)
+        lstrcpynA(j->before, before, sizeof j->before);
+    CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
+}
+
+void app_send_message(const char *channel_id, const char *text)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    sb_add(&j->text, text);
+    CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
 }
 
 void app_quit(void)
@@ -374,6 +531,7 @@ void entry(void)
         ExitProcess(1);
     }
     g_login_wake = CreateEventW(NULL, TRUE, FALSE, NULL);
+    InitializeCriticalSection(&g_open_lock);
 
     ShowWindow(ui_create(GetModuleHandleW(NULL)), SW_SHOWDEFAULT);
     if (cred_load(&g_token)) {
