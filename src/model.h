@@ -32,6 +32,7 @@ typedef struct {
     int sees_all;       /* owner, administrator, or our roles are unknown */
     unsigned my_roles;  /* comma-separated role ids */
     unsigned roles;     /* packed role list, read with model_role_next() */
+    unsigned emojis;    /* packed custom emoji list, read with model_emoji_next() */
 } guild_t;
 
 typedef struct {
@@ -69,8 +70,8 @@ void model_free(model_t *m);
 
 /*
  * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, GUILD_CREATE/UPDATE/DELETE,
- * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_MEMBER_UPDATE for us). Returns a new
- * model, or NULL when nothing changed.
+ * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_EMOJIS_UPDATE, GUILD_MEMBER_UPDATE for
+ * us). Returns a new model, or NULL when nothing changed.
  * `m` is left untouched; read state carries over by channel id.
  */
 model_t *model_apply(const model_t *m, const char *event, json_t d);
@@ -93,6 +94,16 @@ typedef struct {
 
 /* Iterates the roles of guild g: start with *cursor = 0; returns 0 at the end. */
 int model_role_next(const model_t *m, int g, unsigned *cursor, model_role_t *out);
+typedef struct {
+    char id[24];
+    int animated;
+    const char *name;
+    int name_len;
+} model_emoji_t;
+
+/* Iterates the custom emoji of guild g: start with *cursor = 0; returns 0 at the end. */
+int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out);
+
 /* Color of the highest colored role among `roles` (comma-separated ids), 0 if none. */
 unsigned model_role_color(const model_t *m, int g, const char *roles);
 

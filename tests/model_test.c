@@ -111,6 +111,28 @@ static void test_updates(const model_t *m)
     model_free(n);
 }
 
+static void test_emojis(const model_t *m)
+{
+    model_t *a = apply(m, "GUILD_EMOJIS_UPDATE", "{\"guild_id\":\"1\",\"emojis\":["
+                                               "{\"id\":\"70\",\"name\":\"pog\",\"animated\":false},"
+                                               "{\"id\":\"71\",\"name\":\"dance\",\"animated\":true},"
+                                               "{\"id\":\"72\",\"name\":\"gone\",\"available\":false}]}");
+    model_emoji_t e;
+    unsigned cursor = 0;
+    int n = 0, ok = 1;
+
+    check(a != NULL, "emoji update applies");
+    while (a && model_emoji_next(a, 0, &cursor, &e)) {
+        if (n == 0)
+            ok &= lstrcmpA(e.id, "70") == 0 && !e.animated && e.name_len == 3;
+        if (n == 1)
+            ok &= lstrcmpA(e.id, "71") == 0 && e.animated && e.name_len == 5;
+        n++;
+    }
+    check(n == 2 && ok, "custom emoji listed, unavailable ones dropped");
+    model_free(a);
+}
+
 static void test_roles(const model_t *m)
 {
     model_t *a, *b, *c;
@@ -190,6 +212,7 @@ void entry(void)
 
     test_updates(m);
     test_roles(m);
+    test_emojis(m);
     model_free(m);
     finish();
 }

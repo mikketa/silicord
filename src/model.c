@@ -362,6 +362,72 @@ unsigned model_role_color(const model_t *m, int g, const char *roles)
     return color;
 }
 
+/* ---- Custom emoji ----
+ * Packed like roles, one per line: "id animated name\n". Unavailable ones are left out.
+ */
+
+static unsigned pack_emojis(model_t *m, json_t list)
+{
+    sb_t packed = {0};
+    json_iter_t it;
+    json_t e, v;
+    unsigned off;
+
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &e)) {
+        char id[24] = "";
+        sb_t name = {0};
+        if (!json_get(e, "id", &v) || (json_get(e, "available", &v) && json_type(v) == JSON_FALSE))
+            continue;
+        json_get(e, "id", &v);
+        json_raw(v, id, sizeof id);
+        if (json_get(e, "name", &v))
+            json_str(v, &name);
+        if (!name.len) {
+            sb_free(&name);
+            continue;
+        }
+        sb_add(&packed, id);
+        sb_add(&packed, json_get(e, "animated", &v) && is_true(v) ? " 1 " : " 0 ");
+        sb_addn(&packed, name.data, name.len);
+        sb_add(&packed, "\n");
+        sb_free(&name);
+    }
+    off = (unsigned)m->strings.len;
+    if (packed.len)
+        sb_addn(&m->strings, packed.data, packed.len);
+    sb_addn(&m->strings, "", 1);
+    sb_free(&packed);
+    return off;
+}
+
+int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
+{
+    const char *base, *p;
+    int k = 0;
+
+    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].emojis)
+        return 0;
+    base = m->strings.data + m->guilds[g].emojis;
+    p = base + *cursor;
+    if (!*p)
+        return 0;
+    while (p[k] && p[k] != ' ' && k < (int)sizeof out->id - 1) {
+        out->id[k] = p[k];
+        k++;
+    }
+    out->id[k] = 0;
+    p += k + (p[k] == ' ');
+    out->animated = *p == '1';
+    p += 2;
+    out->name = p;
+    while (*p && *p != '\n')
+        p++;
+    out->name_len = (int)(p - out->name);
+    *cursor = (unsigned)(p - base) + (*p == '\n');
+    return 1;
+}
+
 /* Base permissions: @everyone plus our roles. Owners and administrators see everything. */
 static void guild_perms(model_t *m, guild_t *out, json_t g, const role_id_t *mine, int nmine)
 {
@@ -513,6 +579,8 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
         out->name = add_str(m, v);
     if (field(g, "roles", &v))
         out->roles = pack_roles(m, v);
+    if (field(g, "emojis", &v))
+        out->emojis = pack_emojis(m, v);
     nmine = my_roles(d, g, index, m->user_id, mine);
     if (nmine < 0 && !from_ready)
         nmine = 0; /* just joined: no roles yet */
@@ -1118,8 +1186,30 @@ static model_t *apply_role(const model_t *m, json_t d, int deleted)
     return n;
 }
 
+static model_t *apply_emojis(const model_t *m, json_t d)
+{
+    json_t v, list;
+    char gid[24] = "";
+    unsigned cap = 0;
+    int gi;
+    model_t *n;
+
+    if (json_get(d, "guild_id", &v))
+        json_raw(v, gid, sizeof gid);
+    if ((gi = model_find_guild(m, gid)) < 0 || !json_get(d, "emojis", &list))
+        return NULL;
+    n = clone_empty(m, 0);
+    for (unsigned g = 0; g < m->nguilds; g++)
+        copy_guild(n, &cap, m, g, NULL);
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    n->guilds[gi].emojis = pack_emojis(n, list);
+    return n;
+}
+
 model_t *model_apply(const model_t *m, const char *event, json_t d)
 {
+    if (str_eq(event, "GUILD_EMOJIS_UPDATE"))
+        return apply_emojis(m, d);
     if (str_eq(event, "GUILD_ROLE_CREATE") || str_eq(event, "GUILD_ROLE_UPDATE"))
         return apply_role(m, d, 0);
     if (str_eq(event, "GUILD_ROLE_DELETE"))
