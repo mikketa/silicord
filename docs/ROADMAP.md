@@ -21,7 +21,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 ## 2. Text client (console)
 
 - [x] List servers and channels, hiding channels you cannot see
-- [ ] List DMs
+- [x] Direct messages and group DMs on the home screen, most recent first
 - [x] Live messages in the open channel (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `MESSAGE_DELETE`)
 - [x] Send a message
 - [x] Load history, and older messages while scrolling up (`GET /channels/{id}/messages`)
