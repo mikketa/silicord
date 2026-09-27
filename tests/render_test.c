@@ -47,6 +47,25 @@ static int colorful(unsigned c)
     return hi - lo > 80;
 }
 
+/* 4x4 GIF: a red frame, then a blue one, 50 ms each. */
+static const unsigned char k_gif[] = {
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x04, 0x00, 0x04, 0x00, 0x80, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0x21, 0xF9, 0x04, 0x04, 0x05, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00,
+    0x00, 0x02, 0x04, 0x84, 0x8F, 0x09, 0x05, 0x00, 0x21, 0xF9, 0x04, 0x04, 0x05, 0x00, 0x00, 0x00, 0x2C, 0x00,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x02, 0x04, 0x8C, 0x8F, 0x19, 0x05, 0x00, 0x3B,
+};
+
+static unsigned draw_gif(HDC dc, r_image_t *gif)
+{
+    while (r_begin(dc, W, H)) {
+        r_fill(0, 0, W, H, 0xFF101010);
+        r_image(gif, 350, 200, 20, 20, 0);
+        r_end(dc);
+    }
+    GdiFlush();
+    return px(360, 210);
+}
+
 void entry(void)
 {
     BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), W, -H, 1, 32}};
@@ -93,5 +112,21 @@ void entry(void)
     check(any(10, 130, 60, 180, colorful), "emoji drawn in color");
     check(ch(px(5, 250), 16) > 0x80 && ch(px(5, 250), 16) < 0xA0 && ch(px(5, 270), 16) == ch(px(5, 250), 16),
           "translucent fill blends the same in both bands");
+
+    {
+        r_image_t *gif = r_image_decode(k_gif, sizeof k_gif, 0);
+        unsigned wait;
+        check(gif && r_image_animated(gif) && r_image_frame(gif) == 0, "GIF decodes as an animation");
+        check(gif && draw_gif(dc, gif) == 0xFF0000, "first frame is red");
+        wait = gif ? r_image_advance(gif, 1000) : 0;
+        check(wait > 0 && wait <= 50 && r_image_frame(gif) == 0, "the first frame stays for its delay");
+        if (gif)
+            r_image_advance(gif, 1060);
+        check(gif && r_image_frame(gif) == 1 && draw_gif(dc, gif) == 0x0000FF, "then the blue frame");
+        if (gif)
+            r_image_advance(gif, 1120);
+        check(gif && r_image_frame(gif) == 0 && draw_gif(dc, gif) == 0xFF0000, "and it loops");
+        r_image_free(gif);
+    }
     finish();
 }

@@ -36,8 +36,21 @@ struct r_font {
 
 struct r_image {
     UINT w, h;
-    BYTE *pixels; /* premultiplied BGRA */
+    BYTE *pixels; /* premultiplied BGRA; for animations, the composed current frame */
     unsigned average;
+    RECT drawn;   /* where it was drawn since r_image_drawn() */
+    /* Animation (GIF): the file, its decoder, and where we are. */
+    BYTE *file;
+    size_t file_n;
+    IWICImagingFactory *wic;
+    IWICStream *stream;
+    IWICBitmapDecoder *dec;
+    UINT frames, frame;
+    unsigned due;         /* GetTickCount() when the next frame is due */
+    UINT delay;           /* of the current frame, ms */
+    UINT disposal;        /* of the current frame */
+    RECT area;            /* of the current frame, in the canvas */
+    BYTE *saved;          /* canvas before the current frame, for disposal 3 */
 };
 
 static IDWriteFactory *g_dw;
@@ -52,7 +65,7 @@ static int g_tw, g_th;              /* band bitmap size */
 static DWRITE_TEXT_ANTIALIAS_MODE g_aa = DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE;
 
 /* Frame in progress. */
-static int g_active, g_w, g_h, g_y0, g_bh;
+static int g_active, g_w, g_h, g_y0, g_bh, g_y_end;
 static RECT g_clip[MAX_CLIP];
 static int g_nclip;
 static UINT32 *g_scratch;           /* saved pixels while drawing text */
@@ -166,12 +179,19 @@ static int ensure_target(int w, int h)
 extern "C" int r_begin(HDC dc, int w, int h)
 {
     if (!g_active) {
+        RECT clip;
         g_active = 1;
         g_y0 = 0;
+        g_y_end = h;
+        /* Only the bands the update region touches. */
+        if (GetClipBox(dc, &clip) != ERROR && clip.bottom > clip.top) {
+            g_y0 = clip.top / BAND * BAND;
+            g_y_end = clip.bottom < h ? clip.bottom : h;
+        }
     } else {
         g_y0 += BAND;
     }
-    if (g_y0 >= h || w <= 0 || !ensure_target(w, BAND)) {
+    if (g_y0 >= g_y_end || g_y0 >= h || w <= 0 || !ensure_target(w, BAND)) {
         /* Frame done: the text scratch can reach a band's size, do not keep it between frames. */
         mem_free(g_scratch);
         g_scratch = NULL;
@@ -414,10 +434,38 @@ static void draw_image(const r_image_t *img, float su, float sv, float sw, float
     }
 }
 
+static void note_drawn(r_image_t *img, int x, int y, int w, int h)
+{
+    RECT *d = &img->drawn;
+
+    if (d->right <= d->left) {
+        d->left = x;
+        d->top = y;
+        d->right = x + w;
+        d->bottom = y + h;
+    } else {
+        d->left = imin(d->left, x);
+        d->top = imin(d->top, y);
+        d->right = imax(d->right, x + w);
+        d->bottom = imax(d->bottom, y + h);
+    }
+}
+
 extern "C" void r_image(r_image_t *img, int x, int y, int w, int h, int radius)
 {
-    if (img)
+    if (img) {
         draw_image(img, 0, 0, (float)img->w, (float)img->h, x, y, w, h, radius);
+        if (img->frames > 1)
+            note_drawn(img, x, y, w, h);
+    }
+}
+
+extern "C" RECT r_image_drawn(r_image_t *img)
+{
+    RECT r = img->drawn;
+
+    img->drawn = RECT{0, 0, 0, 0};
+    return r;
 }
 
 extern "C" void r_image_cover(r_image_t *img, int x, int y, int w, int h, int radius)
@@ -432,6 +480,169 @@ extern "C" void r_image_cover(r_image_t *img, int x, int y, int w, int h, int ra
     draw_image(img, ((float)img->w - sw) / 2, ((float)img->h - sh) / 2, sw, sh, x, y, w, h, radius);
 }
 
+/* ---- Animation ---- */
+
+static UINT meta_uint(IWICMetadataQueryReader *q, const wchar_t *name, UINT fallback)
+{
+    PROPVARIANT v;
+    UINT out = fallback;
+
+    PropVariantInit(&v);
+    if (q && SUCCEEDED(q->GetMetadataByName(name, &v))) {
+        if (v.vt == VT_UI1)
+            out = v.bVal;
+        else if (v.vt == VT_UI2)
+            out = v.uiVal;
+        else if (v.vt == VT_UI4)
+            out = v.ulVal;
+    }
+    PropVariantClear(&v);
+    return out;
+}
+
+/* Composes frame `index` over the canvas, applying the previous frame's disposal first. */
+static int compose(r_image_t *img, UINT index)
+{
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICFormatConverter *conv = NULL;
+    IWICMetadataQueryReader *q = NULL;
+    UINT fw = 0, fh = 0, fx, fy;
+    BYTE *px = NULL;
+    int ok = 0;
+
+    if (index == 0) {
+        memset(img->pixels, 0, (size_t)img->w * img->h * 4);
+    } else if (img->disposal == 2) { /* restore to background: clear the previous frame's area */
+        for (LONG y = img->area.top; y < img->area.bottom; y++)
+            memset(img->pixels + ((size_t)y * img->w + img->area.left) * 4, 0, (size_t)(img->area.right - img->area.left) * 4);
+    } else if (img->disposal == 3 && img->saved) { /* restore to previous */
+        memcpy(img->pixels, img->saved, (size_t)img->w * img->h * 4);
+    }
+    if (FAILED(img->dec->GetFrame(index, &frame)))
+        return 0;
+    frame->GetMetadataQueryReader(&q);
+    fx = meta_uint(q, L"/imgdesc/Left", 0);
+    fy = meta_uint(q, L"/imgdesc/Top", 0);
+    img->delay = meta_uint(q, L"/grctlext/Delay", 10) * 10;
+    if (img->delay < 20)
+        img->delay = 100; /* like browsers */
+    img->disposal = meta_uint(q, L"/grctlext/Disposal", 0);
+    if (img->disposal == 3) {
+        if (!img->saved)
+            img->saved = (BYTE *)mem_alloc((size_t)img->w * img->h * 4);
+        memcpy(img->saved, img->pixels, (size_t)img->w * img->h * 4);
+    }
+    if (SUCCEEDED(frame->GetSize(&fw, &fh)) && SUCCEEDED(img->wic->CreateFormatConverter(&conv)) &&
+        SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0,
+                                   WICBitmapPaletteTypeCustom)) &&
+        fw && fh && fw <= 4096 && fh <= 4096) {
+        px = (BYTE *)mem_alloc((size_t)fw * fh * 4);
+        if (SUCCEEDED(conv->CopyPixels(NULL, fw * 4, fw * fh * 4, px))) {
+            /* Source-over onto the canvas, clipped to it. */
+            for (UINT y = 0; y < fh && fy + y < img->h; y++)
+                for (UINT x = 0; x < fw && fx + x < img->w; x++) {
+                    BYTE *s = px + ((size_t)y * fw + x) * 4, *d = img->pixels + ((size_t)(fy + y) * img->w + fx + x) * 4;
+                    unsigned a = s[3];
+                    if (a == 255) {
+                        d[0] = s[0], d[1] = s[1], d[2] = s[2], d[3] = 255;
+                    } else if (a) {
+                        for (int c = 0; c < 4; c++)
+                            d[c] = (BYTE)(s[c] + d[c] * (255 - a) / 255);
+                    }
+                }
+            img->area.left = (LONG)fx;
+            img->area.top = (LONG)fy;
+            img->area.right = (LONG)(fx + fw < img->w ? fx + fw : img->w);
+            img->area.bottom = (LONG)(fy + fh < img->h ? fy + fh : img->h);
+            ok = 1;
+        }
+        mem_free(px);
+    }
+    if (conv)
+        conv->Release();
+    if (q)
+        q->Release();
+    frame->Release();
+    return ok;
+}
+
+/* Keeps an animated GIF playable; called by the decoder with its objects. Returns 1 when adopted. */
+static int adopt_animation(r_image_t *img, IWICImagingFactory *wic, const void *data, size_t n)
+{
+    IWICMetadataQueryReader *q = NULL;
+    GUID fmt;
+    UINT frames = 0, cw, ch;
+
+    if (!img || n > (8u << 20))
+        return 0;
+    /* A decoder of our own over our own copy of the file: the caller's buffer goes away. */
+    img->file = (BYTE *)mem_alloc(n);
+    memcpy(img->file, data, n);
+    img->file_n = n;
+    if (FAILED(wic->CreateStream(&img->stream)) || FAILED(img->stream->InitializeFromMemory(img->file, (DWORD)n)) ||
+        FAILED(wic->CreateDecoderFromStream(img->stream, NULL, WICDecodeMetadataCacheOnDemand, &img->dec)) ||
+        FAILED(img->dec->GetContainerFormat(&fmt)) || !InlineIsEqualGUID(fmt, GUID_ContainerFormatGif) || /* no memcmp without the CRT */
+        FAILED(img->dec->GetFrameCount(&frames)) || frames < 2)
+        goto fail;
+    img->dec->GetMetadataQueryReader(&q);
+    cw = meta_uint(q, L"/logscrdesc/Width", 0);
+    ch = meta_uint(q, L"/logscrdesc/Height", 0);
+    if (q)
+        q->Release();
+    if (!cw || !ch || cw > 1024 || ch > 1024)
+        goto fail;
+    /* The canvas is the GIF's logical screen, not the first frame's size. */
+    mem_free(img->pixels);
+    img->w = cw;
+    img->h = ch;
+    img->pixels = (BYTE *)mem_alloc((size_t)cw * ch * 4);
+    wic->AddRef();
+    img->wic = wic;
+    img->frames = frames;
+    img->frame = 0;
+    if (!compose(img, 0)) {
+        img->frames = 0;
+        return 0;
+    }
+    return 1;
+fail:
+    if (img->dec)
+        img->dec->Release();
+    if (img->stream)
+        img->stream->Release();
+    mem_free(img->file);
+    img->dec = NULL;
+    img->stream = NULL;
+    img->file = NULL;
+    img->file_n = 0;
+    return 0;
+}
+
+extern "C" int r_image_frame(const r_image_t *img)
+{
+    return img ? (int)img->frame : 0;
+}
+
+extern "C" int r_image_animated(const r_image_t *img)
+{
+    return img && img->frames > 1;
+}
+
+extern "C" unsigned r_image_advance(r_image_t *img, unsigned now)
+{
+    if (!img || img->frames < 2)
+        return 0;
+    if (!img->due)
+        img->due = now + img->delay;
+    if ((int)(now - img->due) >= 0) {
+        img->frame = (img->frame + 1) % img->frames;
+        if (!compose(img, img->frame))
+            img->frames = 0; /* broken file: stay on this frame */
+        img->due = now + img->delay;
+    }
+    return (int)(img->due - now) > 0 ? img->due - now : 1;
+}
+
 extern "C" int r_image_lost(const r_image_t *img)
 {
     (void)img;
@@ -440,7 +651,7 @@ extern "C" int r_image_lost(const r_image_t *img)
 
 extern "C" size_t r_image_bytes(const r_image_t *img)
 {
-    return img ? sizeof *img + (size_t)img->w * img->h * 4 : 0;
+    return img ? sizeof *img + (size_t)img->w * img->h * 4 * (img->saved ? 2 : 1) + img->file_n : 0;
 }
 
 extern "C" unsigned r_image_average(r_image_t *img)
@@ -1319,6 +1530,7 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
             img = NULL;
         } else {
             img->average = average_of(img);
+            adopt_animation(img, wic, data, n); /* GIFs with several frames play */
         }
     }
     if (conv)
@@ -1340,6 +1552,14 @@ extern "C" void r_image_free(r_image_t *img)
 {
     if (!img)
         return;
+    if (img->dec)
+        img->dec->Release();
+    if (img->stream)
+        img->stream->Release();
+    if (img->wic)
+        img->wic->Release();
+    mem_free(img->file);
+    mem_free(img->saved);
     mem_free(img->pixels);
     mem_free(img);
 }

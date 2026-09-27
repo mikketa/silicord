@@ -16,8 +16,9 @@ typedef struct r_image r_image_t;
 
 int r_init(void);
 /*
- * A frame is drawn in horizontal bands through one small bitmap. Repeat the
- * whole paint for each band; primitives outside it cost next to nothing:
+ * A frame is drawn in horizontal bands through one small bitmap, only over
+ * the part of `dc` that needs painting (its clip box). Repeat the whole paint
+ * for each band; primitives outside it cost next to nothing:
  *
  *     while (r_begin(dc, w, h)) { ...draw everything...; r_end(dc); }
  */
@@ -33,6 +34,17 @@ void r_circle(int x, int y, int d, unsigned argb);
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
 /* Whether the image must be decoded again before drawing (never, with this renderer). */
 int r_image_lost(const r_image_t *img);
+/*
+ * Animated GIFs keep their compressed data and one composed frame; the first
+ * frame shows until r_image_advance() moves on. It returns how many ms until
+ * the next frame is due (0 for still images). `now` is GetTickCount().
+ */
+int r_image_animated(const r_image_t *img);
+unsigned r_image_advance(r_image_t *img, unsigned now);
+/* Index of the frame shown, to tell whether r_image_advance() moved. */
+int r_image_frame(const r_image_t *img);
+/* Union of the rectangles the image was drawn into since the last call (empty if none). */
+RECT r_image_drawn(r_image_t *img);
 /* Memory the image holds, in bytes. */
 size_t r_image_bytes(const r_image_t *img);
 /* Same, but scaled to cover the rectangle and cropped around the center. */
