@@ -69,6 +69,9 @@ typedef struct {
     int height;
     int height_w;
     int grouped;
+    int first_new;       /* first unread one: the "NEW" line goes above it */
+    int mentions_me;     /* highlighted */
+    int mention_everyone;
 } msg_t;
 
 enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION };
