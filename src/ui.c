@@ -72,6 +72,7 @@ typedef struct {
     r_image_t *img;
     int failed;
     unsigned used;   /* paint that last drew it */
+    HWND wnd;        /* window that drew it, for animations */
 } image_t;
 
 /* Decoded images kept in memory; images off screen beyond this are dropped (the disk cache keeps them). */
@@ -167,7 +168,9 @@ typedef struct {
     image_t *images;
     int nimages, cap_images;
     unsigned frame;            /* paint counter, for the image cache */
+    HWND paint_wnd;            /* window being painted */
     int image_first;           /* requests jump the queue (message images) */
+    int anim_timer;
     int log_memory;
     LARGE_INTEGER frame_start, qpf;
 
@@ -303,6 +306,7 @@ static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_chann
 static void paint_status(int x, int y, int d, int status, unsigned bg);
 static void status_dot(int cx, int cy, int s, int status, unsigned bg);
 static presence_t *presence_find(const char *user);
+static void anim_schedule(void);
 static int friends_view(void);
 static void rel_store(json_t obj);
 static relation_t *rel_find(const char *id);
@@ -532,6 +536,9 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
     }
     if (im) {
         im->used = g_ui.frame;
+        im->wnd = g_ui.paint_wnd;
+        if (im->img && r_image_animated(im->img))
+            anim_schedule();
         return im->img;
     }
     if (g_ui.nimages == g_ui.cap_images) {
@@ -1730,10 +1737,11 @@ static emb_text_t *emb_text(msg_t *m, int slot, const sb_t *src, int width);
 static r_image_t *emoji_image(const char *id, int px)
 {
     char key[48], path[96];
-    const char *num = id[0] == 'a' ? id + 1 : id;
+    int animated = id[0] == 'a';
+    const char *num = animated ? id + 1 : id;
 
-    wsprintfA(key, "e:%.30s", num);
-    wsprintfA(path, "/emojis/%.30s.png?size=64", num);
+    wsprintfA(key, "e:%s%.30s", animated ? "a" : "", num);
+    wsprintfA(path, "/emojis/%.30s.%s?size=64", num, animated ? "gif" : "png");
     return image_get(key, path, px);
 }
 
@@ -2729,6 +2737,56 @@ static void paint_app(RECT rc)
     paint_confirm();
 }
 
+/* ---- Animations ---- */
+
+#define TIMER_ANIM 4
+
+static int anim_allowed(void)
+{
+    /* Only while the window is in front: nothing moves, nothing wakes up otherwise. */
+    return GetForegroundWindow() == g_ui.wnd && !IsIconic(g_ui.wnd);
+}
+
+static void anim_schedule(void)
+{
+    if (!g_ui.anim_timer && anim_allowed()) {
+        g_ui.anim_timer = 1;
+        SetTimer(g_ui.wnd, TIMER_ANIM, 40, NULL);
+    }
+}
+
+/* Moves visible animations on and repaints just where they are. */
+static void anim_tick(void)
+{
+    unsigned now = GetTickCount(), next = 1000;
+    int live = 0;
+
+    if (anim_allowed())
+        for (int i = 0; i < g_ui.nimages; i++) {
+            image_t *im = &g_ui.images[i];
+            int before;
+            unsigned wait;
+            if (!im->img || !r_image_animated(im->img) || g_ui.frame - im->used > 3 || !im->wnd || !IsWindow(im->wnd))
+                continue;
+            before = r_image_frame(im->img);
+            wait = r_image_advance(im->img, now);
+            live = 1;
+            if (wait < next)
+                next = wait;
+            if (r_image_frame(im->img) != before) {
+                RECT r = r_image_drawn(im->img);
+                if (r.right > r.left)
+                    InvalidateRect(im->wnd, &r, FALSE);
+            }
+        }
+    KillTimer(g_ui.wnd, TIMER_ANIM);
+    g_ui.anim_timer = 0;
+    if (live) {
+        g_ui.anim_timer = 1;
+        SetTimer(g_ui.wnd, TIMER_ANIM, next < 20 ? 20 : next, NULL);
+    }
+}
+
 static void paint(HWND wnd)
 {
     PAINTSTRUCT ps;
@@ -2737,6 +2795,7 @@ static void paint(HWND wnd)
 
     GetClientRect(wnd, &rc);
     g_ui.frame++;
+    g_ui.paint_wnd = wnd;
     QueryPerformanceCounter(&g_ui.frame_start);
     while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
         if (g_ui.view == VIEW_APP)
@@ -4370,6 +4429,7 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         HDC dc = BeginPaint(wnd, &ps);
         GetClientRect(wnd, &rc);
         g_ui.pop_frame = ++g_ui.frame;
+        g_ui.paint_wnd = wnd;
         QueryPerformanceCounter(&g_ui.frame_start);
         while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
             pop_render(1);
@@ -5470,6 +5530,8 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         RECT rc;
         HDC dc = BeginPaint(wnd, &ps);
         GetClientRect(wnd, &rc);
+        g_ui.paint_wnd = wnd;
+        g_ui.frame++;
         while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
             picker_paint();
             r_end(dc);
@@ -7068,6 +7130,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
+        if (wp == TIMER_ANIM) {
+            anim_tick();
+            return 0;
+        }
         if (wp == TIMER_FLASH) {
             KillTimer(wnd, TIMER_FLASH);
             g_ui.flash_id[0] = 0;
@@ -7090,6 +7156,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_ACTIVATE:
+        if (LOWORD(wp) != WA_INACTIVE)
+            redraw(); /* animations pick up again on the next paint */
         /* Coming back to the window counts as reading the open channel. */
         if (LOWORD(wp) != WA_INACTIVE && g_ui.model && g_ui.channel >= 0 &&
             (model_unread(g_ui.model, (unsigned)g_ui.channel) || chan(g_ui.channel)->mentions)) {
