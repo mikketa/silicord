@@ -18,10 +18,12 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: Run
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Size
         shell: pwsh
         run: |
-          ./build/silicord.exe
           $size = (Get-Item build/silicord.exe).Length
           "silicord.exe : **$size bytes**" >> $env:GITHUB_STEP_SUMMARY
 
