@@ -20,7 +20,10 @@ endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
 add_library(silicord_core STATIC
+  src/mem.c
   src/rt.c
+  src/sb.c
+  src/utf.c
   asm/str.asm
 )
 silicord_no_crt(silicord_core)
