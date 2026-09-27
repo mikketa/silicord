@@ -9,19 +9,20 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Console banner
 - [x] GitHub Actions CI
 
-## 1. Connection 🚧
+## 1. Connection ✅
 
 - [x] Token storage in the Windows Credential Manager (`CredWriteW` / `CredReadW`)
 - [x] HTTPS REST requests with WinHTTP (`GET /users/@me`)
 - [x] Allocation-free JSON reader (values are slices of the source buffer)
 - [x] QR code login through the mobile app (passkeys, 2FA and SMS are handled on the phone)
 - [x] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready
-- [ ] Automatic resume and reconnect (today the client exits on op 7 / op 9 or a missed heartbeat ack)
+- [x] Automatic reconnect with backoff, session resume, fresh identify when the session is gone
 
 ## 2. Text client (console)
 
 - [x] List servers and channels, hiding channels you cannot see
 - [x] Direct messages and group DMs on the home screen, most recent first
+- [x] Live changes: new conversations, channels and servers created, renamed, moved or removed
 - [x] Live messages in the open channel (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `MESSAGE_DELETE`)
 - [x] Send a message
 - [x] Load history, and older messages while scrolling up (`GET /channels/{id}/messages`)
@@ -42,7 +43,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [ ] Text rendering with GDI / DirectWrite
 - [ ] Mentions, replies, edit and delete
 - [x] Unread markers, mention badges, read sync with other devices
-- [x] Windows notifications for DMs and mentions (role mentions not yet)
+- [x] Windows notifications for DMs, mentions and role mentions
 - [ ] Executable icon from `assets/logo.svg`
 
 ## 5. Later
