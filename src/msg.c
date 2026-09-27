@@ -98,7 +98,8 @@ static void format_content(const char *s, size_t n, json_t mentions, sb_t *out)
             }
         }
         /* <:name:123> and <a:name:123> */
-        j = i + 1 + (i + 1 < n && s[i + 1] == 'a');
+        int animated = i + 1 < n && s[i + 1] == 'a';
+        j = i + 1 + animated;
         if (j < n && s[j] == ':') {
             size_t name0 = j + 1, k = name0;
             while (k < n && s[k] != ':' && s[k] != '>' && s[k] != ' ')
@@ -108,7 +109,13 @@ static void format_content(const char *s, size_t n, json_t mentions, sb_t *out)
                 while (d < n && is_digit(s[d]))
                     d++;
                 if (d < n && s[d] == '>' && d > k + 1) {
-                    sb_addn(out, s + name0 - 1, k - name0 + 2); /* ":name:" */
+                    sb_add(out, MD_EMOJI_OPEN);
+                    if (animated)
+                        sb_add(out, "a");
+                    sb_addn(out, s + k + 1, d - k - 1);
+                    sb_add(out, ":");
+                    sb_addn(out, s + name0, k - name0);
+                    sb_add(out, MD_EMOJI_CLOSE);
                     i = d + 1;
                     continue;
                 }
@@ -162,6 +169,170 @@ static void parse_reply(json_t obj, sb_t *out)
     sb_free(&raw);
 }
 
+static int get_sb(json_t obj, const char *key, sb_t *out)
+{
+    json_t v;
+
+    return json_get(obj, key, &v) && json_type(v) == JSON_STRING && json_str(v, out);
+}
+
+static int get_num(json_t obj, const char *key)
+{
+    json_t v;
+    long long n = 0;
+
+    return json_get(obj, key, &v) && json_int(v, &n) ? (int)n : 0;
+}
+
+static int starts_with(const sb_t *s, const char *prefix)
+{
+    size_t n = sc_strlen(prefix);
+
+    return s->len >= n && same(s->data, prefix, n);
+}
+
+static void parse_files(json_t list, msg_t *out)
+{
+    json_iter_t it;
+    json_t item, v;
+    size_t n = json_count(list);
+
+    if (!n)
+        return;
+    out->files = mem_alloc(n * sizeof *out->files);
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &item)) {
+        msg_file_t *f = &out->files[out->nfiles];
+        sb_t type = {0};
+        long long size = 0;
+
+        if (!get_sb(item, "filename", &f->name))
+            continue;
+        get_sb(item, "content_type", &type);
+        f->width = get_num(item, "width");
+        f->height = get_num(item, "height");
+        if (json_get(item, "size", &v))
+            json_int(v, &size);
+        f->size = size;
+        f->spoiler = starts_with(&f->name, "SPOILER_");
+        f->image = starts_with(&type, "image/") && f->width > 0 && f->height > 0;
+        /* Images go through the media proxy, which can resize them. */
+        if (!(f->image && get_sb(item, "proxy_url", &f->url)))
+            get_sb(item, "url", &f->url);
+        sb_free(&type);
+        out->nfiles++;
+    }
+}
+
+static void parse_media(json_t embed, const char *key, sb_t *url, int *w, int *h)
+{
+    json_t m;
+
+    if (!json_get(embed, key, &m) || json_type(m) != JSON_OBJECT)
+        return;
+    if (!get_sb(m, "proxy_url", url))
+        get_sb(m, "url", url);
+    *w = get_num(m, "width");
+    *h = get_num(m, "height");
+}
+
+static void parse_embeds(json_t list, msg_t *out)
+{
+    json_iter_t it, fit;
+    json_t item, v, field;
+    size_t n = json_count(list);
+
+    if (!n)
+        return;
+    out->embeds = mem_alloc(n * sizeof *out->embeds);
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &item)) {
+        msg_embed_t *e = &out->embeds[out->nembeds];
+        sb_t type = {0};
+        long long color;
+
+        get_sb(item, "type", &type);
+        if (json_get(item, "color", &v) && json_int(v, &color)) {
+            e->has_color = 1;
+            e->color = (unsigned)color & 0xFFFFFF;
+        }
+        if (json_get(item, "provider", &v))
+            get_sb(v, "name", &e->provider);
+        if (json_get(item, "author", &v))
+            get_sb(v, "name", &e->author);
+        if (json_get(item, "footer", &v))
+            get_sb(v, "text", &e->footer);
+        get_sb(item, "title", &e->title);
+        get_sb(item, "url", &e->url);
+        get_sb(item, "description", &e->description);
+        parse_media(item, "image", &e->image, &e->image_w, &e->image_h);
+        parse_media(item, "thumbnail", &e->thumbnail, &e->thumb_w, &e->thumb_h);
+        /* Pictures and GIFs linked on their own: Discord shows just the media. */
+        if (starts_with(&type, "image") || starts_with(&type, "gifv")) {
+            e->media_only = 1;
+        } else if (starts_with(&type, "video") && !e->image.len && e->thumbnail.len) {
+            /* Videos (YouTube...) show their thumbnail large. */
+            sb_t t = e->image;
+            e->image = e->thumbnail;
+            e->thumbnail = t;
+            e->image_w = e->thumb_w;
+            e->image_h = e->thumb_h;
+            e->thumb_w = e->thumb_h = 0;
+        }
+        if (e->media_only && !e->image.len) {
+            sb_t t = e->image;
+            e->image = e->thumbnail;
+            e->thumbnail = t;
+            e->image_w = e->thumb_w;
+            e->image_h = e->thumb_h;
+        }
+        if (json_get(item, "fields", &v) && json_count(v)) {
+            e->fields = mem_alloc(json_count(v) * sizeof *e->fields);
+            json_iter(v, &fit);
+            while (json_next(&fit, NULL, &field)) {
+                msg_field_t *f = &e->fields[e->nfields];
+                json_t in;
+                get_sb(field, "name", &f->name);
+                get_sb(field, "value", &f->value);
+                f->inline_ = json_get(field, "inline", &in) && json_type(in) == JSON_TRUE;
+                e->nfields++;
+            }
+        }
+        sb_free(&type);
+        if (e->media_only ? e->image.len > 0
+                          : e->title.len || e->description.len || e->author.len || e->image.len || e->nfields)
+            out->nembeds++;
+        else
+            msg_embed_free(e);
+    }
+}
+
+static void parse_reactions(json_t list, msg_t *out)
+{
+    json_iter_t it;
+    json_t item, emoji, v;
+    size_t n = json_count(list);
+
+    if (!n)
+        return;
+    out->reactions = mem_alloc(n * sizeof *out->reactions);
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &item)) {
+        msg_reaction_t *r = &out->reactions[out->nreactions];
+        if (!json_get(item, "emoji", &emoji))
+            continue;
+        if (json_get(emoji, "id", &v) && json_type(v) == JSON_STRING)
+            json_raw(v, r->emoji_id, sizeof r->emoji_id);
+        get_sb(emoji, "name", &r->emoji);
+        r->count = get_num(item, "count");
+        r->me = json_get(item, "me", &v) && json_type(v) == JSON_TRUE;
+        if (r->count > 0)
+            out->nreactions++;
+        else
+            sb_free(&r->emoji);
+    }
+}
+
 int msg_parse(json_t obj, msg_t *out)
 {
     json_t v, author, mentions = {0}, list, item, name;
@@ -183,11 +354,24 @@ int msg_parse(json_t obj, msg_t *out)
             json_raw(v, out->author_id, sizeof out->author_id);
         if (json_get(author, "avatar", &v))
             json_raw(v, out->avatar, sizeof out->avatar);
-        /* Gateway messages carry the server nickname. */
+        /* Gateway messages carry the server nickname and roles. */
         if (json_get(obj, "member", &member) && json_get(member, "nick", &nick) && json_type(nick) == JSON_STRING)
             json_str(nick, &out->author);
         else
             user_name(author, &out->author);
+        if (json_get(obj, "member", &member) && json_get(member, "roles", &v)) {
+            json_iter_t rit;
+            json_t role;
+            char id[24];
+            out->has_member = 1;
+            json_iter(v, &rit);
+            while (json_next(&rit, NULL, &role)) {
+                json_raw(role, id, sizeof id);
+                if (out->member_roles.len)
+                    sb_add(&out->member_roles, ",");
+                sb_add(&out->member_roles, id);
+            }
+        }
     }
 
     json_get(obj, "mentions", &mentions);
@@ -195,24 +379,23 @@ int msg_parse(json_t obj, msg_t *out)
         format_content(raw.data ? raw.data : "", raw.len, mentions, &out->text);
     sb_free(&raw);
 
-    if (json_get(obj, "attachments", &list)) {
-        json_iter(list, &it);
-        while (json_next(&it, NULL, &item))
-            if (json_get(item, "filename", &name))
-                add_line(&out->text, "\xF0\x9F\x93\x8E ", name);
-    }
+    if (json_get(obj, "attachments", &list))
+        parse_files(list, out);
+    if (json_get(obj, "embeds", &list))
+        parse_embeds(list, out);
+    if (json_get(obj, "reactions", &list))
+        parse_reactions(list, out);
     if (json_get(obj, "sticker_items", &list)) {
         json_iter(list, &it);
-        while (json_next(&it, NULL, &item))
+        if (json_next(&it, NULL, &item) && json_get(item, "id", &v)) {
+            json_raw(v, out->sticker_id, sizeof out->sticker_id);
+            out->sticker_format = get_num(item, "format_type");
             if (json_get(item, "name", &name))
-                add_line(&out->text, "Sticker: ", name);
+                json_str(name, &out->sticker_name);
+        }
     }
-    if (!out->text.len && json_get(obj, "embeds", &list)) {
-        json_iter(list, &it);
-        if (json_next(&it, NULL, &item) &&
-            (json_get(item, "title", &name) || json_get(item, "description", &name)))
-            add_line(&out->text, "Embed: ", name);
-    }
+    out->edited = json_get(obj, "edited_timestamp", &v) && json_type(v) == JSON_STRING;
+    (void)add_line;
 
     if (type == TYPE_JOIN) {
         out->system = 1;
@@ -227,7 +410,8 @@ int msg_parse(json_t obj, msg_t *out)
         sb_clear(&out->text);
         sb_add(&out->text, "pinned a message.");
     } else if (type != TYPE_DEFAULT && type != TYPE_REPLY && type != TYPE_SLASH_COMMAND &&
-               type != TYPE_CONTEXT_COMMAND && !out->text.len) {
+               type != TYPE_CONTEXT_COMMAND && !out->text.len && !out->nfiles && !out->nembeds &&
+               !out->sticker_id[0]) {
         out->system = 1;
         sb_add(&out->text, "sent a system message.");
     }
@@ -235,11 +419,53 @@ int msg_parse(json_t obj, msg_t *out)
     return 1;
 }
 
+void msg_embed_free(msg_embed_t *e)
+{
+    sb_free(&e->provider);
+    sb_free(&e->author);
+    sb_free(&e->title);
+    sb_free(&e->url);
+    sb_free(&e->description);
+    sb_free(&e->footer);
+    sb_free(&e->image);
+    sb_free(&e->thumbnail);
+    for (int i = 0; i < e->nfields; i++) {
+        sb_free(&e->fields[i].name);
+        sb_free(&e->fields[i].value);
+    }
+    mem_free(e->fields);
+    *e = (msg_embed_t){0};
+}
+
+/* Drops everything but the text fields' storage owned elsewhere: files, embeds, reactions, sticker. */
+void msg_free_extras(msg_t *m)
+{
+    for (int i = 0; i < m->nfiles; i++) {
+        sb_free(&m->files[i].url);
+        sb_free(&m->files[i].name);
+    }
+    mem_free(m->files);
+    for (int i = 0; i < m->nembeds; i++)
+        msg_embed_free(&m->embeds[i]);
+    mem_free(m->embeds);
+    for (int i = 0; i < m->nreactions; i++)
+        sb_free(&m->reactions[i].emoji);
+    mem_free(m->reactions);
+    sb_free(&m->sticker_name);
+    m->files = NULL;
+    m->embeds = NULL;
+    m->reactions = NULL;
+    m->nfiles = m->nembeds = m->nreactions = 0;
+    m->sticker_id[0] = 0;
+}
+
 void msg_free(msg_t *m)
 {
     sb_free(&m->author);
     sb_free(&m->text);
     sb_free(&m->reply);
+    sb_free(&m->member_roles);
+    msg_free_extras(m);
 }
 
 msg_batch_t *msg_batch_from_array(json_t arr, int kind, const char *channel_id, int limit)
@@ -297,6 +523,60 @@ void msg_batch_free(msg_batch_t *b)
         msg_free(&b->msgs[i]);
     mem_free(b->msgs);
     mem_free(b);
+}
+
+msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me)
+{
+    msg_batch_t *b = mem_alloc(sizeof *b);
+    msg_t *m;
+    msg_reaction_t *r;
+    json_t v, emoji;
+    char user[24] = "";
+
+    b->kind = BATCH_REACTION;
+    b->delta = delta;
+    b->msgs = mem_alloc(sizeof *b->msgs);
+    m = &b->msgs[0];
+    if (!json_get(d, "message_id", &v) || !json_get(d, "emoji", &emoji))
+        return b;
+    json_raw(v, m->id, sizeof m->id);
+    if (json_get(d, "channel_id", &v))
+        json_raw(v, b->channel_id, sizeof b->channel_id);
+    if (json_get(d, "user_id", &v))
+        json_raw(v, user, sizeof user);
+    b->mine = me && me[0] && sc_strlen(user) == sc_strlen(me) && same(user, me, sc_strlen(me));
+    m->reactions = mem_alloc(sizeof *m->reactions);
+    r = &m->reactions[0];
+    if (json_get(emoji, "id", &v) && json_type(v) == JSON_STRING)
+        json_raw(v, r->emoji_id, sizeof r->emoji_id);
+    get_sb(emoji, "name", &r->emoji);
+    m->nreactions = 1;
+    b->n = 1;
+    return b;
+}
+
+static void pct(sb_t *out, const char *s, size_t n)
+{
+    static const char hex[] = "0123456789ABCDEF";
+
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+            sb_addn(out, (const char *)&c, 1);
+        } else {
+            char e[3] = {'%', hex[c >> 4], hex[c & 15]};
+            sb_addn(out, e, 3);
+        }
+    }
+}
+
+void msg_reaction_path(const msg_reaction_t *r, sb_t *out)
+{
+    pct(out, r->emoji.data ? r->emoji.data : "", r->emoji.len);
+    if (r->emoji_id[0]) {
+        sb_add(out, ":");
+        sb_add(out, r->emoji_id);
+    }
 }
 
 long long snowflake_ms(const char *id)
