@@ -36,6 +36,81 @@ static const char *name_at(const model_t *m, unsigned i)
     return model_str(m, m->channels[i].name);
 }
 
+/* Applies `json` as `event`; returns the new model (NULL if unchanged). */
+static model_t *apply(const model_t *m, const char *event, const char *json)
+{
+    json_t d;
+
+    if (!json_parse(json, sc_strlen(json), &d))
+        return NULL;
+    return model_apply(m, event, d);
+}
+
+static int index_in_guild(const model_t *m, const char *id)
+{
+    int i = model_find_channel(m, id);
+    return i < 0 ? -1 : i - (int)m->guilds[0].first;
+}
+
+static void test_updates(const model_t *m)
+{
+    model_t *n, *n2;
+    int i;
+
+    n = apply(m, "CHANNEL_CREATE",
+              "{\"id\":\"16\",\"guild_id\":\"1\",\"type\":0,\"name\":\"new\",\"parent_id\":\"10\",\"position\":0}");
+    check(n && n->guilds[0].count == 6 && index_in_guild(n, "16") == 3 && index_in_guild(n, "11") == 4,
+          "created channel lands in its category, sorted");
+    i = n ? model_find_channel(n, "11") : -1;
+    check(i >= 0 && n->channels[i].mentions == 2 && model_unread(n, (unsigned)i), "read state survives an update");
+    model_free(n);
+
+    n = apply(m, "CHANNEL_CREATE", "{\"id\":\"17\",\"guild_id\":\"1\",\"type\":0,\"name\":\"hidden\","
+                                   "\"permission_overwrites\":[{\"id\":\"1\",\"type\":0,\"allow\":\"0\",\"deny\":\"1024\"}]}");
+    check(n == NULL, "a channel we cannot see changes nothing");
+    model_free(n);
+
+    n = apply(m, "CHANNEL_UPDATE", "{\"id\":\"14\",\"guild_id\":\"1\",\"type\":0,\"name\":\"renamed\",\"position\":5}");
+    i = n ? model_find_channel(n, "14") : -1;
+    check(i >= 0 && lstrcmpA(model_str(n, n->channels[i].name), "renamed") == 0 && n->channels[i].muted,
+          "rename keeps the mute");
+    model_free(n);
+
+    n = apply(m, "CHANNEL_DELETE", "{\"id\":\"11\",\"guild_id\":\"1\",\"type\":0}");
+    check(n && model_find_channel(n, "11") < 0 && n->guilds[0].count == 4, "deleted channel is gone");
+    model_free(n);
+
+    n = apply(m, "CHANNEL_CREATE", "{\"id\":\"23\",\"type\":1,\"last_message_id\":\"950\","
+                                   "\"recipients\":[{\"id\":\"9\",\"username\":\"fresh\"}]}");
+    check(n && n->dm_count == 4 && lstrcmpA(n->channels[n->dm_first].id, "23") == 0 &&
+          lstrcmpA(model_str(n, n->channels[n->dm_first].name), "fresh") == 0, "new DM goes on top");
+    model_free(n);
+
+    n = apply(m, "GUILD_CREATE", "{\"id\":\"2\",\"name\":\"Joined\",\"roles\":[{\"id\":\"2\",\"permissions\":\"1024\"}],"
+                                 "\"channels\":[{\"id\":\"30\",\"type\":0,\"name\":\"welcome\"}]}");
+    check(n && n->nguilds == 2 && lstrcmpA(n->guilds[0].id, "2") == 0 && n->guilds[0].count == 1 &&
+          model_find_channel(n, "11") >= 0, "joined server goes on top, others kept");
+    n2 = n ? apply(n, "GUILD_DELETE", "{\"id\":\"2\"}") : NULL;
+    check(n2 && n2->nguilds == 1 && model_find_channel(n2, "30") < 0, "left server is removed");
+    model_free(n2);
+    n2 = n ? apply(n, "GUILD_DELETE", "{\"id\":\"2\",\"unavailable\":true}") : NULL;
+    check(n2 == NULL, "outage keeps the server");
+    model_free(n2);
+    model_free(n);
+
+    n = apply(m, "GUILD_MEMBER_UPDATE", "{\"guild_id\":\"1\",\"user\":{\"id\":\"100\"},\"roles\":[\"77\"]}");
+    check(n && model_has_role(n, 0, "77") && !model_has_role(n, 0, "50"), "our role change is tracked");
+    model_free(n);
+    n = apply(m, "GUILD_MEMBER_UPDATE", "{\"guild_id\":\"1\",\"user\":{\"id\":\"5\"},\"roles\":[\"77\"]}");
+    check(n == NULL, "someone else's role change is ignored");
+    model_free(n);
+
+    n = apply(m, "GUILD_UPDATE", "{\"id\":\"1\",\"name\":\"G2\",\"icon\":\"abc\"}");
+    check(n && lstrcmpA(model_str(n, n->guilds[0].name), "G2") == 0 && lstrcmpA(n->guilds[0].icon, "abc") == 0,
+          "server rename and icon");
+    model_free(n);
+}
+
 void entry(void)
 {
     json_t d;
@@ -72,7 +147,9 @@ void entry(void)
     check(model_channel_guild(m, (unsigned)model_find_channel(m, "11")) == 0 &&
           model_channel_guild(m, m->dm_first) == -1, "channel to guild lookup");
     check(model_id_cmp("900", "1000") < 0 && model_id_cmp("1000", "999") > 0, "snowflakes compare as numbers");
+    check(model_has_role(m, 0, "50") && !model_has_role(m, 0, "1"), "our roles are remembered");
 
+    test_updates(m);
     model_free(m);
     finish();
 }
