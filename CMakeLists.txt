@@ -33,6 +33,7 @@ add_executable(silicord
   src/main.c
   src/console.c
   src/cred.c
+  src/gw.c
   src/http.c
 )
 silicord_no_crt(silicord)
