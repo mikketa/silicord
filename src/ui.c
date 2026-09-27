@@ -56,7 +56,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF };
 
 typedef struct {
     char key[96];
@@ -67,7 +67,7 @@ typedef struct {
 typedef struct {
     HWND wnd;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
-    r_font_t *f_mono, *f_h1, *f_h2, *f_h3;
+    r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -108,6 +108,29 @@ typedef struct {
     int ack_pending;
     int reconnecting;
     activity_t *pending[8];   /* messages in DMs we are still looking up */
+
+    /* Profile popout. */
+    HWND pop, pop_edit, pop_focus;
+    WNDPROC pop_edit_proc;
+    HFONT pop_font;
+    HBRUSH pop_brush;
+    unsigned pop_input_color;
+    profile_t *pop_profile;   /* NULL while loading; owned by the cache */
+    char pop_user[24], pop_guild[24], pop_avatar[48];
+    sb_t pop_name;
+    int pop_self, pop_failed, pop_hover, pop_h, pop_input_y;
+    int pop_ax, pop_ay, pop_above;
+    int pop_badge_x[32], pop_badge_y[32];
+    md_doc_t pop_bio;
+    r_rich_t *pop_rich;
+    int pop_rich_w;
+    char pending_dm[24];      /* user whose new DM we open once it exists */
+    profile_t *profiles[8];
+    DWORD profile_time[8];
+    /* Display name fonts, downloaded on first use. */
+    r_font_t *name_fonts[9];
+    sb_t font_data[9];
+    unsigned char font_state[9];
 } ui_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1};
@@ -560,6 +583,8 @@ static void hit_test(int x, int y, int *kind, int *index)
                 *kind = HIT_LOGOUT;
             else if (g_ui.disconnected && y >= top && y < top + S(32) && x >= right - S(68) && x < right - S(36))
                 *kind = HIT_RETRY;
+            else if (y >= top && y < top + S(32) && x >= S(RAIL_W) + S(6) && x < S(RAIL_W) + S(176))
+                *kind = HIT_SELF;
             return;
         }
         unsigned first, count;
@@ -884,6 +909,13 @@ static void paint_side(RECT rc)
 
 static void place_composer(void);
 static void invalidate_views(void);
+static void pop_close(void);
+static void open_self(void);
+static void build_name_fonts(void);
+static void profiles_clear(void);
+static void pop_place(void);
+static void on_font(int id, sb_t *data);
+static void on_profile(profile_t *p);
 
 #define GROUP_MS (7 * 60 * 1000)
 #define COMPOSER_H 44
@@ -1518,6 +1550,8 @@ static void paint(HWND wnd)
 static void redraw(void)
 {
     InvalidateRect(g_ui.wnd, NULL, FALSE);
+    if (g_ui.pop)
+        InvalidateRect(g_ui.pop, NULL, FALSE); /* images it waits for arrive through the main window */
 }
 
 /* ---- Fonts, icon ---- */
@@ -1526,9 +1560,10 @@ static void make_fonts(void)
 {
     r_font_t **f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat, &g_ui.f_icon,
                       &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small, &g_ui.f_mono, &g_ui.f_h1,
-                      &g_ui.f_h2, &g_ui.f_h3};
+                      &g_ui.f_h2, &g_ui.f_h3, &g_ui.f_name};
 
     invalidate_views(); /* message layouts point at the old fonts */
+    pop_close();
     HFONT old = g_ui.composer ? (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0) : NULL;
 
     for (int i = 0; i < (int)ARRAYSIZE(f); i++)
@@ -1546,6 +1581,8 @@ static void make_fonts(void)
     g_ui.f_h1 = r_font(L"Segoe UI", S(24), FW_BOLD, 0);
     g_ui.f_h2 = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
     g_ui.f_h3 = r_font(L"Segoe UI", S(17), FW_BOLD, 0);
+    g_ui.f_name = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
+    build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
         .body = g_ui.f_body, .mono = g_ui.f_mono, .h1 = g_ui.f_h1, .h2 = g_ui.f_h2, .h3 = g_ui.f_h3,
@@ -1757,6 +1794,7 @@ static void open_channel(int index)
     wchar_t *hint;
     char text[160];
 
+    pop_close();
     g_ui.channel = index;
     free_messages();
     g_ui.msg_scroll = 0;
@@ -1831,6 +1869,9 @@ static void on_click(int kind, int index)
         break;
     case HIT_LOGOUT:
         app_logout();
+        break;
+    case HIT_SELF:
+        open_self();
         break;
     case HIT_RETRY:
         g_ui.disconnected = 0;
@@ -1970,6 +2011,8 @@ static void clear_session(void)
         model_free(g_ui.model);
         g_ui.model = NULL;
     }
+    pop_close();
+    profiles_clear();
     images_clear();
     g_ui.guild = -1;
     open_channel(-1);
@@ -1987,6 +2030,22 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     if (msg == UI_MESSAGES) {
         on_batch((msg_batch_t *)lp);
         redraw();
+        return;
+    }
+    if (msg == UI_PROFILE) {
+        on_profile((profile_t *)lp);
+        return;
+    }
+    if (msg == UI_FONT) {
+        on_font((int)wp, p);
+        if (p) {
+            sb_free(p);
+            mem_free(p);
+        }
+        if (g_ui.pop) {
+            pop_place();
+            InvalidateRect(g_ui.pop, NULL, FALSE);
+        }
         return;
     }
     if (msg == UI_ACTIVITY) {
@@ -2057,6 +2116,13 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         break;
     case UI_SEND_FAILED:
         set_text(&g_ui.send_error, s);
+        break;
+    case UI_DM_OPENED:
+        /* The DM exists in the model by now (CHANNEL_CREATE came first). */
+        if (g_ui.pending_dm[0] && g_ui.model) {
+            g_ui.pending_dm[0] = 0;
+            go_to_channel(map_channel(g_ui.model, s));
+        }
         break;
     case UI_IMAGE: {
         image_t *im = image_find(s);
@@ -2162,6 +2228,807 @@ static int click_message(int x, int y)
     return 1;
 }
 
+/* ---- Profile popout ---- */
+
+/*
+ * A child window over the main one, laid out like Discord's user popout:
+ * banner, avatar with its decoration, styled display name, username with the
+ * server tag and badges, mutual friends and servers, bio, and a box to
+ * message the user. The layout is walked once to measure and again to paint.
+ */
+
+#define POP_W 300
+#define POP_PAD 16
+#define POP_AVATAR 80
+#define POP_BANNER 105
+#define POP_BANNER_PLAIN 60
+#define POP_BADGE 22
+#define POP_INPUT_H 40
+#define POP_RADIUS 8
+#define PROFILE_TTL 120000
+
+static const struct {
+    int id;
+    const char *file;
+    int weight;
+} k_name_fonts[] = {
+    {3, "ofl/cherrybombone/CherryBombOne-Regular.ttf", FW_NORMAL},
+    {4, "ofl/chicle/Chicle-Regular.ttf", FW_NORMAL},
+    {6, "ofl/museomoderno/MuseoModerno%5Bwght%5D.ttf", FW_BOLD},
+    {8, "ofl/pixelifysans/PixelifySans%5Bwght%5D.ttf", FW_BOLD},
+    {12, "ofl/zillaslab/ZillaSlab-Bold.ttf", FW_BOLD},
+    {13, "ofl/playpensans/PlaypenSans%5Bwght%5D.ttf", FW_BOLD},
+    {14, "ofl/orbitron/Orbitron%5Bwght%5D.ttf", FW_BOLD},
+    {15, "ofl/newrocker/NewRocker-Regular.ttf", FW_NORMAL},
+    {16, "ofl/kalam/Kalam-Bold.ttf", FW_BOLD},
+};
+
+static int name_font_slot(int id)
+{
+    for (int i = 0; i < (int)ARRAYSIZE(k_name_fonts); i++)
+        if (k_name_fonts[i].id == id)
+            return i;
+    return -1;
+}
+
+static void build_name_fonts(void)
+{
+    for (int i = 0; i < (int)ARRAYSIZE(k_name_fonts); i++) {
+        r_font_free(g_ui.name_fonts[i]);
+        g_ui.name_fonts[i] = g_ui.font_data[i].len ? r_font_data(g_ui.font_data[i].data, g_ui.font_data[i].len,
+                                                                 S(20), k_name_fonts[i].weight)
+                                                   : NULL;
+    }
+}
+
+/* Font of a display name style; falls back to the UI font while it downloads, or for fonts we do not have. */
+static r_font_t *name_font(int id)
+{
+    int i = name_font_slot(id);
+
+    if (i < 0)
+        return g_ui.f_name;
+    if (!g_ui.font_state[i]) {
+        g_ui.font_state[i] = 1;
+        app_fetch_font(id, k_name_fonts[i].file);
+    }
+    return g_ui.name_fonts[i] ? g_ui.name_fonts[i] : g_ui.f_name;
+}
+
+static void on_font(int id, sb_t *data)
+{
+    int i = name_font_slot(id);
+
+    if (i < 0 || !data) {
+        if (i >= 0)
+            g_ui.font_state[i] = 2; /* failed: keep the fallback */
+        return;
+    }
+    sb_free(&g_ui.font_data[i]);
+    g_ui.font_data[i] = *data;
+    *data = (sb_t){0};
+    g_ui.font_state[i] = 2;
+    r_font_free(g_ui.name_fonts[i]);
+    g_ui.name_fonts[i] = r_font_data(g_ui.font_data[i].data, g_ui.font_data[i].len, S(20), k_name_fonts[i].weight);
+}
+
+/* ---- Cache ---- */
+
+static profile_t *cached_profile(const char *user, const char *guild, int *fresh)
+{
+    for (int i = 0; i < (int)ARRAYSIZE(g_ui.profiles); i++) {
+        profile_t *p = g_ui.profiles[i];
+        if (p && lstrcmpA(p->id, user) == 0 && lstrcmpA(p->guild_id, guild) == 0) {
+            *fresh = GetTickCount() - g_ui.profile_time[i] < PROFILE_TTL;
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Takes ownership of p; returns it, or NULL if it was dropped. */
+static profile_t *cache_profile(profile_t *p)
+{
+    int n = (int)ARRAYSIZE(g_ui.profiles), slot = -1;
+    DWORD now = GetTickCount();
+
+    for (int i = 0; i < n && slot < 0; i++)
+        if (g_ui.profiles[i] && lstrcmpA(g_ui.profiles[i]->id, p->id) == 0 &&
+            lstrcmpA(g_ui.profiles[i]->guild_id, p->guild_id) == 0)
+            slot = i;
+    for (int i = 0; i < n && slot < 0; i++)
+        if (!g_ui.profiles[i])
+            slot = i;
+    if (slot < 0) {
+        /* Full: evict the oldest one that is not on screen. */
+        DWORD age = 0;
+        for (int i = 0; i < n; i++)
+            if (g_ui.profiles[i] != g_ui.pop_profile && (slot < 0 || now - g_ui.profile_time[i] > age)) {
+                slot = i;
+                age = now - g_ui.profile_time[i];
+            }
+    }
+    if (g_ui.profiles[slot]) {
+        if (g_ui.profiles[slot] == g_ui.pop_profile)
+            g_ui.pop_profile = NULL;
+        profile_free(g_ui.profiles[slot]);
+        mem_free(g_ui.profiles[slot]);
+    }
+    g_ui.profiles[slot] = p;
+    g_ui.profile_time[slot] = now;
+    return p;
+}
+
+static void profiles_clear(void)
+{
+    for (int i = 0; i < (int)ARRAYSIZE(g_ui.profiles); i++)
+        if (g_ui.profiles[i]) {
+            profile_free(g_ui.profiles[i]);
+            mem_free(g_ui.profiles[i]);
+            g_ui.profiles[i] = NULL;
+        }
+}
+
+/* ---- Images ---- */
+
+static r_image_t *pop_avatar(const profile_t *p)
+{
+    char key[96], path[200];
+
+    if (!p || !p->avatar[0])
+        return user_avatar(g_ui.pop_user, g_ui.pop_avatar);
+    wsprintfA(key, "A:%s:%s:%s", p->id, p->member_avatar ? p->guild_id : "", p->avatar);
+    if (p->member_avatar)
+        wsprintfA(path, "/guilds/%s/users/%s/avatars/%s.png?size=256", p->guild_id, p->id, p->avatar);
+    else
+        wsprintfA(path, "/avatars/%s/%s.png?size=256", p->id, p->avatar);
+    return image_get(key, path);
+}
+
+static r_image_t *pop_banner(const profile_t *p)
+{
+    char key[96], path[200];
+
+    if (!p || !p->banner[0])
+        return NULL;
+    wsprintfA(key, "b:%s:%s", p->id, p->banner);
+    if (p->member_banner)
+        wsprintfA(path, "/guilds/%s/users/%s/banners/%s.png?size=600", p->guild_id, p->id, p->banner);
+    else
+        wsprintfA(path, "/banners/%s/%s.png?size=600", p->id, p->banner);
+    return image_get(key, path);
+}
+
+static r_image_t *cdn_image(const char *prefix, const char *path_fmt, const char *a, const char *b)
+{
+    char key[96], path[200];
+
+    wsprintfA(key, "%s:%s:%s", prefix, a, b ? b : "");
+    wsprintfA(path, path_fmt, a, b);
+    return image_get(key, path);
+}
+
+/* ---- Layout ---- */
+
+static unsigned rgb_argb(unsigned rgb, unsigned alpha)
+{
+    return alpha << 24 | (rgb & 0xFFFFFF);
+}
+
+/* A theme color at 40%, as the body under Discord's dark overlay. */
+static unsigned mix_dark(unsigned rgb)
+{
+    return ((rgb >> 16 & 0xFF) * 2 / 5) << 16 | ((rgb >> 8 & 0xFF) * 2 / 5) << 8 | (rgb & 0xFF) * 2 / 5;
+}
+
+static int pop_banner_h(const profile_t *p)
+{
+    return S(p && p->banner[0] ? POP_BANNER : POP_BANNER_PLAIN);
+}
+
+static void pop_tooltip(const char *s, int cx, int bottom, int w)
+{
+    int tw = text_width(g_ui.f_small, s) + S(16), th = S(28), x;
+
+    if (tw > w - S(16))
+        tw = w - S(16);
+    x = cx - tw / 2;
+    if (x < S(8))
+        x = S(8);
+    if (x + tw > w - S(8))
+        x = w - S(8) - tw;
+    r_round(x, bottom - th, tw, th, S(6), ARGB(C_TIP));
+    text(g_ui.f_small, C_INK, rect(x + S(8), bottom - th, tw - S(16), th), s,
+         DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+/* Walks the popout layout; paints when `draw` is set. Returns the height. */
+static int pop_render(int draw)
+{
+    const profile_t *p = g_ui.pop_profile;
+    int w = S(POP_W), pad = S(POP_PAD), inner = w - 2 * pad;
+    int bh = pop_banner_h(p), y, ax = pad, ay = bh - S(POP_AVATAR) / 2;
+    unsigned body = 0xFF111111, border = 0xFF262626;
+    r_image_t *avatar = pop_avatar(p);
+    const char *name = p ? p->name.data : g_ui.pop_name.data;
+
+    if (p && p->ntheme == 2) {
+        /* Nitro theme: the user's two colors, darkened like Discord's dark theme. */
+        border = rgb_argb(p->theme[0], 0xFF);
+    }
+    if (draw) {
+        r_image_t *banner = pop_banner(p);
+        unsigned bc = 0;
+
+        fill(0, 0, w, S(4000), g_ui.pop_ax < S(RAIL_W + SIDE_W) ? C_SIDE : C_MAIN); /* behind the corners */
+        if (p && p->ntheme == 2) {
+            r_round_gradient(0, 0, w, g_ui.pop_h, S(POP_RADIUS), rgb_argb(p->theme[0], 0xFF),
+                             rgb_argb(p->theme[1], 0xFF));
+            r_round(0, 0, w, g_ui.pop_h, S(POP_RADIUS), 0x99000000u);
+        } else {
+            r_round(0, 0, w, g_ui.pop_h, S(POP_RADIUS), body);
+        }
+        /* Banner: image, else theme or accent color, else the avatar's average color. */
+        r_clip(0, 0, w, bh);
+        if (banner) {
+            r_image_cover(banner, 0, 0, w, bh + S(POP_RADIUS), S(POP_RADIUS));
+        } else {
+            if (p && p->ntheme == 2)
+                bc = rgb_argb(p->theme[0], 0xFF);
+            else if (p && p->has_accent)
+                bc = rgb_argb(p->accent, 0xFF);
+            else if (avatar)
+                bc = r_image_average(avatar);
+            r_round(0, 0, w, bh + S(POP_RADIUS), S(POP_RADIUS), bc ? bc : 0xFF2A2A2A);
+        }
+        r_unclip();
+
+        /* More menu, on the banner. */
+        {
+            int bx = w - S(12) - S(32), by = S(12);
+            r_circle(bx, by, S(32), g_ui.pop_hover == -2 ? 0xCC000000u : 0x99000000u);
+            text_w(g_ui.f_icon, C_INK, rect(bx, by, S(32), S(32)), L"\xE712", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        /* Avatar in a ring of the body color, decoration on top. */
+        r_circle(ax - S(6), ay - S(6), S(POP_AVATAR) + S(12), p && p->ntheme == 2 ? 0xFF000000u | mix_dark(p->theme[0]) : body);
+        if (avatar)
+            r_image(avatar, ax, ay, S(POP_AVATAR), S(POP_AVATAR), S(POP_AVATAR) / 2);
+        else
+            r_circle(ax, ay, S(POP_AVATAR), ARGB(C_ITEM));
+        if (p && p->decoration[0]) {
+            r_image_t *deco = cdn_image("ad", "/avatar-decoration-presets/%s.png?size=240&passthrough=false",
+                                        p->decoration, NULL);
+            int d = S(POP_AVATAR) * 6 / 5;
+            if (deco)
+                r_image(deco, ax - (d - S(POP_AVATAR)) / 2, ay - (d - S(POP_AVATAR)) / 2, d, d, 0);
+        }
+        if (g_ui.pop_self) {
+            int dot = g_ui.disconnected ? C_FAINT : g_ui.model && !g_ui.reconnecting ? C_GREEN : C_AMBER;
+            int dx = ax + S(POP_AVATAR) - S(22), dy = ay + S(POP_AVATAR) - S(22);
+            r_circle(dx - S(5), dy - S(5), S(26), body);
+            r_circle(dx, dy, S(16), ARGB(dot));
+        }
+    }
+    y = ay + S(POP_AVATAR) + S(12);
+
+    /* Display name with its font and effect. */
+    if (draw) {
+        wchar_t *wn = utf8_to_wide(name ? name : "", name ? lstrlenA(name) : 0);
+        unsigned ink = ARGB(C_INK) & 0xFFFFFF;
+        if (p && (p->ncolors || p->font_id))
+            r_text_styled(name_font(p->font_id), p->ncolors ? p->colors : &ink, p->ncolors ? p->ncolors : 1,
+                          p->ncolors ? p->effect_id : 1, pad, y, inner,
+                          S(28), wn, -1, R_SINGLE | R_ELLIPSIS | R_VCENTER);
+        else
+            r_text(g_ui.f_name, ARGB(C_INK), pad, y, inner, S(28), wn, -1, R_SINGLE | R_ELLIPSIS | R_VCENTER);
+        mem_free(wn);
+    }
+    y += S(30);
+
+    /* Username, pronouns, server tag, then badges; badges wrap if they do not fit. */
+    if (p) {
+        int x = pad, lh = S(POP_BADGE);
+        char line[160];
+
+        if (p->pronouns.len)
+            wsprintfA(line, "%.64s \xE2\x80\xA2 %.60s", p->username.data, p->pronouns.data);
+        else
+            wsprintfA(line, "%.64s", p->username.data);
+        if (draw)
+            text(g_ui.f_body, C_INK, rect(x, y, inner, lh), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        x += text_width(g_ui.f_body, line) + S(8);
+        if (x > w - pad)
+            x = w - pad;
+
+        if (p->tag[0]) {
+            int tw = text_width(g_ui.f_cat, p->tag) + S(8) + (p->tag_badge[0] ? S(16) : 0);
+            if (x + tw > w - pad) {
+                x = pad;
+                y += lh + S(4);
+            }
+            if (draw) {
+                r_round(x, y + S(2), tw, lh - S(4), S(4), 0x26FFFFFFu);
+                if (p->tag_badge[0] && p->tag_guild[0]) {
+                    r_image_t *tb = cdn_image("gt", "/guild-tag-badges/%s/%s.png?size=32", p->tag_guild, p->tag_badge);
+                    if (tb)
+                        r_image(tb, x + S(4), y + (lh - S(14)) / 2, S(14), S(14), 0);
+                }
+                text(g_ui.f_cat, C_INK, rect(x + S(4) + (p->tag_badge[0] ? S(16) : 0), y, tw, lh), p->tag,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            x += tw + S(8);
+        }
+
+        for (int i = 0; i < p->nbadges && i < (int)ARRAYSIZE(g_ui.pop_badge_x); i++) {
+            if (x + S(POP_BADGE) > w - pad) {
+                x = pad;
+                y += lh + S(4);
+            }
+            g_ui.pop_badge_x[i] = x;
+            g_ui.pop_badge_y[i] = y;
+            if (draw) {
+                r_image_t *bi = cdn_image("bi", "/badge-icons/%s.png?size=64", p->badges[i].icon, NULL);
+                if (g_ui.pop_hover == i)
+                    r_round(x - S(2), y - S(2) + (lh - S(POP_BADGE)) / 2, S(POP_BADGE) + S(4), S(POP_BADGE) + S(4), S(4),
+                            0x1FFFFFFFu);
+                if (bi)
+                    r_image(bi, x, y + (lh - S(POP_BADGE)) / 2, S(POP_BADGE), S(POP_BADGE), 0);
+            }
+            x += S(POP_BADGE) + S(4);
+        }
+        y += lh;
+    } else if (draw) {
+        text(g_ui.f_small, C_MUTED, rect(pad, y, inner, S(POP_BADGE)),
+             g_ui.pop_failed ? "Could not load this profile." : "Loading\xE2\x80\xA6", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    if (!p)
+        y += S(POP_BADGE);
+
+    /* Mutual friends and servers. */
+    if (p && !g_ui.pop_self && (p->mutual_friends > 0 || p->mutual_guilds > 0)) {
+        char line[96] = "";
+        int x = pad;
+
+        y += S(12);
+        if (p->mutual_friends > 0)
+            wsprintfA(line, "%d mutual friend%s", p->mutual_friends, p->mutual_friends == 1 ? "" : "s");
+        if (p->mutual_guilds > 0)
+            wsprintfA(line + lstrlenA(line), "%s%d mutual server%s", line[0] ? " \xE2\x80\xA2 " : "", p->mutual_guilds,
+                      p->mutual_guilds == 1 ? "" : "s");
+        if (draw) {
+            for (int i = 0; i < p->nfriends; i++) {
+                r_image_t *fa = user_avatar(p->friends[i].id, p->friends[i].avatar);
+                r_circle(x - S(2), y, S(20), body);
+                if (fa)
+                    r_image(fa, x, y + S(2), S(16), S(16), S(8));
+                else
+                    r_circle(x, y + S(2), S(16), ARGB(C_ITEM));
+                x += S(12);
+            }
+            if (p->nfriends)
+                x += S(10);
+            text(g_ui.f_small, C_MUTED, rect(x, y, w - pad - x, S(20)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        y += S(20);
+    }
+
+    /* Bio, as markdown. */
+    if (p && p->bio.len) {
+        if (!g_ui.pop_rich || g_ui.pop_rich_w != inner) {
+            r_rich_free(g_ui.pop_rich);
+            if (!g_ui.pop_bio.text)
+                md_parse(p->bio.data, p->bio.len, &g_ui.pop_bio);
+            g_ui.pop_rich = r_rich_build(&g_ui.pop_bio, &g_ui.rich, inner);
+            g_ui.pop_rich_w = inner;
+        }
+        y += S(12);
+        if (draw)
+            r_rich_draw(g_ui.pop_rich, pad, y, 1);
+        y += r_rich_height(g_ui.pop_rich);
+    }
+
+    /* Message box; the EDIT control sits inside it. */
+    if (!g_ui.pop_self) {
+        y += S(16);
+        g_ui.pop_input_y = y;
+        if (draw)
+            r_round(pad, y, inner, S(POP_INPUT_H), S(8), g_ui.pop_input_color);
+        y += S(POP_INPUT_H);
+    }
+    y += pad;
+
+    if (draw) {
+        r_round_outline(0, 0, w, g_ui.pop_h, S(POP_RADIUS), 1, border);
+        if (p && g_ui.pop_hover >= 0 && g_ui.pop_hover < p->nbadges)
+            pop_tooltip(p->badges[g_ui.pop_hover].description.data ? p->badges[g_ui.pop_hover].description.data : "",
+                        g_ui.pop_badge_x[g_ui.pop_hover] + S(POP_BADGE) / 2, g_ui.pop_badge_y[g_ui.pop_hover] - S(4), w);
+    }
+    return y;
+}
+
+/* Sizes and places the popout next to its anchor, inside the main window. */
+static void pop_place(void)
+{
+    RECT rc;
+    int w = S(POP_W), h, x, y;
+
+    if (!g_ui.pop)
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    h = pop_render(0);
+    if (h > rc.bottom - S(16))
+        h = rc.bottom - S(16);
+    g_ui.pop_h = h;
+    x = g_ui.pop_ax;
+    y = g_ui.pop_above ? g_ui.pop_ay - h : g_ui.pop_ay;
+    if (x + w > rc.right - S(8))
+        x = rc.right - S(8) - w;
+    if (y + h > rc.bottom - S(8))
+        y = rc.bottom - S(8) - h;
+    if (y < S(8))
+        y = S(8);
+    SetWindowPos(g_ui.pop, HWND_TOP, x, y, w, h, SWP_NOACTIVATE);
+    if (g_ui.pop_edit) {
+        int eh = S(20);
+        MoveWindow(g_ui.pop_edit, S(POP_PAD) + S(12), g_ui.pop_input_y + (S(POP_INPUT_H) - eh) / 2,
+                   S(POP_W) - 2 * S(POP_PAD) - S(24), eh, TRUE);
+    }
+    InvalidateRect(g_ui.pop, NULL, FALSE);
+}
+
+static void pop_reset_bio(void)
+{
+    r_rich_free(g_ui.pop_rich);
+    g_ui.pop_rich = NULL;
+    md_free(&g_ui.pop_bio);
+}
+
+static void pop_close(void)
+{
+    HWND pop = g_ui.pop;
+
+    if (!pop)
+        return;
+    g_ui.pop = NULL;
+    g_ui.pop_edit = NULL;
+    DestroyWindow(pop);
+    if (g_ui.pop_font) {
+        DeleteObject(g_ui.pop_font);
+        g_ui.pop_font = NULL;
+    }
+    if (g_ui.pop_brush) {
+        DeleteObject(g_ui.pop_brush);
+        g_ui.pop_brush = NULL;
+    }
+    pop_reset_bio();
+    g_ui.pop_profile = NULL;
+    g_ui.pop_user[0] = 0;
+    SetFocus(g_ui.pop_focus && IsWindow(g_ui.pop_focus) ? g_ui.pop_focus : g_ui.wnd);
+}
+
+static void pop_set_profile(profile_t *p)
+{
+    unsigned c = 0xFF1E1E1E;
+
+    pop_reset_bio();
+    g_ui.pop_profile = p;
+    if (p && p->ntheme == 2)
+        c = 0xFF000000u | mix_dark(p->theme[1]);
+    g_ui.pop_input_color = c;
+    if (g_ui.pop_brush)
+        DeleteObject(g_ui.pop_brush);
+    g_ui.pop_brush = CreateSolidBrush(RGB(c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF));
+    if (g_ui.pop_edit && p) {
+        char hint[96];
+        wchar_t *w;
+        wsprintfA(hint, "Message @%.80s", p->name.data ? p->name.data : "");
+        w = utf8_to_wide(hint, lstrlenA(hint));
+        SendMessageW(g_ui.pop_edit, EM_SETCUEBANNER, TRUE, (LPARAM)w);
+        mem_free(w);
+    }
+    pop_place();
+}
+
+static int dm_with(const char *user_id)
+{
+    const model_t *m = g_ui.model;
+
+    for (unsigned i = m ? m->dm_first : 0; m && i < m->dm_first + m->dm_count; i++)
+        if (m->channels[i].type == CH_DM && lstrcmpA(m->channels[i].user_id, user_id) == 0)
+            return (int)i;
+    return -1;
+}
+
+static void pop_send(void)
+{
+    int n = GetWindowTextLengthW(g_ui.pop_edit), dm;
+    wchar_t *w;
+    sb_t text = {0};
+    char user[24];
+
+    if (n <= 0)
+        return;
+    w = mem_alloc(((size_t)n + 1) * sizeof(wchar_t));
+    GetWindowTextW(g_ui.pop_edit, w, n + 1);
+    wide_to_utf8(w, (size_t)n, &text);
+    mem_free(w);
+    lstrcpynA(user, g_ui.pop_user, sizeof user);
+    pop_close();
+    dm = dm_with(user);
+    if (dm >= 0) {
+        go_to_channel(dm);
+        app_send_message(chan(dm)->id, text.data);
+    } else {
+        /* No conversation yet: Discord creates it, then we switch to it. */
+        lstrcpynA(g_ui.pending_dm, user, sizeof g_ui.pending_dm);
+        app_open_dm(user, text.data);
+    }
+    sb_free(&text);
+}
+
+static LRESULT CALLBACK pop_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_CHAR && wp == VK_RETURN) {
+        pop_send();
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        pop_close();
+        return 0;
+    }
+    if (msg == WM_CHAR && wp == VK_ESCAPE)
+        return 0;
+    return CallWindowProcW(g_ui.pop_edit_proc, h, msg, wp, lp);
+}
+
+static void copy_text(const char *s)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    HGLOBAL mem;
+
+    if (n <= 0 || !OpenClipboard(g_ui.wnd))
+        return;
+    EmptyClipboard();
+    if ((mem = GlobalAlloc(GMEM_MOVEABLE, (size_t)n * sizeof(wchar_t))) != NULL) {
+        MultiByteToWideChar(CP_UTF8, 0, s, -1, GlobalLock(mem), n);
+        GlobalUnlock(mem);
+        if (!SetClipboardData(CF_UNICODETEXT, mem))
+            GlobalFree(mem);
+    }
+    CloseClipboard();
+}
+
+static void pop_menu(void)
+{
+    HMENU menu = CreatePopupMenu();
+    POINT pt = {S(POP_W) - S(12) - S(32), S(12) + S(34)};
+    int cmd;
+    char id[24];
+
+    lstrcpynA(id, g_ui.pop_user, sizeof id);
+    if (g_ui.pop_profile)
+        AppendMenuW(menu, MF_STRING, 1, L"Copy username");
+    AppendMenuW(menu, MF_STRING, 2, L"Copy user ID");
+    ClientToScreen(g_ui.pop, &pt);
+    cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, g_ui.pop, NULL);
+    DestroyMenu(menu);
+    if (cmd == 1 && g_ui.pop_profile)
+        copy_text(g_ui.pop_profile->username.data);
+    else if (cmd == 2)
+        copy_text(id);
+}
+
+/* -2 over the menu button, a badge index, or -1. */
+static int pop_hit(int x, int y)
+{
+    const profile_t *p = g_ui.pop_profile;
+    int bx = S(POP_W) - S(12) - S(32), by = S(12);
+
+    if (x >= bx && x < bx + S(32) && y >= by && y < by + S(32))
+        return -2;
+    for (int i = 0; p && i < p->nbadges && i < (int)ARRAYSIZE(g_ui.pop_badge_x); i++)
+        if (x >= g_ui.pop_badge_x[i] && x < g_ui.pop_badge_x[i] + S(POP_BADGE) && y >= g_ui.pop_badge_y[i] &&
+            y < g_ui.pop_badge_y[i] + S(POP_BADGE))
+            return i;
+    return -1;
+}
+
+static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        RECT rc;
+        HDC dc = BeginPaint(wnd, &ps);
+        GetClientRect(wnd, &rc);
+        if (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
+            pop_render(1);
+            r_end();
+        }
+        EndPaint(wnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, GDI(C_INK));
+        SetBkColor((HDC)wp, RGB(g_ui.pop_input_color >> 16 & 0xFF, g_ui.pop_input_color >> 8 & 0xFF,
+                                 g_ui.pop_input_color & 0xFF));
+        return (LRESULT)g_ui.pop_brush;
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, wnd, 0};
+        int hit = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        TrackMouseEvent(&tme);
+        if (hit != g_ui.pop_hover) {
+            g_ui.pop_hover = hit;
+            InvalidateRect(wnd, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g_ui.pop_hover != -1) {
+            g_ui.pop_hover = -1;
+            InvalidateRect(wnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_SETCURSOR: {
+        const profile_t *p = g_ui.pop_profile;
+        int h = g_ui.pop_hover;
+        if (LOWORD(lp) == HTCLIENT) {
+            int hand = h == -2 || (p && h >= 0 && h < p->nbadges && p->badges[h].link.len);
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(hand ? IDC_HAND : IDC_ARROW)));
+            return TRUE;
+        }
+        break;
+    }
+    case WM_LBUTTONDOWN:
+        SetFocus(wnd);
+        return 0;
+    case WM_LBUTTONUP: {
+        const profile_t *p = g_ui.pop_profile;
+        int h = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (h == -2)
+            pop_menu();
+        else if (p && h >= 0 && h < p->nbadges && p->badges[h].link.len)
+            open_url(p->badges[h].link.data);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE)
+            pop_close();
+        return 0;
+    case WM_MOUSEWHEEL:
+        return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/*
+ * Opens the popout for a user. (ax, ay) is its top-left corner, or its
+ * bottom-left one when `above` is set. `name` and `avatar` are shown while
+ * the profile loads.
+ */
+static void pop_open(const char *user_id, const char *name, const char *avatar, int ax, int ay, int above)
+{
+    const char *guild = g_ui.guild >= 0 && g_ui.model ? g_ui.model->guilds[g_ui.guild].id : "";
+    int fresh = 0, self;
+    profile_t *p;
+
+    if (g_ui.pop && lstrcmpA(g_ui.pop_user, user_id) == 0) {
+        pop_close(); /* clicking the same user again toggles */
+        return;
+    }
+    pop_close();
+    self = g_ui.model && lstrcmpA(user_id, g_ui.model->user_id) == 0;
+    lstrcpynA(g_ui.pop_user, user_id, sizeof g_ui.pop_user);
+    lstrcpynA(g_ui.pop_guild, guild, sizeof g_ui.pop_guild);
+    lstrcpynA(g_ui.pop_avatar, avatar ? avatar : "", sizeof g_ui.pop_avatar);
+    set_text(&g_ui.pop_name, name ? name : "");
+    g_ui.pop_ax = ax;
+    g_ui.pop_ay = ay;
+    g_ui.pop_above = above;
+    g_ui.pop_self = self;
+    g_ui.pop_failed = 0;
+    g_ui.pop_hover = -1;
+
+    g_ui.pop = CreateWindowExW(0, L"SilicordPopout", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 0, 0,
+                               g_ui.wnd, NULL, NULL, NULL);
+    if (!self) {
+        g_ui.pop_font = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_ui.pop_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.pop,
+                                        NULL, NULL, NULL);
+        g_ui.pop_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.pop_edit, GWLP_WNDPROC, (LONG_PTR)pop_edit_proc);
+        SendMessageW(g_ui.pop_edit, WM_SETFONT, (WPARAM)g_ui.pop_font, FALSE);
+        SendMessageW(g_ui.pop_edit, EM_LIMITTEXT, 2000, 0);
+    }
+    p = cached_profile(user_id, guild, &fresh);
+    if (!p || !fresh)
+        app_fetch_profile(user_id, guild);
+    pop_set_profile(p);
+    if (!p && g_ui.pop_edit) {
+        char hint[96];
+        wchar_t *w;
+        wsprintfA(hint, "Message @%.80s", name ? name : "");
+        w = utf8_to_wide(hint, lstrlenA(hint));
+        SendMessageW(g_ui.pop_edit, EM_SETCUEBANNER, TRUE, (LPARAM)w);
+        mem_free(w);
+    }
+    ShowWindow(g_ui.pop, SW_SHOWNA);
+    g_ui.pop_focus = GetFocus(); /* given back on close, usually the composer */
+    SetFocus(g_ui.pop);
+}
+
+static void on_profile(profile_t *p)
+{
+    int mine = g_ui.pop && lstrcmpA(p->id, g_ui.pop_user) == 0 && lstrcmpA(p->guild_id, g_ui.pop_guild) == 0;
+
+    if (!p->username.len) {
+        if (mine && !g_ui.pop_profile) {
+            g_ui.pop_failed = 1;
+            InvalidateRect(g_ui.pop, NULL, FALSE);
+        }
+        profile_free(p);
+        mem_free(p);
+        return;
+    }
+    p = cache_profile(p);
+    if (mine && p)
+        pop_set_profile(p);
+}
+
+/* Author avatar or name under (x, y) in the message list: opens the popout there. */
+static int author_hit(int x, int y, int *msg, int *ax, int *ay)
+{
+    int top, i = message_at(x, y, &top), x0, tx = text_x(), ny, nw;
+    msg_t *m;
+
+    if (i < 0)
+        return 0;
+    m = &g_ui.msgs[i];
+    if (m->system || m->grouped == 1 || !m->author_id[0])
+        return 0;
+    x0 = message_area().left;
+    if (m->grouped == 2)
+        top += S(44);
+    ny = top + S(16) + (m->reply.len ? S(22) : 0);
+    nw = text_width(g_ui.f_h, m->author.data ? m->author.data : "");
+    if (y < ny || y >= ny + S(40))
+        return 0;
+    if (x >= x0 + S(16) && x < x0 + S(56)) {
+        *ax = x0 + S(64);
+    } else if (x >= tx && x < tx + nw && y < ny + S(22)) {
+        *ax = tx + nw + S(8);
+    } else {
+        return 0;
+    }
+    *msg = i;
+    *ay = ny;
+    return 1;
+}
+
+static int click_author(int x, int y)
+{
+    int i, ax, ay;
+
+    if (!author_hit(x, y, &i, &ax, &ay))
+        return 0;
+    pop_open(g_ui.msgs[i].author_id, g_ui.msgs[i].author.data, g_ui.msgs[i].avatar, ax, ay, 0);
+    return 1;
+}
+
+static void open_self(void)
+{
+    RECT rc;
+    const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name) : "";
+
+    if (!g_ui.model || !g_ui.model->user_id[0])
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    pop_open(g_ui.model->user_id, name, g_ui.model->user_avatar, S(RAIL_W) + S(8), rc.bottom - S(PANEL_H) - S(8), 1);
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -2201,6 +3068,8 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_MOUSEWHEEL)
         return SendMessageW(g_ui.wnd, msg, wp, lp);
+    if (msg == WM_LBUTTONDOWN)
+        pop_close();
     return CallWindowProcW(g_ui.composer_proc, h, msg, wp, lp);
 }
 
@@ -2208,7 +3077,9 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 static void update_hover(int x, int y)
 {
-    int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL);
+    int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL), i, ax, ay;
+
+    link = link || author_hit(x, y, &i, &ax, &ay);
 
     hit_test(x, y, &kind, &index);
     if (m != g_ui.hover_msg || link != g_ui.hover_link) {
@@ -2231,7 +3102,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         g_ui.wnd = wnd;
         g_ui.dpi = GetDpiForWindow(wnd);
         g_ui.b_composer = CreateSolidBrush(RGB(0x1F, 0x1F, 0x1F));
-        g_ui.composer = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, wnd, NULL, NULL, NULL);
+        g_ui.composer = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, wnd, NULL,
+                                        NULL, NULL);
         g_ui.composer_proc = (WNDPROC)SetWindowLongPtrW(g_ui.composer, GWLP_WNDPROC, (LONG_PTR)composer_proc);
         SendMessageW(g_ui.composer, EM_LIMITTEXT, 2000, 0);
         make_fonts();
@@ -2241,6 +3113,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         clamp_scroll();
         clamp_msg_scroll();
         place_composer();
+        pop_place();
         redraw();
         return 0;
     case WM_CTLCOLOREDIT:
@@ -2287,7 +3160,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
         if (g_ui.view == VIEW_APP) {
             int kind, index;
-            if (click_message(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+            if (g_ui.pop) {
+                pop_close(); /* a click outside only closes the popout */
+                return 0;
+            }
+            if (click_author(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || click_message(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
             hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &kind, &index);
             on_click(kind, index);
@@ -2299,6 +3176,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         ScreenToClient(wnd, &pt);
         if (g_ui.view != VIEW_APP)
             return 0;
+        pop_close();
         if (pt.x < S(RAIL_W)) {
             g_ui.rail_scroll += delta;
         } else if (pt.x < S(RAIL_W + SIDE_W)) {
@@ -2353,7 +3231,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_ONLINE) {
+        if (msg >= UI_QR && msg <= UI_FONT) {
             on_worker(msg, wp, lp);
             return 0;
         }
@@ -2381,8 +3259,12 @@ HWND ui_create(HINSTANCE inst)
     wc.hIconSm = g_ui.icon_small;
     wc.lpszClassName = L"Silicord";
     RegisterClassExW(&wc);
+    wc.lpfnWndProc = pop_proc;
+    wc.hIcon = wc.hIconSm = NULL;
+    wc.lpszClassName = L"SilicordPopout";
+    RegisterClassExW(&wc);
 
-    g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW,
+    g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1200, dpi, 96), MulDiv(760, dpi, 96),
                                NULL, NULL, inst, NULL);
     DwmSetWindowAttribute(g_ui.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
