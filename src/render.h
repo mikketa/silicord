@@ -78,6 +78,10 @@ typedef struct {
     r_font_t *body, *mono, *h1, *h2, *h3, *subtext;
     unsigned ink, muted, link, mention, mention_bg, code_bg, quote_bar, spoiler;
     int quote_indent, code_pad, block_gap, radius;
+    /* Custom emoji: size inline and in emoji-only messages, and where their images come from
+       (`id` is the emoji id, prefixed by "a" when animated; NULL while it loads). */
+    int emoji_px, jumbo_px;
+    r_image_t *(*emoji)(const char *id, int px);
 } r_rich_style_t;
 
 typedef struct r_rich r_rich_t;

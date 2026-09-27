@@ -12,6 +12,9 @@
 #include <dwrite_3.h>
 #include <wincodec.h>
 #include <emmintrin.h>
+extern "C" {
+#include "md.h"
+}
 #include "render.h"
 
 extern "C" {
@@ -997,6 +1000,61 @@ struct rich_block {
     int x, y, h;      /* text origin relative to the rich origin, block height */
 };
 
+/* A custom emoji inside a text layout: reserves a square and draws the image there. */
+struct EmojiObject : IDWriteInlineObject {
+    LONG refs;
+    int size;
+    const r_rich_style_t *st;
+    char id[32];
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override
+    {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IDWriteInlineObject)) {
+            *out = this;
+            AddRef();
+            return S_OK;
+        }
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&refs); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        LONG n = InterlockedDecrement(&refs);
+        if (!n)
+            mem_free(this);
+        return (ULONG)n;
+    }
+    HRESULT STDMETHODCALLTYPE Draw(void *ctx, IDWriteTextRenderer *, FLOAT x, FLOAT y, BOOL, BOOL, IUnknown *) override
+    {
+        const draw_ctx *c = (const draw_ctx *)ctx;
+        r_image_t *img;
+
+        if (c->pass == PASS_MONO || !st->emoji || !(img = st->emoji(id, size)))
+            return S_OK;
+        r_image(img, (int)(x + 0.5f), (int)(y + 0.5f) + g_y0, size, size, 0);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetMetrics(DWRITE_INLINE_OBJECT_METRICS *m) override
+    {
+        m->width = (FLOAT)size;
+        m->height = (FLOAT)size;
+        m->baseline = (FLOAT)size * 0.8f;
+        m->supportsSideways = FALSE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetOverhangMetrics(DWRITE_OVERHANG_METRICS *o) override
+    {
+        o->left = o->top = o->right = o->bottom = 0;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetBreakConditions(DWRITE_BREAK_CONDITION *before, DWRITE_BREAK_CONDITION *after) override
+    {
+        *before = *after = DWRITE_BREAK_CONDITION_NEUTRAL;
+        return S_OK;
+    }
+};
+
 struct r_rich {
     const md_doc_t *doc;
     const r_rich_style_t *st;
@@ -1048,6 +1106,20 @@ static void style_range(r_rich_t *r, IDWriteTextLayout *l, const md_span_t *sp, 
         l->SetDrawingEffect(r->mention, range);
         l->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range);
     }
+    if (sp->flags & MD_EDITED) {
+        l->SetDrawingEffect(r->muted, range);
+        l->SetFontSize(r->st->subtext->format->GetFontSize() * 0.85f, range);
+    }
+    if ((sp->flags & MD_EMOJI) && sp->link >= 0) {
+        const char *id = md_link(r->doc, sp->link);
+        EmojiObject *e = new (place_t(), mem_alloc(sizeof(EmojiObject))) EmojiObject();
+        e->refs = 1;
+        e->st = r->st;
+        e->size = r->doc->jumbo ? r->st->jumbo_px : r->st->emoji_px;
+        lstrcpynA(e->id, id, sizeof e->id);
+        l->SetInlineObject(e, range);
+        e->Release(); /* the layout holds it */
+    }
 }
 
 extern "C" r_rich_t *r_rich_build(const md_doc_t *d, const r_rich_style_t *st, int width)
@@ -1075,6 +1147,10 @@ extern "C" r_rich_t *r_rich_build(const md_doc_t *d, const r_rich_style_t *st, i
                                           &out->layout)))
             continue;
         out->layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        if (d->jumbo) {
+            DWRITE_TEXT_RANGE all = {0, (UINT32)b->len};
+            out->layout->SetFontSize((FLOAT)st->jumbo_px * 0.9f, all);
+        }
         if (b->kind != MD_CODEBLOCK)
             for (int s = 0; s < d->nspans; s++)
                 style_range(r, out->layout, &d->spans[s], b->start, b->len);
