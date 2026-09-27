@@ -159,6 +159,22 @@ static void inline_md(md_doc_t *d, const char *s, size_t n, unsigned flags, int 
             i = run = i + 2;
             continue;
         }
+        if (starts(s, n, i, MD_EDITED_MARK)) {
+            FLUSH();
+            emit(d, "(edited)", 8, MD_EDITED, -1);
+            i = run = i + 3;
+            continue;
+        }
+        if (starts(s, n, i, MD_EMOJI_OPEN) && (j = find(s, n, i + 3, MD_EMOJI_CLOSE)) != NPOS) {
+            size_t colon = find(s, j, i + 3, ":");
+            FLUSH();
+            if (colon != NPOS) {
+                int idx = add_link(d, s + i + 3, colon - i - 3);
+                emit(d, "\xEF\xBF\xBC", 3, flags | MD_EMOJI, idx); /* U+FFFC */
+            }
+            i = run = j + 3;
+            continue;
+        }
         if (starts(s, n, i, MD_MENTION_OPEN) && (j = find(s, n, i + 3, MD_MENTION_CLOSE)) != NPOS) {
             FLUSH();
             inline_md(d, s + i + 3, j - i - 3, flags | MD_MENTION, link);
@@ -265,6 +281,27 @@ static void flush(md_doc_t *d, int kind, sb_t *pending)
     sb_clear(pending);
 }
 
+/* Emoji-only messages (custom or unicode, up to 30) are drawn large, like Discord does. */
+static int only_emoji(const md_doc_t *d)
+{
+    int count = 0;
+
+    for (int i = 0; i < d->len; i++) {
+        wchar_t c = d->text[i];
+        if (c == ' ' || c == '\n' || c == 0xFE0F || c == 0x200D || (c >= 0xDC00 && c <= 0xDFFF))
+            continue;
+        if (d->nspans && d->spans[d->nspans - 1].flags == MD_EDITED && i >= d->spans[d->nspans - 1].start)
+            break; /* the "(edited)" label does not count */
+        if (c == 0xFFFC || (c >= 0x2190 && c <= 0x2BFF) || c == 0x00A9 || c == 0x00AE ||
+            (c >= 0xD83C && c <= 0xD83E)) { /* U+1F000..U+1FAFF */
+            count++;
+            continue;
+        }
+        return 0;
+    }
+    return count > 0 && count <= 30;
+}
+
 void md_parse(const char *s, size_t n, md_doc_t *doc)
 {
     sb_t pending = {0};
@@ -349,6 +386,7 @@ void md_parse(const char *s, size_t n, md_doc_t *doc)
     }
     flush(doc, pending_kind, &pending);
     sb_free(&pending);
+    doc->jumbo = doc->nblocks == 1 && doc->blocks[0].kind == MD_PARA && only_emoji(doc);
 }
 
 void md_free(md_doc_t *doc)

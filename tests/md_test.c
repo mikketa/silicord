@@ -83,6 +83,22 @@ static void test_links(void)
     check(text_is("[x](javascript:alert)") && g_doc.nlinks == 0, "only http(s) links");
 }
 
+static void test_emoji(void)
+{
+    parse("hi " MD_EMOJI_OPEN "a55:party" MD_EMOJI_CLOSE "!");
+    check(text_is("hi \xEF\xBF\xBC!") && flags_of("\xEF\xBF\xBC") == MD_EMOJI && g_doc.nlinks == 1 &&
+              lstrcmpA(md_link(&g_doc, 0), "a55") == 0 && !g_doc.jumbo,
+          "custom emoji become one object character");
+    parse(MD_EMOJI_OPEN "1:a" MD_EMOJI_CLOSE " \xF0\x9F\x98\x80");
+    check(g_doc.jumbo, "emoji-only messages are jumbo");
+    parse("ok \xF0\x9F\x98\x80");
+    check(!g_doc.jumbo, "text with emoji is not jumbo");
+    parse("fixed " MD_EDITED_MARK);
+    check(text_is("fixed (edited)") && flags_of("(edited)") == MD_EDITED, "edited label");
+    parse("\xF0\x9F\x98\x80 " MD_EDITED_MARK);
+    check(g_doc.jumbo, "the edited label does not break jumbo emoji");
+}
+
 static void test_blocks(void)
 {
     parse("> q1\n> q2\nplain\n```js\ncode *x*\n```\n# Title\n- a\n- b");
@@ -105,6 +121,7 @@ void entry(void)
 {
     test_inline();
     test_links();
+    test_emoji();
     test_blocks();
     md_free(&g_doc);
     finish();
