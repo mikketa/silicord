@@ -20,6 +20,7 @@ endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
 add_library(silicord_core STATIC
+  src/json.c
   src/mem.c
   src/rt.c
   src/sb.c
