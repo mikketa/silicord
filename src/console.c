@@ -1,4 +1,6 @@
 #include "console.h"
+#include "mem.h"
+#include "qr.h"
 #include "sc_asm.h"
 #include "utf.h"
 
@@ -100,4 +102,30 @@ void con_banner(void)
         p = append(p, "  " AMBER BLOCK BLOCK BLOCK BLOCK BLOCK BLOCK BLOCK BLOCK RESET "\r\n");
         con_write(line, (DWORD)(p - line));
     }
+}
+
+void con_qr(const char *text)
+{
+    enum { QUIET = 2 };
+    qr_t *qr = mem_alloc(sizeof *qr);
+    sb_t out = {0};
+
+    if (qr_encode(text, sc_strlen(text), qr)) {
+        int n = qr->size + 2 * QUIET;
+        for (int y = 0; y < n; y += 2) {
+            for (int x = 0; x < n; x++) {
+                int qx = x - QUIET, qy = y - QUIET;
+                int top = qx >= 0 && qx < qr->size && qy >= 0 && qy < qr->size && qr_dark(qr, qx, qy);
+                int bottom = qx >= 0 && qx < qr->size && qy + 1 >= 0 && qy + 1 < qr->size && qr_dark(qr, qx, qy + 1);
+                /* Upper half block: foreground is the top module, background the bottom one. */
+                sb_add(&out, top ? "\x1b[38;2;0;0;0m" : "\x1b[38;2;255;255;255m");
+                sb_add(&out, bottom ? "\x1b[48;2;0;0;0m" : "\x1b[48;2;255;255;255m");
+                sb_add(&out, "\xE2\x96\x80");
+            }
+            sb_add(&out, RESET "\r\n");
+        }
+        con_print_sb(&out);
+    }
+    sb_free(&out);
+    mem_free(qr);
 }

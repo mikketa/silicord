@@ -5,7 +5,10 @@
 #include "gw.h"
 #include "http.h"
 #include "json.h"
+#include "ra.h"
 #include "sb.h"
+
+#define QR_ATTEMPTS 5
 
 static volatile LONG g_cancelled;
 
@@ -70,6 +73,43 @@ static int save_token(const sb_t *token)
 
     if (ok)
         con_print("token saved in the Windows Credential Manager\r\n");
+    return ok;
+}
+
+static void on_qr(void *ctx, const char *url)
+{
+    (void)ctx;
+    con_print("\r\nScan this code with the Discord mobile app (Settings > Scan QR Code):\r\n\r\n");
+    con_qr(url);
+}
+
+static void on_scanned(void *ctx, const char *name)
+{
+    (void)ctx;
+    print_line("\r\nscanned by ", *name ? name : "your account");
+    con_print("confirm the login on your phone\r\n");
+}
+
+static void on_login_status(void *ctx, const char *text)
+{
+    (void)ctx;
+    print_line("login: ", text);
+}
+
+static int login_qr(void)
+{
+    static const ra_events_t ev = {NULL, on_qr, on_scanned, on_login_status};
+    sb_t token = {0};
+    int ok = 0;
+
+    for (int i = 0; i < QR_ATTEMPTS && !ok && !g_cancelled; i++) {
+        if (ra_login(&ev, &token))
+            ok = save_token(&token);
+        else if (i + 1 < QR_ATTEMPTS && !g_cancelled)
+            con_print("getting a new code...\r\n");
+        sb_clear(&token);
+    }
+    sb_free(&token);
     return ok;
 }
 
@@ -144,6 +184,7 @@ static BOOL WINAPI on_ctrl(DWORD type)
 {
     (void)type;
     InterlockedExchange(&g_cancelled, 1);
+    ra_cancel();
     gw_stop();
     return TRUE;
 }
@@ -200,7 +241,7 @@ void entry(void)
     SetConsoleCtrlHandler(on_ctrl, TRUE);
 
     if (take(&arg, "login")) {
-        ok = login_token();
+        ok = take(&arg, "--token") ? login_token() : login_qr();
     } else if (take(&arg, "logout")) {
         ok = cmd_logout();
     } else if (!*arg) {
@@ -209,7 +250,7 @@ void entry(void)
         con_print("\r\n");
         ok = cmd_run();
     } else {
-        con_print("usage: silicord [login | logout]\r\n");
+        con_print("usage: silicord [login [--token] | logout]\r\n");
         ok = 0;
     }
     ExitProcess(ok ? 0 : 1);

@@ -38,6 +38,7 @@ add_executable(silicord
   src/cred.c
   src/gw.c
   src/http.c
+  src/ra.c
   src/ws.c
 )
 silicord_no_crt(silicord)
