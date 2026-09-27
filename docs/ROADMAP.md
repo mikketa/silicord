@@ -41,7 +41,8 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [ ] Color emoji (DirectWrite)
 - [ ] Text rendering with GDI / DirectWrite
 - [ ] Mentions, replies, edit and delete
-- [ ] Windows notifications
+- [x] Unread markers, mention badges, read sync with other devices
+- [x] Windows notifications for DMs and mentions (role mentions not yet)
 - [ ] Executable icon from `assets/logo.svg`
 
 ## 5. Later
