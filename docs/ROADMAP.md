@@ -43,16 +43,25 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Message view (grouping, dates, replies, mentions) and composer
 - [x] Software renderer on DirectWrite (no Direct2D, no GPU), color emoji everywhere, drawn in bands
 - [x] Discord markdown: bold, italic, underline, strike, code, code blocks, quotes, headings, lists, spoilers, links
-- [ ] Mentions, replies, edit and delete
+- [x] Replies, edit (also with the up arrow) and delete with confirmation, hover toolbar
+- [x] Images, files, link previews and bot embeds, stickers, custom emoji, jumbo emoji, "(edited)"
+- [x] Reactions: counts, adding and removing, live updates
+- [x] Emoji picker with search, categories and the server's emoji; `:name:` becomes the emoji on send
+- [x] File uploads: plus button and drag and drop
+- [x] Typing indicator, both ways
+- [x] Member list with role groups, statuses, activities and bot tags; role colors on names
+- [x] Statuses in direct messages, and picking our own (online, idle, do not disturb, invisible)
+- [ ] Mention and emoji autocomplete in the composer
+- [ ] Threads, forums, pins, search
+- [ ] Friends list
 - [x] Unread markers, mention badges, read sync with other devices
 - [x] Windows notifications for DMs, mentions and role mentions
 - [x] Profile popouts: banner, avatar decoration, display name fonts and effects, server tag, badges, mutual friends and servers, bio, message box
-- [ ] Profile popouts: roles, presence, animated banners and decorations
+- [ ] Profile popouts: roles, animated banners and decorations
 - [ ] Executable icon from `assets/logo.svg`
 
 ## 5. Later
 
-- [ ] Images and emojis (lazy loading)
-- [ ] Attachments
+- [ ] Animated GIFs, emoji and avatars
 - [ ] Themes
 - [ ] Voice (Opus + encryption), the biggest piece

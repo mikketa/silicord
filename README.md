@@ -7,7 +7,7 @@
 
 A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, DirectWrite and a few kilobytes.
 
-> **Status: early.** Silicord logs in with a QR code, shows your servers, channels and direct messages, reads and sends messages, and opens user profiles with their banner, badges, avatar decoration and display name style. See the [roadmap](docs/ROADMAP.md).
+> **Status: early.** Silicord logs in with a QR code and covers everyday text chat: servers, channels and direct messages; messages with formatting, custom emoji, images, files, link previews, stickers and reactions; replies, edits and deletes; file uploads; the emoji picker; typing indicators; the member list with statuses and role colors; and user profiles with their banner, badges, avatar decoration and display name style. See the [roadmap](docs/ROADMAP.md).
 
 ## Why
 
