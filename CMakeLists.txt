@@ -20,6 +20,8 @@ endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
 add_library(silicord_core STATIC
+  src/b64.c
+  src/crypto.c
   src/json.c
   src/mem.c
   src/rt.c
@@ -38,7 +40,7 @@ add_executable(silicord
 )
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 advapi32 winhttp)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 advapi32 bcrypt winhttp)
 
 enable_testing()
 function(silicord_test name)
