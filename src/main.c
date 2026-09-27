@@ -126,6 +126,7 @@ typedef struct {
     sb_t token;
     sb_t last_status;
     LONG id;
+    char me[24];        /* our user id, known after READY */
 } session_t;
 
 static int current(const session_t *s)
@@ -219,12 +220,61 @@ static int is_open(const char *channel_id)
     return open;
 }
 
+/* Mentioned directly, or through @everyone / @here. Role mentions are not resolved yet. */
+static int mentions_me(json_t d, const char *me)
+{
+    json_t v, list, user;
+    json_iter_t it;
+    char id[24];
+
+    if (json_get(d, "mention_everyone", &v) && json_type(v) == JSON_TRUE)
+        return 1;
+    if (!json_get(d, "mentions", &list))
+        return 0;
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &user))
+        if (json_get(user, "id", &v)) {
+            json_raw(v, id, sizeof id);
+            if (lstrcmpA(id, me) == 0)
+                return 1;
+        }
+    return 0;
+}
+
+static void post_activity(session_t *s, json_t d, const msg_t *m)
+{
+    activity_t *a = mem_alloc(sizeof *a);
+
+    a->kind = ACTIVITY_MESSAGE;
+    lstrcpynA(a->channel_id, m->channel_id, sizeof a->channel_id);
+    lstrcpynA(a->message_id, m->id, sizeof a->message_id);
+    a->from_me = s->me[0] && lstrcmpA(m->author_id, s->me) == 0;
+    a->mentions_me = !a->from_me && mentions_me(d, s->me);
+    sb_addn(&a->author, m->author.data ? m->author.data : "", m->author.len);
+    sb_addn(&a->preview, m->text.data ? m->text.data : "", m->text.len);
+    ui_post_activity(a);
+}
+
 static void on_dispatch(void *ctx, json_t t, json_t d)
 {
     session_t *s = ctx;
     int kind;
     msg_batch_t *b;
 
+    if (json_str_eq(t, "MESSAGE_ACK")) {
+        json_t v;
+        activity_t *a;
+        if (!current(s))
+            return;
+        a = mem_alloc(sizeof *a);
+        a->kind = ACTIVITY_ACK;
+        if (json_get(d, "channel_id", &v))
+            json_raw(v, a->channel_id, sizeof a->channel_id);
+        if (json_get(d, "message_id", &v))
+            json_raw(v, a->message_id, sizeof a->message_id);
+        ui_post_activity(a);
+        return;
+    }
     if (json_str_eq(t, "MESSAGE_CREATE"))
         kind = BATCH_NEW;
     else if (json_str_eq(t, "MESSAGE_UPDATE"))
@@ -234,6 +284,8 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
     else
         return;
     b = msg_batch_one(d, kind);
+    if (b->n && kind == BATCH_NEW && current(s))
+        post_activity(s, d, &b->msgs[0]);
     if (b->n && current(s) && is_open(b->channel_id))
         ui_post_batch(b);
     else
@@ -244,7 +296,10 @@ static void on_ready(void *ctx, json_t d)
 {
     session_t *s = ctx;
     model_t *model;
+    json_t user, v;
 
+    if (json_get(d, "user", &user) && json_get(user, "id", &v))
+        json_raw(v, s->me, sizeof s->me);
     log_line("gateway: ", "ready");
     log_ready_shape(d);
     model = model_from_ready(d);
@@ -449,6 +504,28 @@ void app_logout(void)
 void app_reconnect(void)
 {
     start_session();
+}
+
+static DWORD WINAPI ack_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[128];
+    static const char body[] = "{\"token\":null}";
+
+    wsprintfA(path, "/channels/%s/messages/%s/ack", j->channel, j->before);
+    http_request("POST", path, j->token.data, body, sizeof body - 1, &resp);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_ack(const char *channel_id, const char *message_id)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->before, message_id, sizeof j->before);
+    CloseHandle(CreateThread(NULL, 0, ack_main, j, 0, NULL));
 }
 
 void app_open_channel(const char *channel_id)

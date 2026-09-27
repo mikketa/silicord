@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include "ui.h"
 #include "gfx.h"
 #include "img.h"
@@ -100,9 +101,18 @@ typedef struct {
     HWND composer;
     WNDPROC composer_proc;
     HBRUSH b_composer;
+
+    /* Notifications. */
+    NOTIFYICONDATAW tray;
+    int notified_channel;
+    int ack_pending;
 } ui_t;
 
-static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1};
+static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1};
+
+#define WM_TRAY (WM_APP + 60)
+#define TIMER_ACK 1
+#define ACK_DELAY 1500
 
 static const unsigned char k_word[8][7] = {
     {0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E}, {0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E},
@@ -143,6 +153,19 @@ void ui_post_model(model_t *model)
 {
     if (!PostMessageW(g_ui.wnd, UI_READY, 0, (LPARAM)model))
         model_free(model);
+}
+
+void activity_free(activity_t *a)
+{
+    sb_free(&a->author);
+    sb_free(&a->preview);
+    mem_free(a);
+}
+
+void ui_post_activity(activity_t *a)
+{
+    if (!PostMessageW(g_ui.wnd, UI_ACTIVITY, 0, (LPARAM)a))
+        activity_free(a);
 }
 
 void ui_post_batch(msg_batch_t *batch)
@@ -542,6 +565,78 @@ static void initials(const char *name, wchar_t *out, int max)
     mem_free(w);
 }
 
+/* ---- Unread state ---- */
+
+#define C_BADGE 0xFFE5484Du
+
+static int channel_muted(unsigned i)
+{
+    int g = model_channel_guild(g_ui.model, i);
+    return chan((int)i)->muted || (g >= 0 && g_ui.model->guilds[g].muted);
+}
+
+static int channel_unread(unsigned i)
+{
+    return !channel_muted(i) && model_unread(g_ui.model, i);
+}
+
+static void range_state(unsigned first, unsigned count, int *unread, int *mentions)
+{
+    *unread = *mentions = 0;
+    for (unsigned i = first; i < first + count; i++) {
+        *mentions += chan((int)i)->mentions;
+        if (!chan((int)i)->muted && model_unread(g_ui.model, i))
+            *unread = 1;
+    }
+}
+
+static void guild_state(int g, int *unread, int *mentions)
+{
+    const guild_t *gd = &g_ui.model->guilds[g];
+
+    range_state(gd->first, gd->count, unread, mentions);
+    if (gd->muted)
+        *unread = 0;
+}
+
+static int total_mentions(void)
+{
+    int total = 0;
+
+    for (unsigned i = 0; g_ui.model && i < g_ui.model->nchannels; i++)
+        total += g_ui.model->channels[i].mentions;
+    return total;
+}
+
+static void update_title(void)
+{
+    int n = total_mentions();
+    wchar_t title[32];
+
+    if (n)
+        wsprintfW(title, L"(%d) Silicord", n);
+    else
+        lstrcpyW(title, L"Silicord");
+    SetWindowTextW(g_ui.wnd, title);
+}
+
+/* Red count badge whose right edge is at `right`, vertically centered on `cy`. */
+static void paint_badge(int right, int cy, int count)
+{
+    char label[8];
+    int w;
+
+    if (count > 99)
+        lstrcpyA(label, "99+");
+    else
+        wsprintfA(label, "%d", count);
+    w = text_width(g_ui.f_cat, label) + S(10);
+    if (w < S(18))
+        w = S(18);
+    gfx_round_rect(g_ui.g, right - w, cy - S(9), w, S(18), S(9), C_BADGE);
+    text(g_ui.f_cat, C_INK, rect(right - w, cy - S(9), w, S(18)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
 static void paint_pill(int y, int height)
 {
     gfx_round_rect(g_ui.g, -S(4), y + (S(ICON) - height) / 2, S(8), height, S(4), ARGB(C_INK));
@@ -560,6 +655,14 @@ static void paint_rail(RECT rc)
     draw_mark(x + S(8), home_y + S(8), S(2), sel_home || hov_home ? C_RAIL : C_AMBER);
     if (sel_home)
         paint_pill(home_y, S(40));
+    if (g_ui.model) {
+        int unread, mentions;
+        range_state(g_ui.model->dm_first, g_ui.model->dm_count, &unread, &mentions);
+        if (mentions) {
+            gfx_circle(g_ui.g, x + S(ICON) - S(20), home_y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
+            paint_badge(x + S(ICON) + S(2), home_y + S(ICON) - S(8), mentions);
+        }
+    }
     fill(x + S(8), home_y + S(ICON) + S(10), S(32), S(2), C_LINE);
 
     for (int i = 0; g_ui.model && i < (int)g_ui.model->nguilds; i++) {
@@ -580,8 +683,18 @@ static void paint_rail(RECT rc)
             text_w(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial, sel || hov ? C_RAIL : C_INK,
                    rect(x, y, S(ICON), S(ICON)), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        if (sel || hov)
-            paint_pill(y, sel ? S(40) : S(20));
+        {
+            int unread, mentions;
+            guild_state(i, &unread, &mentions);
+            if (sel || hov)
+                paint_pill(y, sel ? S(40) : S(20));
+            else if (unread || mentions)
+                paint_pill(y, S(8));
+            if (mentions) {
+                gfx_circle(g_ui.g, x + S(ICON) - S(20), y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
+                paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
+            }
+        }
     }
 }
 
@@ -625,8 +738,14 @@ static void paint_channel_row(unsigned i, int y)
             text_w(g_ui.f_small, C_INK, rect(x + S(8), y + S(6), S(32), S(32)), ini, -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        text(g_ui.f_body, sel || hov ? C_INK : C_MUTED, rect(x + S(50), y, w - S(56), S(DM_ROW_H)), name,
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        {
+            int unread = channel_unread(i), badge = c->mentions ? S(30) : 0;
+            text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
+                 rect(x + S(50), y, w - S(56) - badge, S(DM_ROW_H)), name,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (c->mentions)
+                paint_badge(x + w - S(8), y + S(DM_ROW_H) / 2, c->mentions);
+        }
         return;
     }
     if (sel || hov)
@@ -636,8 +755,16 @@ static void paint_channel_row(unsigned i, int y)
                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     else
         text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    text(g_ui.f_body, sel ? C_INK : hov ? C_INK : C_MUTED, rect(x + S(34), y, w - S(40), S(ROW_H)), name,
-         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    {
+        int unread = channel_unread(i), muted = channel_muted(i), badge = c->mentions ? S(30) : 0;
+        int color = sel || hov || unread ? C_INK : muted ? C_FAINT : C_MUTED;
+        if (unread && !sel)
+            gfx_round_rect(g_ui.g, S(RAIL_W) - S(4), y + S(ROW_H) / 2 - S(4), S(8), S(8), S(4), ARGB(C_INK));
+        text(unread ? g_ui.f_h : g_ui.f_body, color, rect(x + S(34), y, w - S(40) - badge, S(ROW_H)), name,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (c->mentions)
+            paint_badge(x + w - S(8), y + S(ROW_H) / 2, c->mentions);
+    }
 }
 
 static void paint_user_panel(RECT rc)
@@ -1404,6 +1531,108 @@ static HICON make_icon(int px)
     return icon;
 }
 
+/* ---- Read markers and notifications ---- */
+
+static int window_active(void)
+{
+    return GetForegroundWindow() == g_ui.wnd && !IsIconic(g_ui.wnd);
+}
+
+/* Marks channel i read locally and tells Discord if something was unread. */
+static void mark_read(int i)
+{
+    channel_t *c = &g_ui.model->channels[i];
+    int was_unread = model_unread(g_ui.model, (unsigned)i) || c->mentions;
+
+    if (c->last_message[0])
+        lstrcpynA(c->read, c->last_message, sizeof c->read);
+    c->mentions = 0;
+    if (was_unread && c->last_message[0])
+        app_ack(c->id, c->last_message);
+    update_title();
+}
+
+static void utf8_to_buf(const char *s, size_t n, wchar_t *out, int size)
+{
+    wchar_t *w = utf8_to_wide(s ? s : "", s ? n : 0);
+
+    lstrcpynW(out, w, size);
+    mem_free(w);
+}
+
+static void notify(int i, const activity_t *a)
+{
+    const channel_t *c = chan(i);
+    int g = model_channel_guild(g_ui.model, (unsigned)i);
+    const char *author = a->author.data ? a->author.data : "";
+    char title[200];
+    FLASHWINFO fw = {sizeof fw, g_ui.wnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
+
+    if (g >= 0)
+        wsprintfA(title, "%.60s (#%.60s, %.60s)", author, model_str(g_ui.model, c->name),
+                  model_str(g_ui.model, g_ui.model->guilds[g].name));
+    else if (c->type == CH_GROUP_DM)
+        wsprintfA(title, "%.60s (%.100s)", author, model_str(g_ui.model, c->name));
+    else
+        wsprintfA(title, "%.60s", author);
+
+    g_ui.tray.uFlags = NIF_INFO;
+    utf8_to_buf(title, (size_t)lstrlenA(title), g_ui.tray.szInfoTitle, ARRAYSIZE(g_ui.tray.szInfoTitle));
+    if (a->preview.len)
+        utf8_to_buf(a->preview.data, a->preview.len, g_ui.tray.szInfo, ARRAYSIZE(g_ui.tray.szInfo));
+    else
+        lstrcpyW(g_ui.tray.szInfo, L"Sent a message");
+    g_ui.tray.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+    g_ui.tray.hBalloonIcon = g_ui.icon_big;
+    Shell_NotifyIconW(NIM_MODIFY, &g_ui.tray);
+    g_ui.notified_channel = i;
+    if (!window_active())
+        FlashWindowEx(&fw);
+}
+
+static void on_activity(activity_t *a)
+{
+    channel_t *c;
+    int i;
+
+    if (!g_ui.model || (i = model_find_channel(g_ui.model, a->channel_id)) < 0)
+        return;
+    c = &g_ui.model->channels[i];
+
+    if (a->kind == ACTIVITY_ACK) {
+        if (model_id_cmp(a->message_id, c->read) > 0)
+            lstrcpynA(c->read, a->message_id, sizeof c->read);
+        if (!model_unread(g_ui.model, (unsigned)i))
+            c->mentions = 0;
+    } else {
+        if (model_id_cmp(a->message_id, c->last_message) > 0)
+            lstrcpynA(c->last_message, a->message_id, sizeof c->last_message);
+        if (a->from_me) {
+            lstrcpynA(c->read, a->message_id, sizeof c->read);
+            c->mentions = 0;
+        } else if (i == g_ui.channel && window_active()) {
+            /* Being read right now: acknowledge after a short pause to batch bursts. */
+            lstrcpynA(c->read, a->message_id, sizeof c->read);
+            g_ui.ack_pending = 1;
+            SetTimer(g_ui.wnd, TIMER_ACK, ACK_DELAY, NULL);
+        } else {
+            int dm = is_dm_type(c->type);
+            if (a->mentions_me || dm)
+                c->mentions++;
+            if (a->mentions_me || (dm && !c->muted))
+                notify(i, a);
+        }
+    }
+    update_title();
+}
+
+static void show_window(void)
+{
+    if (IsIconic(g_ui.wnd))
+        ShowWindow(g_ui.wnd, SW_RESTORE);
+    SetForegroundWindow(g_ui.wnd);
+}
+
 /* ---- Selection ---- */
 
 static void place_composer(void)
@@ -1441,6 +1670,7 @@ static void open_channel(int index)
         return;
     }
     c = chan(index);
+    mark_read(index);
     lstrcpynA(g_ui.msgs_channel, c->id, sizeof g_ui.msgs_channel);
     g_ui.msgs_loading = 1;
     g_ui.msgs_has_more = 1;
@@ -1509,6 +1739,26 @@ static void on_click(int kind, int index)
     }
 }
 
+/* Jumps to channel i, as when clicking a notification. */
+static void go_to_channel(int i)
+{
+    int g;
+
+    if (!g_ui.model || i < 0 || (unsigned)i >= g_ui.model->nchannels)
+        return;
+    g = model_channel_guild(g_ui.model, (unsigned)i);
+    if (g != g_ui.guild)
+        select_guild(g);
+    if (g_ui.channel != i) {
+        if (g >= 0)
+            g_ui.last_channel[g] = i;
+        else
+            g_ui.last_dm = i;
+        open_channel(i);
+    }
+    redraw();
+}
+
 static void set_model(model_t *m)
 {
     model_free(g_ui.model);
@@ -1550,6 +1800,12 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         redraw();
         return;
     }
+    if (msg == UI_ACTIVITY) {
+        on_activity((activity_t *)lp);
+        activity_free((activity_t *)lp);
+        redraw();
+        return;
+    }
 
     switch (msg) {
     case UI_QR:
@@ -1584,6 +1840,7 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         break;
     case UI_READY:
         set_model((model_t *)lp);
+        update_title();
         set_text(&g_ui.status, "Online");
         g_ui.view = VIEW_APP;
         redraw();
@@ -1785,14 +2042,47 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         redraw();
         return 0;
     }
+    case WM_TIMER:
+        if (wp == TIMER_ACK) {
+            KillTimer(wnd, TIMER_ACK);
+            if (g_ui.ack_pending && g_ui.model && g_ui.channel >= 0) {
+                const channel_t *c = chan(g_ui.channel);
+                if (c->last_message[0])
+                    app_ack(c->id, c->last_message);
+            }
+            g_ui.ack_pending = 0;
+        }
+        return 0;
+    case WM_ACTIVATE:
+        /* Coming back to the window counts as reading the open channel. */
+        if (LOWORD(wp) != WA_INACTIVE && g_ui.model && g_ui.channel >= 0 &&
+            (model_unread(g_ui.model, (unsigned)g_ui.channel) || chan(g_ui.channel)->mentions)) {
+            mark_read(g_ui.channel);
+            redraw();
+        }
+        break;
+    case WM_TRAY:
+        switch (LOWORD(lp)) {
+        case NIN_BALLOONUSERCLICK:
+            show_window();
+            go_to_channel(g_ui.notified_channel);
+            break;
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+        case WM_LBUTTONUP:
+            show_window();
+            break;
+        }
+        return 0;
     case WM_CLOSE:
+        Shell_NotifyIconW(NIM_DELETE, &g_ui.tray);
         app_quit();
         return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_SEND_FAILED) {
+        if (msg >= UI_QR && msg <= UI_ACTIVITY) {
             on_worker(msg, wp, lp);
             return 0;
         }
@@ -1826,5 +2116,16 @@ HWND ui_create(HINSTANCE inst)
                                NULL, NULL, inst, NULL);
     DwmSetWindowAttribute(g_ui.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
     DwmSetWindowAttribute(g_ui.wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof caption);
+
+    g_ui.tray.cbSize = sizeof g_ui.tray;
+    g_ui.tray.hWnd = g_ui.wnd;
+    g_ui.tray.uID = 1;
+    g_ui.tray.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    g_ui.tray.uCallbackMessage = WM_TRAY;
+    g_ui.tray.hIcon = g_ui.icon_small;
+    lstrcpyW(g_ui.tray.szTip, L"Silicord");
+    Shell_NotifyIconW(NIM_ADD, &g_ui.tray);
+    g_ui.tray.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &g_ui.tray);
     return g_ui.wnd;
 }
