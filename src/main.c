@@ -1136,6 +1136,84 @@ void app_fetch_channel(const char *channel_id)
     CloseHandle(CreateThread(NULL, 0, channel_main, new_job(channel_id), 0, NULL));
 }
 
+static DWORD WINAPI settings_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+
+    /* j->before: method, j->text: "path\0body". */
+    {
+        const char *path = j->text.data, *body = path + lstrlenA(path) + 1;
+        size_t blen = j->text.len - (size_t)(body - path);
+        http_request(j->before, path, j->token.data, blen ? body : NULL, blen, &resp);
+    }
+    if (resp.status >= 400)
+        ui_post(UI_SEND_FAILED, ui_text("That change was not saved"));
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+static void rest(const char *method, const char *path, const sb_t *body)
+{
+    rest_job_t *j = new_job("");
+
+    lstrcpynA(j->before, method, sizeof j->before);
+    sb_add(&j->text, path);
+    sb_addn(&j->text, "", 1);
+    if (body && body->len)
+        sb_addn(&j->text, body->data, body->len);
+    CloseHandle(CreateThread(NULL, 0, settings_main, j, 0, NULL));
+}
+
+void app_mute(const char *guild_id, const char *channel_id, int muted)
+{
+    sb_t body = {0};
+    char path[96];
+
+    wsprintfA(path, "/users/@me/guilds/%s/settings", guild_id ? guild_id : "@me");
+    if (channel_id) {
+        sb_add(&body, "{\"channel_overrides\":{\"");
+        sb_add(&body, channel_id);
+        sb_add(&body, muted ? "\":{\"muted\":true,\"mute_config\":null}}}" : "\":{\"muted\":false}}}");
+    } else {
+        sb_add(&body, muted ? "{\"muted\":true,\"mute_config\":null}" : "{\"muted\":false}");
+    }
+    rest("PATCH", path, &body);
+    sb_free(&body);
+}
+
+void app_ack_bulk(const char *pairs, int n)
+{
+    sb_t body = {0};
+    const char *p = pairs;
+
+    sb_add(&body, "{\"read_states\":[");
+    for (int i = 0; i < n; i++) {
+        const char *channel = p, *message = p + lstrlenA(p) + 1;
+        p = message + lstrlenA(message) + 1;
+        sb_add(&body, i ? ",{\"channel_id\":\"" : "{\"channel_id\":\"");
+        sb_add(&body, channel);
+        sb_add(&body, "\",\"message_id\":\"");
+        sb_add(&body, message);
+        sb_add(&body, "\",\"read_state_type\":0}");
+    }
+    sb_add(&body, "]}");
+    rest("POST", "/read-states/ack-bulk", &body);
+    sb_free(&body);
+}
+
+void app_leave_guild(const char *guild_id)
+{
+    sb_t body = {0};
+    char path[80];
+
+    wsprintfA(path, "/users/@me/guilds/%s", guild_id);
+    sb_add(&body, "{\"lurking\":false}");
+    rest("DELETE", path, &body);
+    sb_free(&body);
+}
+
 void app_ack(const char *channel_id, const char *message_id)
 {
     rest_job_t *j = new_job(channel_id);

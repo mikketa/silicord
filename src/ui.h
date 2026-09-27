@@ -81,6 +81,12 @@ void app_send_files(const char *channel_id, const char *text, const char *reply_
 void app_delete_message(const char *channel_id, const char *message_id);
 /* Shows "typing..." to the others for about ten seconds. */
 void app_typing(const char *channel_id);
+/* Mutes or unmutes a server (channel_id NULL) or one of its channels; guild_id NULL for a DM. */
+void app_mute(const char *guild_id, const char *channel_id, int muted);
+/* Marks n channels read at once: `pairs` holds channel id, NUL, message id, NUL, repeated. */
+void app_ack_bulk(const char *pairs, int n);
+/* Leaves a server; it goes away with GUILD_DELETE. */
+void app_leave_guild(const char *guild_id);
 /* Tells Discord (and your other devices) the channel was read up to message_id. */
 void app_ack(const char *channel_id, const char *message_id);
 /* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
