@@ -7,6 +7,7 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <psapi.h>
 #include "ui.h"
 #include "render.h"
 #include "img.h"
@@ -62,7 +63,13 @@ typedef struct {
     char key[96];
     r_image_t *img;
     int failed;
+    unsigned used;   /* paint that last drew it */
 } image_t;
+
+/* Decoded images kept in memory; images off screen beyond this are dropped (the disk cache keeps them). */
+#define IMAGE_BUDGET (16u << 20)
+/* Time a paint may spend decoding images from the disk cache before deferring the rest. */
+#define SYNC_DECODE_MS 8
 
 typedef struct {
     HWND wnd;
@@ -88,6 +95,9 @@ typedef struct {
     int hover_kind, hover_index;
     image_t *images;
     int nimages, cap_images;
+    unsigned frame;            /* paint counter, for the image cache */
+    int log_memory;
+    LARGE_INTEGER frame_start, qpf;
 
     /* Messages of the open channel, oldest first. */
     msg_t *msgs;
@@ -120,6 +130,7 @@ typedef struct {
     sb_t pop_name;
     int pop_self, pop_failed, pop_hover, pop_h, pop_input_y;
     int pop_ax, pop_ay, pop_above;
+    unsigned pop_frame;
     int pop_badge_x[32], pop_badge_y[32];
     md_doc_t pop_bio;
     r_rich_t *pop_rich;
@@ -315,23 +326,84 @@ static image_t *image_find(const char *key)
     return NULL;
 }
 
-/* Returns the image if loaded; starts loading it the first time it is asked for. */
-static r_image_t *image_get(const char *key, const char *path)
+/* Milliseconds since the current paint started. */
+static int frame_ms(void)
+{
+    LARGE_INTEGER now;
+
+    if (!g_ui.qpf.QuadPart)
+        QueryPerformanceFrequency(&g_ui.qpf);
+    QueryPerformanceCounter(&now);
+    return (int)((now.QuadPart - g_ui.frame_start.QuadPart) * 1000 / g_ui.qpf.QuadPart);
+}
+
+/* --debug: where the memory goes, ours against the whole process. */
+static void log_memory(const char *when)
+{
+    PROCESS_MEMORY_COUNTERS_EX pmc = {sizeof pmc};
+    size_t images = 0;
+    char line[200];
+
+    for (int i = 0; i < g_ui.nimages; i++)
+        images += r_image_bytes(g_ui.images[i].img);
+    K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof pmc);
+    wsprintfA(line, "[mem] %s: ours %u KB (peak %u KB, images %u KB in %d), process private %u KB, working set %u KB",
+              when, (unsigned)(mem_used() >> 10), (unsigned)(mem_peak() >> 10), (unsigned)(images >> 10), g_ui.nimages,
+              (unsigned)(pmc.PrivateUsage >> 10), (unsigned)(pmc.WorkingSetSize >> 10));
+    app_log(line);
+}
+
+/*
+ * Returns the image, from memory, else from the disk cache in the same frame
+ * (while the paint has time left), else starts downloading it.
+ */
+static r_image_t *image_get(const char *key, const char *path, int max_px)
 {
     image_t *im = image_find(key);
 
-    if (im)
+    if (im && im->img && r_image_lost(im->img)) { /* render target was recreated */
+        r_image_free(im->img);
+        im->img = NULL;
+        im->failed = 0;
+        img_request(key, path, max_px);
+    }
+    if (im) {
+        im->used = g_ui.frame;
         return im->img;
+    }
     if (g_ui.nimages == g_ui.cap_images) {
         g_ui.cap_images = g_ui.cap_images ? g_ui.cap_images * 2 : 64;
         g_ui.images = mem_realloc(g_ui.images, (size_t)g_ui.cap_images * sizeof *g_ui.images);
     }
     im = &g_ui.images[g_ui.nimages++];
     lstrcpynA(im->key, key, sizeof im->key);
-    im->img = NULL;
     im->failed = 0;
-    img_request(key, path);
-    return NULL;
+    im->used = g_ui.frame;
+    im->img = frame_ms() < SYNC_DECODE_MS ? img_cached(path, max_px) : NULL;
+    if (!im->img)
+        img_request(key, path, max_px);
+    return im->img;
+}
+
+/* Drops the least recently drawn images until the cache fits its budget. Images drawn in `keep` or later stay. */
+static void images_trim(unsigned keep)
+{
+    size_t total = 0;
+
+    for (int i = 0; i < g_ui.nimages; i++)
+        total += r_image_bytes(g_ui.images[i].img);
+    while (total > IMAGE_BUDGET) {
+        int oldest = -1;
+        for (int i = 0; i < g_ui.nimages; i++)
+            if (g_ui.images[i].img && (int)(g_ui.images[i].used - keep) < 0 &&
+                (oldest < 0 || (int)(g_ui.images[i].used - g_ui.images[oldest].used) < 0))
+                oldest = i;
+        if (oldest < 0)
+            return; /* everything left is on screen */
+        total -= r_image_bytes(g_ui.images[oldest].img);
+        r_image_free(g_ui.images[oldest].img);
+        g_ui.images[oldest] = g_ui.images[--g_ui.nimages];
+    }
 }
 
 static void images_clear(void)
@@ -350,7 +422,7 @@ static r_image_t *guild_icon(const guild_t *gd)
         return NULL;
     wsprintfA(key, "g:%s:%s", gd->id, gd->icon);
     wsprintfA(path, "/icons/%s/%s.png?size=96", gd->id, gd->icon);
-    return image_get(key, path);
+    return image_get(key, path, S(ICON));
 }
 
 static r_image_t *user_avatar(const char *id, const char *hash)
@@ -368,7 +440,7 @@ static r_image_t *user_avatar(const char *id, const char *hash)
         wsprintfA(key, "d:%d", (int)((n >> 22) % 6));
         wsprintfA(path, "/embed/avatars/%d.png", (int)((n >> 22) % 6));
     }
-    return image_get(key, path);
+    return image_get(key, path, S(40));
 }
 
 static r_image_t *dm_icon(const channel_t *c)
@@ -381,7 +453,7 @@ static r_image_t *dm_icon(const channel_t *c)
         return NULL;
     wsprintfA(key, "c:%s:%s", c->id, c->avatar);
     wsprintfA(path, "/channel-icons/%s/%s.png?size=64", c->id, c->avatar);
-    return image_get(key, path);
+    return image_get(key, path, S(40));
 }
 
 /* ---- Login view ---- */
@@ -1232,6 +1304,7 @@ static void on_batch(msg_batch_t *b)
         g_ui.msgs_status = b->status;
         g_ui.msgs_has_more = b->has_more;
         g_ui.msg_scroll = 0;
+        g_ui.log_memory = 1; /* after the next paint lays the messages out */
         reserve_msgs(b->n);
         for (int i = 0; i < b->n; i++)
             g_ui.msgs[g_ui.nmsgs++] = b->msgs[i];
@@ -1535,6 +1608,8 @@ static void paint(HWND wnd)
     HDC dc = BeginPaint(wnd, &ps);
 
     GetClientRect(wnd, &rc);
+    g_ui.frame++;
+    QueryPerformanceCounter(&g_ui.frame_start);
     if (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
         if (g_ui.view == VIEW_APP)
             paint_app(rc);
@@ -1545,6 +1620,14 @@ static void paint(HWND wnd)
         r_end();
     }
     EndPaint(wnd, &ps);
+    /* The popout is painted separately: what it shows was drawn at its last paint. */
+    images_trim(g_ui.pop && (int)(g_ui.pop_frame - g_ui.frame) < 0 ? g_ui.pop_frame : g_ui.frame);
+    if (g_ui.log_memory && g_ui.nmsgs) {
+        char when[64];
+        g_ui.log_memory = 0;
+        wsprintfA(when, "%d messages shown", g_ui.nmsgs);
+        log_memory(when);
+    }
 }
 
 static void redraw(void)
@@ -2382,7 +2465,7 @@ static r_image_t *pop_avatar(const profile_t *p)
         wsprintfA(path, "/guilds/%s/users/%s/avatars/%s.png?size=256", p->guild_id, p->id, p->avatar);
     else
         wsprintfA(path, "/avatars/%s/%s.png?size=256", p->id, p->avatar);
-    return image_get(key, path);
+    return image_get(key, path, S(POP_AVATAR));
 }
 
 static r_image_t *pop_banner(const profile_t *p)
@@ -2396,16 +2479,16 @@ static r_image_t *pop_banner(const profile_t *p)
         wsprintfA(path, "/guilds/%s/users/%s/banners/%s.png?size=600", p->guild_id, p->id, p->banner);
     else
         wsprintfA(path, "/banners/%s/%s.png?size=600", p->id, p->banner);
-    return image_get(key, path);
+    return image_get(key, path, S(POP_W));
 }
 
-static r_image_t *cdn_image(const char *prefix, const char *path_fmt, const char *a, const char *b)
+static r_image_t *cdn_image(const char *prefix, const char *path_fmt, const char *a, const char *b, int max_px)
 {
     char key[96], path[200];
 
     wsprintfA(key, "%s:%s:%s", prefix, a, b ? b : "");
     wsprintfA(path, path_fmt, a, b);
-    return image_get(key, path);
+    return image_get(key, path, max_px);
 }
 
 /* ---- Layout ---- */
@@ -2498,7 +2581,7 @@ static int pop_render(int draw)
             r_circle(ax, ay, S(POP_AVATAR), ARGB(C_ITEM));
         if (p && p->decoration[0]) {
             r_image_t *deco = cdn_image("ad", "/avatar-decoration-presets/%s.png?size=240&passthrough=false",
-                                        p->decoration, NULL);
+                                        p->decoration, NULL, S(POP_AVATAR) * 6 / 5);
             int d = S(POP_AVATAR) * 6 / 5;
             if (deco)
                 r_image(deco, ax - (d - S(POP_AVATAR)) / 2, ay - (d - S(POP_AVATAR)) / 2, d, d, 0);
@@ -2550,7 +2633,8 @@ static int pop_render(int draw)
             if (draw) {
                 r_round(x, y + S(2), tw, lh - S(4), S(4), 0x26FFFFFFu);
                 if (p->tag_badge[0] && p->tag_guild[0]) {
-                    r_image_t *tb = cdn_image("gt", "/guild-tag-badges/%s/%s.png?size=32", p->tag_guild, p->tag_badge);
+                    r_image_t *tb = cdn_image("gt", "/guild-tag-badges/%s/%s.png?size=32", p->tag_guild, p->tag_badge,
+                                              S(14));
                     if (tb)
                         r_image(tb, x + S(4), y + (lh - S(14)) / 2, S(14), S(14), 0);
                 }
@@ -2568,7 +2652,7 @@ static int pop_render(int draw)
             g_ui.pop_badge_x[i] = x;
             g_ui.pop_badge_y[i] = y;
             if (draw) {
-                r_image_t *bi = cdn_image("bi", "/badge-icons/%s.png?size=64", p->badges[i].icon, NULL);
+                r_image_t *bi = cdn_image("bi", "/badge-icons/%s.png?size=64", p->badges[i].icon, NULL, S(POP_BADGE));
                 if (g_ui.pop_hover == i)
                     r_round(x - S(2), y - S(2) + (lh - S(POP_BADGE)) / 2, S(POP_BADGE) + S(4), S(POP_BADGE) + S(4), S(4),
                             0x1FFFFFFFu);
@@ -2844,6 +2928,8 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         RECT rc;
         HDC dc = BeginPaint(wnd, &ps);
         GetClientRect(wnd, &rc);
+        g_ui.pop_frame = ++g_ui.frame;
+        QueryPerformanceCounter(&g_ui.frame_start);
         if (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
             pop_render(1);
             r_end();
@@ -3110,6 +3196,13 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         img_init(wnd, UI_IMAGE);
         return 0;
     case WM_SIZE:
+        if (wp == SIZE_MINIMIZED) {
+            /* Sitting in the tray: return free heap pages and the working set to Windows. */
+            pop_close();
+            HeapCompact(GetProcessHeap(), 0);
+            SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+            return 0;
+        }
         clamp_scroll();
         clamp_msg_scroll();
         place_composer();

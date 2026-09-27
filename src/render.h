@@ -22,11 +22,18 @@ void r_end(void);
 void r_fill(int x, int y, int w, int h, unsigned argb);
 void r_round(int x, int y, int w, int h, int radius, unsigned argb);
 void r_circle(int x, int y, int d, unsigned argb);
-/* Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle). */
+/*
+ * Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle).
+ * The decoded pixels are freed once they are on the render target, so an image
+ * is only held once; if the target is lost, r_image_lost() tells to reload it.
+ */
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
+int r_image_lost(const r_image_t *img);
+/* Memory the image holds, in bytes. */
+size_t r_image_bytes(const r_image_t *img);
 /* Same, but scaled to cover the rectangle and cropped around the center. */
 void r_image_cover(r_image_t *img, int x, int y, int w, int h, int radius);
-/* Average color of the opaque pixels, 0xFFRRGGBB (0 if there are none). */
+/* Average color of the opaque pixels, 0xFFRRGGBB (0 if there are none), computed when decoding. */
 unsigned r_image_average(r_image_t *img);
 /* Rounded rectangle filled with a vertical gradient, and a rounded outline. */
 void r_round_gradient(int x, int y, int w, int h, int radius, unsigned top, unsigned bottom);
@@ -79,8 +86,11 @@ void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers);
 int r_rich_hit(r_rich_t *r, int x, int y, unsigned *flags, int *link);
 void r_rich_free(r_rich_t *r);
 
-/* PNG, JPEG, GIF, WebP... decoded to premultiplied BGRA. Safe from any thread. */
-r_image_t *r_image_decode(const void *data, size_t n);
+/*
+ * PNG, JPEG, GIF, WebP... decoded to premultiplied BGRA, scaled down so that
+ * neither side exceeds `max_px` (0 keeps the size). Safe from any thread.
+ */
+r_image_t *r_image_decode(const void *data, size_t n, int max_px);
 void r_image_free(r_image_t *img);
 
 #ifdef __cplusplus

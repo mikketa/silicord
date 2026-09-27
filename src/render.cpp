@@ -19,9 +19,10 @@ struct r_font {
 
 struct r_image {
     UINT w, h;
-    BYTE *pixels;          /* premultiplied BGRA */
+    BYTE *pixels;          /* premultiplied BGRA, freed once the bitmap exists */
     ID2D1Bitmap *bitmap;   /* created on first draw */
     unsigned generation;   /* render target the bitmap belongs to */
+    unsigned average;
 };
 
 static ID2D1Factory *g_d2d;
@@ -145,9 +146,11 @@ extern "C" void r_image(r_image_t *img, int x, int y, int w, int h, int radius)
     if (!img->bitmap) {
         D2D1_BITMAP_PROPERTIES bp = {{DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96, 96};
         D2D1_SIZE_U size = {img->w, img->h};
-        if (FAILED(g_rt->CreateBitmap(size, img->pixels, img->w * 4, &bp, &img->bitmap)))
+        if (!img->pixels || FAILED(g_rt->CreateBitmap(size, img->pixels, img->w * 4, &bp, &img->bitmap)))
             return;
         img->generation = g_generation;
+        mem_free(img->pixels);
+        img->pixels = NULL;
     }
     if (FAILED(g_rt->CreateBitmapBrush(img->bitmap, &bb)))
         return;
@@ -197,12 +200,27 @@ extern "C" void r_image_cover(r_image_t *img, int x, int y, int w, int h, int ra
         g->Release();
 }
 
+extern "C" int r_image_lost(const r_image_t *img)
+{
+    return img && !img->pixels && (!img->bitmap || img->generation != g_generation);
+}
+
+extern "C" size_t r_image_bytes(const r_image_t *img)
+{
+    return img ? sizeof *img + (size_t)img->w * img->h * 4 : 0;
+}
+
 extern "C" unsigned r_image_average(r_image_t *img)
+{
+    return img ? img->average : 0;
+}
+
+static unsigned average_of(const r_image_t *img)
 {
     unsigned long long r = 0, g = 0, b = 0, n = 0;
     UINT step;
 
-    if (!img || !img->pixels)
+    if (!img->pixels)
         return 0;
     step = img->w * img->h > 4096 ? img->w * img->h / 4096 : 1;
     for (UINT i = 0; i < img->w * img->h; i += step) {
@@ -498,12 +516,14 @@ extern "C" int r_text_height(r_font_t *f, const wchar_t *s, int len, int width)
 
 /* ---- Images ---- */
 
-extern "C" r_image_t *r_image_decode(const void *data, size_t n)
+extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
 {
     IWICImagingFactory *wic = NULL;
     IWICStream *stream = NULL;
     IWICBitmapDecoder *dec = NULL;
     IWICBitmapFrameDecode *frame = NULL;
+    IWICBitmapScaler *scaler = NULL;
+    IWICBitmapSource *src = NULL;
     IWICFormatConverter *conv = NULL;
     r_image_t *img = NULL;
     UINT w = 0, h = 0;
@@ -515,8 +535,19 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n)
         SUCCEEDED(wic->CreateStream(&stream)) &&
         SUCCEEDED(stream->InitializeFromMemory((BYTE *)data, (DWORD)n)) &&
         SUCCEEDED(wic->CreateDecoderFromStream(stream, NULL, WICDecodeMetadataCacheOnDemand, &dec)) &&
-        SUCCEEDED(dec->GetFrame(0, &frame)) && SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
-        SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0,
+        SUCCEEDED(dec->GetFrame(0, &frame)) && SUCCEEDED(frame->GetSize(&w, &h)) && w && h) {
+        src = frame;
+        /* Keep no more pixels than will ever be shown. */
+        if (max_px > 0 && (w > (UINT)max_px || h > (UINT)max_px) &&
+            SUCCEEDED(wic->CreateBitmapScaler(&scaler))) {
+            UINT sw = w >= h ? (UINT)max_px : (UINT)((unsigned long long)w * (UINT)max_px / h);
+            UINT sh = h >= w ? (UINT)max_px : (UINT)((unsigned long long)h * (UINT)max_px / w);
+            if (SUCCEEDED(scaler->Initialize(frame, sw ? sw : 1, sh ? sh : 1, WICBitmapInterpolationModeFant)))
+                src = scaler;
+        }
+    }
+    if (src && SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
+        SUCCEEDED(conv->Initialize(src, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0,
                                    WICBitmapPaletteTypeCustom)) &&
         SUCCEEDED(conv->GetSize(&w, &h)) && w && h && w <= 4096 && h <= 4096) {
         img = (r_image_t *)mem_alloc(sizeof *img);
@@ -527,10 +558,14 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n)
             mem_free(img->pixels);
             mem_free(img);
             img = NULL;
+        } else {
+            img->average = average_of(img);
         }
     }
     if (conv)
         conv->Release();
+    if (scaler)
+        scaler->Release();
     if (frame)
         frame->Release();
     if (dec)
