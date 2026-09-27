@@ -77,6 +77,9 @@ add_test(NAME msg COMMAND msg_test)
 silicord_test(model_test)
 add_test(NAME model COMMAND model_test)
 
+silicord_test(md_test)
+add_test(NAME md COMMAND md_test)
+
 # The QR test needs an independent decoder: pip install numpy zxing-cpp
 silicord_test(qr_test)
 find_package(Python3 COMPONENTS Interpreter)
