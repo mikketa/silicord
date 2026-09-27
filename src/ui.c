@@ -81,6 +81,7 @@ typedef struct {
     sb_t account;
     int guild, channel;        /* selection, -1 = none */
     int *last_channel;         /* per guild */
+    int last_dm;
     unsigned char *collapsed;  /* per channel (categories) */
     int rail_scroll, side_scroll;
     int hover_kind, hover_index;
@@ -295,6 +296,19 @@ static gfx_image_t *user_avatar(const char *id, const char *hash)
     return image_get(key, path);
 }
 
+static gfx_image_t *dm_icon(const channel_t *c)
+{
+    char key[96], path[160];
+
+    if (c->type == CH_DM)
+        return c->user_id[0] ? user_avatar(c->user_id, c->avatar) : NULL;
+    if (!c->avatar[0])
+        return NULL;
+    wsprintfA(key, "c:%s:%s", c->id, c->avatar);
+    wsprintfA(path, "/channel-icons/%s/%s.png?size=64", c->id, c->avatar);
+    return image_get(key, path);
+}
+
 /* ---- Login view ---- */
 
 static RECT login_card(void)
@@ -385,30 +399,52 @@ static const channel_t *chan(int i)
     return &g_ui.model->channels[i];
 }
 
-/* Whether channel i is hidden inside a collapsed category. */
-static int hidden(const guild_t *gd, unsigned i)
+static int is_dm_type(int type)
 {
-    for (unsigned j = i; j-- > gd->first;)
+    return type == CH_DM || type == CH_GROUP_DM;
+}
+
+/* Channels listed in the side column: the open server's, or the DMs on the home screen. */
+static int side_range(unsigned *first, unsigned *count)
+{
+    if (!g_ui.model)
+        return 0;
+    if (g_ui.guild >= 0) {
+        *first = g_ui.model->guilds[g_ui.guild].first;
+        *count = g_ui.model->guilds[g_ui.guild].count;
+    } else {
+        *first = g_ui.model->dm_first;
+        *count = g_ui.model->dm_count;
+    }
+    return 1;
+}
+
+/* Whether channel i is hidden inside a collapsed category. */
+static int hidden(unsigned first, unsigned i)
+{
+    for (unsigned j = i; j-- > first;)
         if (chan((int)j)->type == CH_CATEGORY)
             return g_ui.collapsed[j];
     return 0;
 }
 
+#define DM_ROW_H 44
+
 static int row_height(unsigned i)
 {
-    return chan((int)i)->type == CH_CATEGORY ? S(CAT_H) : S(ROW_H);
+    int type = chan((int)i)->type;
+    return type == CH_CATEGORY ? S(CAT_H) : is_dm_type(type) ? S(DM_ROW_H) : S(ROW_H);
 }
 
 static int side_content(void)
 {
-    const guild_t *gd;
+    unsigned first, count;
     int h = S(8);
 
-    if (!g_ui.model || g_ui.guild < 0)
+    if (!side_range(&first, &count))
         return 0;
-    gd = &g_ui.model->guilds[g_ui.guild];
-    for (unsigned i = gd->first; i < gd->first + gd->count; i++)
-        if (chan((int)i)->type == CH_CATEGORY || !hidden(gd, i))
+    for (unsigned i = first; i < first + count; i++)
+        if (chan((int)i)->type == CH_CATEGORY || !hidden(first, i))
             h += row_height(i);
     return h + S(8);
 }
@@ -464,12 +500,12 @@ static void hit_test(int x, int y, int *kind, int *index)
                 *kind = HIT_RETRY;
             return;
         }
-        if (y >= S(HEADER_H) && g_ui.model && g_ui.guild >= 0) {
-            const guild_t *gd = &g_ui.model->guilds[g_ui.guild];
+        unsigned first, count;
+        if (y >= S(HEADER_H) && side_range(&first, &count)) {
             int ry = S(HEADER_H) + S(8) - g_ui.side_scroll;
-            for (unsigned i = gd->first; i < gd->first + gd->count; i++) {
+            for (unsigned i = first; i < first + count; i++) {
                 int h;
-                if (chan((int)i)->type != CH_CATEGORY && hidden(gd, i))
+                if (chan((int)i)->type != CH_CATEGORY && hidden(first, i))
                     continue;
                 h = row_height(i);
                 if (y >= ry && y < ry + h) {
@@ -576,6 +612,23 @@ static void paint_channel_row(unsigned i, int y)
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
+    if (is_dm_type(c->type)) {
+        gfx_image_t *img = dm_icon(c);
+        if (sel || hov)
+            gfx_round_rect(g_ui.g, x, y + S(1), w, S(DM_ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        if (img) {
+            gfx_image(g_ui.g, img, x + S(8), y + S(6), S(32), S(32), S(16));
+        } else {
+            wchar_t ini[8];
+            initials(name, ini, 8);
+            gfx_circle(g_ui.g, x + S(8), y + S(6), S(32), ARGB(C_ITEM));
+            text_w(g_ui.f_small, C_INK, rect(x + S(8), y + S(6), S(32), S(32)), ini, -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        text(g_ui.f_body, sel || hov ? C_INK : C_MUTED, rect(x + S(50), y, w - S(56), S(DM_ROW_H)), name,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
     if (sel || hov)
         gfx_round_rect(g_ui.g, x, y + S(1), w, S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
     if (c->type == CH_VOICE || c->type == CH_STAGE)
@@ -630,17 +683,20 @@ static void paint_side(RECT rc)
 
     fill(x0, 0, S(SIDE_W), rc.bottom, C_SIDE);
 
-    if (g_ui.model && g_ui.guild >= 0) {
-        const guild_t *gd = &g_ui.model->guilds[g_ui.guild];
+    unsigned first, count;
+
+    if (side_range(&first, &count)) {
         int y = S(HEADER_H) + S(8) - g_ui.side_scroll;
+        const char *title = g_ui.guild >= 0 ? model_str(g_ui.model, g_ui.model->guilds[g_ui.guild].name)
+                                            : "Direct Messages";
         HRGN clip = CreateRectRgn(x0, S(HEADER_H), x0 + S(SIDE_W), S(HEADER_H) + view);
 
         gfx_flush(g_ui.g);
         SelectClipRgn(g_ui.back, clip);
         gfx_end(g_ui.g);
         g_ui.g = gfx_begin(g_ui.back); /* GDI+ picks up the clip region */
-        for (unsigned i = gd->first; i < gd->first + gd->count; i++) {
-            if (chan((int)i)->type != CH_CATEGORY && hidden(gd, i))
+        for (unsigned i = first; i < first + count; i++) {
+            if (chan((int)i)->type != CH_CATEGORY && hidden(first, i))
                 continue;
             if (y + row_height(i) > S(HEADER_H) && y < S(HEADER_H) + view)
                 paint_channel_row(i, y);
@@ -652,17 +708,14 @@ static void paint_side(RECT rc)
         DeleteObject(clip);
         g_ui.g = gfx_begin(g_ui.back);
 
-        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), model_str(g_ui.model, gd->name),
+        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), title,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (!count)
+            text(g_ui.f_body, C_MUTED, rect(x0 + S(16), S(HEADER_H) + S(12), S(SIDE_W) - S(32), S(24)),
+                 g_ui.guild >= 0 ? "No channels you can see" : "No conversations yet", DT_LEFT | DT_SINGLELINE);
     } else {
-        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), "Home",
+        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), "Direct Messages",
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        if (g_ui.model) {
-            char line[64];
-            wsprintfA(line, "%u servers", g_ui.model->nguilds);
-            text(g_ui.f_body, C_MUTED, rect(x0 + S(16), S(HEADER_H) + S(12), S(SIDE_W) - S(32), S(24)), line,
-                 DT_LEFT | DT_SINGLELINE);
-        }
     }
     fill(x0, S(HEADER_H) - 1, S(SIDE_W), 1, C_LINE);
     paint_user_panel(rc);
@@ -994,7 +1047,22 @@ static void on_batch(msg_batch_t *b)
 static void paint_welcome(int x0, int y, int w, const char *name, int voice)
 {
     char title[160];
+    const channel_t *c = g_ui.channel >= 0 ? chan(g_ui.channel) : NULL;
 
+    if (c && is_dm_type(c->type)) {
+        gfx_image_t *img = dm_icon(c);
+        if (img)
+            gfx_image(g_ui.g, img, x0 + S(16), y, S(68), S(68), S(34));
+        else
+            gfx_circle(g_ui.g, x0 + S(16), y, S(68), ARGB(C_ITEM));
+        text(g_ui.f_title, C_INK, rect(x0 + S(16), y + S(84), w - S(32), S(32)), name,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        wsprintfA(title, c->type == CH_DM ? "This is the beginning of your direct message history with %.120s."
+                                          : "Welcome to the beginning of the %.120s group.", name);
+        text(g_ui.f_body, C_MUTED, rect(x0 + S(16), y + S(122), w - S(32), S(24)), title,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
     gfx_circle(g_ui.g, x0 + S(16), y, S(68), ARGB(C_ITEM));
     if (voice)
         text_w(g_ui.f_icon_big, C_INK, rect(x0 + S(16), y, S(68), S(68)), ICON_VOLUME, -1,
@@ -1155,7 +1223,8 @@ static void paint_main(RECT rc)
             text_w(g_ui.f_icon, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), ICON_VOLUME, -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         else
-            text(g_ui.f_title, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            text(g_ui.f_title, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), is_dm_type(c->type) ? "@" : "#",
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, w - S(62), S(HEADER_H)), name,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -1178,7 +1247,8 @@ static void paint_main(RECT rc)
         int y = rc.bottom / 2 - S(60);
         draw_wordmark(x0 + (w - wordmark_width(unit)) / 2, y, unit);
         text(g_ui.f_h, C_INK, rect(x0, y + S(56), w, S(24)),
-             g_ui.model ? "Pick a server on the left" : "Connecting\xE2\x80\xA6", DT_CENTER | DT_SINGLELINE);
+             !g_ui.model ? "Connecting\xE2\x80\xA6" : g_ui.guild < 0 ? "Pick a conversation or a server" : "Pick a channel",
+             DT_CENTER | DT_SINGLELINE);
         text(g_ui.f_body, C_MUTED, rect(x0, y + S(84), w, S(24)),
              "Native, tiny, and asleep until something happens.", DT_CENTER | DT_SINGLELINE);
     }
@@ -1377,7 +1447,7 @@ static void open_channel(int index)
     app_open_channel(c->id);
     app_fetch_messages(c->id, NULL);
 
-    wsprintfA(text, "Message #%.120s", model_str(g_ui.model, c->name));
+    wsprintfA(text, is_dm_type(c->type) ? "Message @%.120s" : "Message #%.120s", model_str(g_ui.model, c->name));
     hint = utf8_to_wide(text, lstrlenA(text));
     SendMessageW(g_ui.composer, EM_SETCUEBANNER, TRUE, (LPARAM)hint);
     mem_free(hint);
@@ -1392,7 +1462,7 @@ static void select_guild(int i)
         return;
     g_ui.guild = i;
     g_ui.side_scroll = 0;
-    g_ui.channel = i >= 0 ? g_ui.last_channel[i] : -1;
+    g_ui.channel = i >= 0 ? g_ui.last_channel[i] : g_ui.last_dm;
     if (i >= 0 && g_ui.channel < 0) {
         const guild_t *gd = &g_ui.model->guilds[i];
         for (unsigned c = gd->first; c < gd->first + gd->count; c++)
@@ -1419,7 +1489,10 @@ static void on_click(int kind, int index)
             g_ui.collapsed[index] ^= 1;
             clamp_scroll();
         } else if (index != g_ui.channel) {
-            g_ui.last_channel[g_ui.guild] = index;
+            if (g_ui.guild >= 0)
+                g_ui.last_channel[g_ui.guild] = index;
+            else
+                g_ui.last_dm = index;
             open_channel(index);
         }
         redraw();
@@ -1446,6 +1519,7 @@ static void set_model(model_t *m)
     for (unsigned i = 0; i < m->nguilds; i++)
         g_ui.last_channel[i] = -1;
     g_ui.collapsed = mem_alloc((size_t)m->nchannels + 1);
+    g_ui.last_dm = -1;
     g_ui.guild = -1;
     open_channel(-1);
     g_ui.rail_scroll = g_ui.side_scroll = 0;
