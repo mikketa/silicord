@@ -1,0 +1,11 @@
+build/
+out/
+.vs/
+*.exe
+*.obj
+*.pdb
+*.ilk
+
+# never commit credentials
+*.token
+.env

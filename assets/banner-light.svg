@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 48 1010 200" width="1010" height="200" shape-rendering="crispEdges">
+  <title>silicord</title>
+  <style>
+.amber{fill:#FFB000}.ink{fill:#1A1A1A}
+@keyframes l0{0%{opacity:0}8.33%{opacity:1}90%{opacity:0}}.l0{animation:l0 6s step-end infinite}
+@keyframes l1{0%{opacity:0}11%{opacity:1}90%{opacity:0}}.l1{animation:l1 6s step-end infinite}
+@keyframes l2{0%{opacity:0}13.67%{opacity:1}90%{opacity:0}}.l2{animation:l2 6s step-end infinite}
+@keyframes l3{0%{opacity:0}16.33%{opacity:1}90%{opacity:0}}.l3{animation:l3 6s step-end infinite}
+@keyframes l4{0%{opacity:0}19%{opacity:1}90%{opacity:0}}.l4{animation:l4 6s step-end infinite}
+@keyframes l5{0%{opacity:0}21.67%{opacity:1}90%{opacity:0}}.l5{animation:l5 6s step-end infinite}
+@keyframes l6{0%{opacity:0}24.33%{opacity:1}90%{opacity:0}}.l6{animation:l6 6s step-end infinite}
+@keyframes l7{0%{opacity:0}27%{opacity:1}90%{opacity:0}}.l7{animation:l7 6s step-end infinite}
+@keyframes move{0%{transform:translateX(0)}8.33%{transform:translateX(84px)}11%{transform:translateX(168px)}13.67%{transform:translateX(252px)}16.33%{transform:translateX(336px)}19%{transform:translateX(420px)}21.67%{transform:translateX(504px)}24.33%{transform:translateX(588px)}27%{transform:translateX(672px)}90%{transform:translateX(0)}}.cur{animation:move 6s step-end infinite}
+@keyframes blink{0%{opacity:1}50%{opacity:0}}.blink{animation:blink 1s step-end infinite}
+@media (prefers-reduced-motion:reduce){.ink{animation:none;opacity:1}.cur{animation:none;transform:translateX(672px)}.blink{animation:none}}
+  </style>
+  <path class="amber" d="M132 88h120v12h-120zM120 100h12v12h-12zM252 100h12v12h-12zM108 112h12v12h-12zM264 112h12v12h-12zM108 124h12v12h-12zM264 124h12v12h-12zM108 136h12v12h-12zM264 136h12v12h-12zM108 148h12v12h-12zM264 148h12v12h-12zM108 160h12v12h-12zM264 160h12v12h-12zM108 172h12v12h-12zM264 172h12v12h-12zM120 184h12v12h-12zM252 184h12v12h-12zM132 196h12v12h-12zM156 196h96v12h-96zM132 208h24v12h-24zM132 220h12v12h-12z"/>
+  <rect class="amber blink" x="144" y="124" width="24" height="48"/>
+    <path class="ink l0" d="M354 139h56v14h-56zM340 153h14v14h-14zM354 167h42v14h-42zM396 181h14v14h-14zM340 195h56v14h-56z"/>
+    <path class="ink l1" d="M452 111h14v14h-14zM438 139h28v14h-28zM452 153h14v14h-14zM452 167h14v14h-14zM452 181h14v14h-14zM438 195h42v14h-42z"/>
+    <path class="ink l2" d="M522 111h28v14h-28zM536 125h14v14h-14zM536 139h14v14h-14zM536 153h14v14h-14zM536 167h14v14h-14zM536 181h14v14h-14zM522 195h42v14h-42z"/>
+    <path class="ink l3" d="M620 111h14v14h-14zM606 139h28v14h-28zM620 153h14v14h-14zM620 167h14v14h-14zM620 181h14v14h-14zM606 195h42v14h-42z"/>
+    <path class="ink l4" d="M690 139h56v14h-56zM676 153h14v14h-14zM676 167h14v14h-14zM676 181h14v14h-14zM690 195h56v14h-56z"/>
+    <path class="ink l5" d="M774 139h42v14h-42zM760 153h14v14h-14zM816 153h14v14h-14zM760 167h14v14h-14zM816 167h14v14h-14zM760 181h14v14h-14zM816 181h14v14h-14zM774 195h42v14h-42z"/>
+    <path class="ink l6" d="M844 139h14v14h-14zM872 139h28v14h-28zM844 153h28v14h-28zM900 153h14v14h-14zM844 167h14v14h-14zM844 181h14v14h-14zM844 195h14v14h-14z"/>
+    <path class="ink l7" d="M984 111h14v14h-14zM984 125h14v14h-14zM942 139h56v14h-56zM928 153h14v14h-14zM984 153h14v14h-14zM928 167h14v14h-14zM984 167h14v14h-14zM928 181h14v14h-14zM984 181h14v14h-14zM942 195h56v14h-56z"/>
+  <g class="cur"><rect class="amber blink" x="340" y="111" width="56" height="98"/></g>
+</svg>

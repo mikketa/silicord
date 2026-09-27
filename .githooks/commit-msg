@@ -1,0 +1,34 @@
+#!/bin/sh
+# Enforces Conventional Commits (https://www.conventionalcommits.org).
+# Enable once per clone: git config core.hooksPath .githooks
+
+msg_file="$1"
+subject=$(head -n 1 "$msg_file")
+
+case "$subject" in
+    "Merge "*|"Revert "*|"fixup! "*|"squash! "*|"amend! "*) exit 0 ;;
+esac
+
+types='feat|fix|perf|refactor|docs|style|test|build|ci|chore|revert'
+pattern="^($types)(\([a-z0-9._/-]+\))?!?: [a-z0-9].*[^.]$"
+
+fail() {
+    echo "commit-msg: $1" >&2
+    echo "  got:      $subject" >&2
+    echo "  expected: <type>(<scope>)?: <lowercase summary, no trailing period>" >&2
+    echo "  types:    $(echo "$types" | tr '|' ' ')" >&2
+    exit 1
+}
+
+printf '%s' "$subject" | grep -Eq "$pattern" || fail "subject does not follow Conventional Commits"
+[ ${#subject} -le 72 ] || fail "subject is longer than 72 characters"
+
+if [ "$(wc -l < "$msg_file")" -ge 2 ] && [ -n "$(sed -n 2p "$msg_file")" ]; then
+    fail "leave a blank line between subject and body"
+fi
+
+if grep -Eiq '(co-authored-by:.*(claude|anthropic))|(generated with .*claude)' "$msg_file"; then
+    fail "AI attribution lines are not allowed"
+fi
+
+exit 0
