@@ -36,3 +36,10 @@ add_executable(silicord
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
 target_link_libraries(silicord PRIVATE silicord_core kernel32)
+
+enable_testing()
+add_executable(json_test tests/json_test.c)
+silicord_no_crt(json_test)
+target_link_options(json_test PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
+target_link_libraries(json_test PRIVATE silicord_core kernel32)
+add_test(NAME json COMMAND json_test)
