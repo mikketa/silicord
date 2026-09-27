@@ -1,15 +1,11 @@
 #include <windows.h>
-#include <winhttp.h>
 #include "gw.h"
-#include "http.h"
-#include "json.h"
-#include "console.h"
 #include "sb.h"
 #include "sc_asm.h"
+#include "ws.h"
 
 #define GW_HOST L"gateway.discord.gg"
 #define GW_PATH L"/?v=10&encoding=json"
-#define RECV_CHUNK 16384
 
 enum {
     OP_DISPATCH = 0,
@@ -22,28 +18,23 @@ enum {
 };
 
 typedef struct {
-    HINTERNET conn;
-    HINTERNET ws;
+    ws_t ws;
     HANDLE stop;
     HANDLE heartbeat;
-    CRITICAL_SECTION send_lock;
+    const gw_events_t *ev;
     const char *token;
     DWORD interval;
     volatile LONG64 seq;   /* -1 until the first dispatch */
     volatile LONG acked;
+    volatile LONG ready;   /* ws_init() done; gw_run() is only called from one thread */
 } gw_t;
 
 static gw_t g_gw;
 
-static int gw_send(gw_t *g, const sb_t *msg)
+static void status(gw_t *g, const char *text)
 {
-    DWORD err;
-
-    EnterCriticalSection(&g->send_lock);
-    err = WinHttpWebSocketSend(g->ws, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                               msg->data, (DWORD)msg->len);
-    LeaveCriticalSection(&g->send_lock);
-    return err == NO_ERROR;
+    if (g->ev->status)
+        g->ev->status(g->ev->ctx, text);
 }
 
 static int send_heartbeat(gw_t *g)
@@ -58,7 +49,7 @@ static int send_heartbeat(gw_t *g)
     else
         sb_i64(&msg, seq);
     sb_add(&msg, "}");
-    ok = gw_send(g, &msg);
+    ok = ws_send(&g->ws, &msg);
     sb_free(&msg);
     return ok;
 }
@@ -71,7 +62,7 @@ static int send_identify(gw_t *g)
     sb_add(&msg, "{\"op\":2,\"d\":{\"token\":");
     sb_json_str(&msg, g->token, sc_strlen(g->token));
     sb_add(&msg, ",\"properties\":{\"os\":\"Windows\",\"browser\":\"Silicord\",\"device\":\"Silicord\"}}}");
-    ok = gw_send(g, &msg);
+    ok = ws_send(&g->ws, &msg);
     sb_free(&msg);
     return ok;
 }
@@ -84,7 +75,7 @@ static DWORD WINAPI heartbeat_main(LPVOID arg)
 
     while (WaitForSingleObject(g->stop, wait) == WAIT_TIMEOUT) {
         if (!InterlockedExchange(&g->acked, 0)) {
-            con_print("gateway: no heartbeat ack, closing\r\n");
+            status(g, "no heartbeat ack, closing");
             gw_stop();
             break;
         }
@@ -93,67 +84,6 @@ static DWORD WINAPI heartbeat_main(LPVOID arg)
         wait = g->interval;
     }
     return 0;
-}
-
-static int gw_connect(gw_t *g)
-{
-    HINTERNET req;
-
-    g->conn = WinHttpConnect(http_session(), GW_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!g->conn)
-        return 0;
-    req = WinHttpOpenRequest(g->conn, L"GET", GW_PATH, NULL, WINHTTP_NO_REFERER,
-                             WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!req)
-        return 0;
-    if (WinHttpSetOption(req, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, NULL, 0) &&
-        WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0) &&
-        WinHttpReceiveResponse(req, NULL))
-        g->ws = WinHttpWebSocketCompleteUpgrade(req, 0);
-    WinHttpCloseHandle(req);
-    return g->ws != NULL;
-}
-
-/* Receives one complete message, reassembling fragments. */
-static int gw_recv(gw_t *g, sb_t *msg)
-{
-    sb_clear(msg);
-    for (;;) {
-        WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
-        DWORD got = 0;
-
-        sb_reserve(msg, RECV_CHUNK);
-        if (WinHttpWebSocketReceive(g->ws, msg->data + msg->len,
-                                    (DWORD)(msg->cap - msg->len - 1), &got, &type) != NO_ERROR)
-            return 0;
-        if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE)
-            return 0;
-        msg->len += got;
-        msg->data[msg->len] = 0;
-        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
-            type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE)
-            return 1;
-    }
-}
-
-static void on_ready(json_t d)
-{
-    json_t user, name, guilds;
-    sb_t out = {0};
-
-    sb_add(&out, "gateway: ready");
-    if (json_get(d, "user", &user) && json_get(user, "username", &name)) {
-        sb_add(&out, " as ");
-        json_str(name, &out);
-    }
-    if (json_get(d, "guilds", &guilds)) {
-        sb_add(&out, ", ");
-        sb_u64(&out, json_count(guilds));
-        sb_add(&out, " servers");
-    }
-    sb_add(&out, "\r\n");
-    con_print_sb(&out);
-    sb_free(&out);
 }
 
 /* Returns 0 when the session must end. */
@@ -187,81 +117,69 @@ static int handle(gw_t *g, const sb_t *msg)
     case OP_DISPATCH:
         if (json_get(root, "s", &s) && json_int(s, &seq))
             InterlockedExchange64(&g->seq, seq);
-        if (json_get(root, "t", &t) && json_str_eq(t, "READY"))
-            on_ready(d);
+        if (json_get(root, "t", &t) && json_str_eq(t, "READY") && g->ev->ready)
+            g->ev->ready(g->ev->ctx, d);
         return 1;
     case OP_RECONNECT:
-        con_print("gateway: server asked to reconnect\r\n");
+        status(g, "server asked to reconnect");
         return 0;
     case OP_INVALID_SESSION:
-        con_print("gateway: invalid session\r\n");
+        status(g, "invalid session");
         return 0;
     default:
         return 1;
     }
 }
 
-int gw_run(const char *token)
+int gw_run(const char *token, const gw_events_t *ev)
 {
     gw_t *g = &g_gw;
     sb_t msg = {0};
-    USHORT status = 0;
-    DWORD reason_len = 0;
-    char reason[124];
+    unsigned code = 0;
 
+    if (!g->ready) {
+        ws_init(&g->ws);
+        g->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+        InterlockedExchange(&g->ready, 1);
+    }
+    ResetEvent(g->stop);
+    g->ev = ev;
     g->token = token;
     g->seq = -1;
-    InitializeCriticalSection(&g->send_lock);
-    g->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g->heartbeat = NULL;
 
-    if (!gw_connect(g)) {
-        con_print("gateway: connection failed\r\n");
-    } else {
-        con_print("gateway: connected\r\n");
-        while (gw_recv(g, &msg) && handle(g, &msg))
-            ;
-        if (WinHttpWebSocketQueryCloseStatus(g->ws, &status, reason, sizeof reason - 1,
-                                             &reason_len) == NO_ERROR && status) {
-            sb_t out = {0};
-            sb_add(&out, "gateway: closed (");
-            sb_u64(&out, status);
-            if (reason_len) {
-                sb_add(&out, " ");
-                sb_addn(&out, reason, reason_len);
-            }
-            sb_add(&out, ")\r\n");
-            con_print_sb(&out);
-            sb_free(&out);
-        }
+    if (!ws_connect(&g->ws, GW_HOST, GW_PATH, NULL)) {
+        status(g, "connection failed");
+        return 0;
     }
+    status(g, "connected");
+    while (ws_recv(&g->ws, &msg) && handle(g, &msg))
+        ;
 
+    code = ws_close_status(&g->ws, NULL);
+    if (code) {
+        sb_t text = {0};
+        sb_add(&text, "closed with code ");
+        sb_u64(&text, code);
+        status(g, text.data);
+        sb_free(&text);
+    }
     SetEvent(g->stop);
     if (g->heartbeat) {
         WaitForSingleObject(g->heartbeat, INFINITE);
         CloseHandle(g->heartbeat);
     }
-    /* The lock and the stop event live until exit: gw_stop() may still run from the console handler. */
-    EnterCriticalSection(&g->send_lock);
-    if (g->ws)
-        WinHttpCloseHandle(g->ws);
-    g->ws = NULL;
-    LeaveCriticalSection(&g->send_lock);
-    if (g->conn)
-        WinHttpCloseHandle(g->conn);
+    ws_close(&g->ws);
     sb_free(&msg);
-    return status == WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS;
+    return code == WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS;
 }
 
 void gw_stop(void)
 {
     gw_t *g = &g_gw;
 
-    if (!g->stop)
+    if (!g->ready)
         return;
     SetEvent(g->stop);
-    /* Sends a close frame; the pending receive in gw_run then returns. */
-    EnterCriticalSection(&g->send_lock);
-    if (g->ws)
-        WinHttpWebSocketShutdown(g->ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0);
-    LeaveCriticalSection(&g->send_lock);
+    ws_shutdown(&g->ws);
 }

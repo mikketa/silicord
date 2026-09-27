@@ -38,6 +38,7 @@ add_executable(silicord
   src/cred.c
   src/gw.c
   src/http.c
+  src/ws.c
 )
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)

@@ -7,6 +7,8 @@
 #include "json.h"
 #include "sb.h"
 
+static volatile LONG g_cancelled;
+
 static void print_error(const char *what, DWORD err)
 {
     sb_t out = {0};
@@ -15,6 +17,17 @@ static void print_error(const char *what, DWORD err)
     sb_add(&out, " (error ");
     sb_u64(&out, err);
     sb_add(&out, ")\r\n");
+    con_print_sb(&out);
+    sb_free(&out);
+}
+
+static void print_line(const char *prefix, const char *text)
+{
+    sb_t out = {0};
+
+    sb_add(&out, prefix);
+    sb_add(&out, text);
+    sb_add(&out, "\r\n");
     con_print_sb(&out);
     sb_free(&out);
 }
@@ -51,7 +64,16 @@ static int check_token(const char *token)
     return ok;
 }
 
-static int cmd_login(void)
+static int save_token(const sb_t *token)
+{
+    int ok = check_token(token->data) && cred_save(token->data, token->len);
+
+    if (ok)
+        con_print("token saved in the Windows Credential Manager\r\n");
+    return ok;
+}
+
+static int login_token(void)
 {
     sb_t token = {0};
     int ok = 0;
@@ -59,11 +81,8 @@ static int cmd_login(void)
     con_print("Paste your Discord token (input is hidden): ");
     if (!con_read_secret(&token))
         con_print("no token entered\r\n");
-    else if (check_token(token.data)) {
-        ok = cred_save(token.data, token.len);
-        con_print(ok ? "token saved in the Windows Credential Manager\r\n"
-                     : "could not save the token\r\n");
-    }
+    else
+        ok = save_token(&token);
     sb_free(&token);
     return ok;
 }
@@ -78,15 +97,36 @@ static int cmd_logout(void)
     return 1;
 }
 
-static BOOL WINAPI on_ctrl(DWORD type)
+static void on_gw_status(void *ctx, const char *text)
 {
-    (void)type;
-    gw_stop();
-    return TRUE;
+    (void)ctx;
+    print_line("gateway: ", text);
+}
+
+static void on_ready(void *ctx, json_t d)
+{
+    json_t user, name, guilds;
+    sb_t out = {0};
+
+    (void)ctx;
+    sb_add(&out, "gateway: ready");
+    if (json_get(d, "user", &user) && json_get(user, "username", &name)) {
+        sb_add(&out, " as ");
+        json_str(name, &out);
+    }
+    if (json_get(d, "guilds", &guilds)) {
+        sb_add(&out, ", ");
+        sb_u64(&out, json_count(guilds));
+        sb_add(&out, " servers");
+    }
+    sb_add(&out, "\r\n");
+    con_print_sb(&out);
+    sb_free(&out);
 }
 
 static int cmd_run(void)
 {
+    static const gw_events_t ev = {NULL, on_gw_status, on_ready};
     sb_t token = {0};
     int ok = 0;
 
@@ -94,16 +134,29 @@ static int cmd_run(void)
         con_print("no saved token, run: silicord login\r\n");
         return 0;
     }
-    if (check_token(token.data)) {
-        SetConsoleCtrlHandler(on_ctrl, TRUE);
-        ok = gw_run(token.data);
-    }
+    if (check_token(token.data))
+        ok = gw_run(token.data, &ev);
     sb_free(&token);
     return ok;
 }
 
-/* Returns the first argument after the program name, or "" if there is none. */
-static const char *first_arg(void)
+static BOOL WINAPI on_ctrl(DWORD type)
+{
+    (void)type;
+    InterlockedExchange(&g_cancelled, 1);
+    gw_stop();
+    return TRUE;
+}
+
+static const char *skip_space(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+/* Returns the arguments after the program name. */
+static const char *args(void)
 {
     const char *p = GetCommandLineA();
 
@@ -116,23 +169,27 @@ static const char *first_arg(void)
         while (*p && *p != ' ' && *p != '\t')
             p++;
     }
-    while (*p == ' ' || *p == '\t')
-        p++;
-    return p;
+    return skip_space(p);
 }
 
-static int arg_is(const char *arg, const char *word)
+/* If `*p` starts with `word`, consumes it and returns 1. */
+static int take(const char **p, const char *word)
 {
-    while (*word && *arg == *word) {
-        arg++;
+    const char *s = *p;
+
+    while (*word && *s == *word) {
+        s++;
         word++;
     }
-    return !*word && (!*arg || *arg == ' ' || *arg == '\t');
+    if (*word || (*s && *s != ' ' && *s != '\t'))
+        return 0;
+    *p = skip_space(s);
+    return 1;
 }
 
 void entry(void)
 {
-    const char *arg = first_arg();
+    const char *arg = args();
     int ok;
 
     con_init();
@@ -140,10 +197,11 @@ void entry(void)
         print_error("could not initialize WinHTTP", GetLastError());
         ExitProcess(1);
     }
+    SetConsoleCtrlHandler(on_ctrl, TRUE);
 
-    if (arg_is(arg, "login")) {
-        ok = cmd_login();
-    } else if (arg_is(arg, "logout")) {
+    if (take(&arg, "login")) {
+        ok = login_token();
+    } else if (take(&arg, "logout")) {
         ok = cmd_logout();
     } else if (!*arg) {
         con_print("\r\n");
