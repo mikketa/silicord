@@ -161,6 +161,7 @@ void activity_free(activity_t *a)
 {
     sb_free(&a->author);
     sb_free(&a->preview);
+    sb_free(&a->mention_roles);
     mem_free(a);
 }
 
@@ -1616,7 +1617,7 @@ static void on_activity(activity_t *a)
                 if (!g_ui.pending[k]) {
                     activity_t *copy = mem_alloc(sizeof *copy);
                     *copy = *a;
-                    a->author = a->preview = (sb_t){0};
+                    a->author = a->preview = a->mention_roles = (sb_t){0};
                     g_ui.pending[k] = copy;
                     app_fetch_channel(a->channel_id);
                     break;
@@ -1644,6 +1645,21 @@ static void on_activity(activity_t *a)
             SetTimer(g_ui.wnd, TIMER_ACK, ACK_DELAY, NULL);
         } else {
             int dm = is_dm_type(c->type);
+            if (!a->mentions_me && a->mention_roles.len) {
+                /* @Role pings count when we have that role. */
+                int g = model_channel_guild(g_ui.model, (unsigned)i);
+                const char *p = a->mention_roles.data;
+                while (*p && !a->mentions_me) {
+                    char role[24];
+                    int n = 0;
+                    while (*p && *p != ',' && n < 23)
+                        role[n++] = *p++;
+                    role[n] = 0;
+                    if (*p == ',')
+                        p++;
+                    a->mentions_me = model_has_role(g_ui.model, g, role);
+                }
+            }
             if (a->mentions_me || dm)
                 c->mentions++;
             if (a->mentions_me || (dm && !c->muted))

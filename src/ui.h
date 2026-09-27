@@ -38,6 +38,7 @@ typedef struct {
     int mentions_me;
     sb_t author;
     sb_t preview;
+    sb_t mention_roles; /* comma-separated role ids */
 } activity_t;
 
 HWND ui_create(HINSTANCE inst);

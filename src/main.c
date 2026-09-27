@@ -248,12 +248,23 @@ static int mentions_me(json_t d, const char *me)
 static void post_activity(session_t *s, json_t d, const msg_t *m)
 {
     activity_t *a = mem_alloc(sizeof *a);
-    json_t v;
+    json_t v, roles, role;
+    json_iter_t it;
 
     a->kind = ACTIVITY_MESSAGE;
     lstrcpynA(a->channel_id, m->channel_id, sizeof a->channel_id);
     if (json_get(d, "guild_id", &v))
         json_raw(v, a->guild_id, sizeof a->guild_id);
+    if (json_get(d, "mention_roles", &roles)) {
+        char id[24];
+        json_iter(roles, &it);
+        while (json_next(&it, NULL, &role)) {
+            json_raw(role, id, sizeof id);
+            if (a->mention_roles.len)
+                sb_add(&a->mention_roles, ",");
+            sb_add(&a->mention_roles, id);
+        }
+    }
     lstrcpynA(a->message_id, m->id, sizeof a->message_id);
     a->from_me = s->me[0] && lstrcmpA(m->author_id, s->me) == 0;
     a->mentions_me = !a->from_me && mentions_me(d, s->me);
