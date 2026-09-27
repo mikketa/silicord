@@ -1324,6 +1324,7 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static void guild_state(int g, int *unread, int *mentions);
 static int divider_h(const msg_t *m);
 static void qs_open(void);
 static void qs_close(void);
@@ -6723,6 +6724,285 @@ static void qs_open(void)
     SetFocus(g_ui.qs_edit);
 }
 
+/* ---- Right-click menus ---- */
+
+enum {
+    CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
+    CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
+};
+
+/* Dark native menus, as the rest of the window (uxtheme's undocumented but stable switch). */
+static void dark_menus(void)
+{
+    static int done;
+    HMODULE ux;
+
+    if (done)
+        return;
+    done = 1;
+    if ((ux = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) != NULL) {
+        typedef int(WINAPI * set_mode_fn)(int);
+        typedef void(WINAPI * flush_fn)(void);
+        set_mode_fn set_mode = (set_mode_fn)(void *)GetProcAddress(ux, MAKEINTRESOURCEA(135)); /* SetPreferredAppMode */
+        flush_fn flush = (flush_fn)(void *)GetProcAddress(ux, MAKEINTRESOURCEA(136));          /* FlushMenuThemes */
+        if (set_mode)
+            set_mode(2); /* force dark */
+        if (flush)
+            flush();
+    }
+}
+
+static int run_menu(HMENU menu)
+{
+    POINT pt;
+    int cmd;
+
+    dark_menus();
+    GetCursorPos(&pt);
+    cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_ui.wnd, NULL);
+    DestroyMenu(menu);
+    return cmd;
+}
+
+static void copy_link(const char *guild, const char *channel, const char *message)
+{
+    char link[160];
+
+    if (message)
+        wsprintfA(link, "https://discord.com/channels/%s/%s/%s", guild ? guild : "@me", channel, message);
+    else
+        wsprintfA(link, "https://discord.com/channels/%s/%s", guild ? guild : "@me", channel);
+    copy_text(link);
+}
+
+static void message_menu(int i)
+{
+    HMENU menu = CreatePopupMenu();
+    msg_t *m = &g_ui.msgs[i];
+    int own = own_message(m), cmd;
+    char id[24];
+
+    AppendMenuW(menu, MF_STRING, CM_REACT, L"Add Reaction");
+    AppendMenuW(menu, MF_STRING, CM_REPLY, L"Reply");
+    if (own) {
+        AppendMenuW(menu, MF_STRING, CM_EDIT, L"Edit Message");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    if (m->content.len)
+        AppendMenuW(menu, MF_STRING, CM_COPY_TEXT, L"Copy Text");
+    AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Message Link");
+    AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
+    if (own) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, CM_DELETE, L"Delete Message");
+    }
+    lstrcpynA(id, m->id, sizeof id);
+    cmd = run_menu(menu);
+    if ((i = find_msg(id)) < 0) /* it may have gone while the menu was open */
+        return;
+    m = &g_ui.msgs[i];
+    switch (cmd) {
+    case CM_REACT: {
+        RECT a = message_area();
+        picker_open(PICK_REACTION, m->id, a.right - S(24), msg_top(i) + S(PICK_H) / 2);
+        break;
+    }
+    case CM_REPLY:
+        start_reply(i);
+        break;
+    case CM_EDIT:
+        start_edit(i);
+        break;
+    case CM_COPY_TEXT:
+        copy_text(m->content.data);
+        break;
+    case CM_COPY_LINK:
+        copy_link(open_guild_id(), g_ui.msgs_channel, m->id);
+        break;
+    case CM_COPY_ID:
+        copy_text(m->id);
+        break;
+    case CM_DELETE:
+        g_ui.confirm = 1;
+        lstrcpynA(g_ui.confirm_id, m->id, sizeof g_ui.confirm_id);
+        break;
+    }
+    redraw();
+}
+
+static void channel_menu(int i)
+{
+    HMENU menu = CreatePopupMenu();
+    const channel_t *c = chan(i);
+    int muted = c->muted, cmd, g = model_channel_guild(g_ui.model, (unsigned)i);
+    char id[24];
+
+    if (c->type == CH_CATEGORY) {
+        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Category ID");
+    } else {
+        AppendMenuW(menu, MF_STRING | (model_unread(g_ui.model, (unsigned)i) || c->mentions ? 0 : MF_GRAYED), CM_MARK_READ,
+                    L"Mark As Read");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, muted ? CM_UNMUTE : CM_MUTE, muted ? L"Unmute Channel" : L"Mute Channel");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Link");
+        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Channel ID");
+    }
+    lstrcpynA(id, c->id, sizeof id);
+    cmd = run_menu(menu);
+    if ((i = model_find_channel(g_ui.model, id)) < 0)
+        return;
+    switch (cmd) {
+    case CM_MARK_READ:
+        mark_read(i);
+        break;
+    case CM_MUTE:
+    case CM_UNMUTE:
+        g_ui.model->channels[i].muted = cmd == CM_MUTE;
+        app_mute(g >= 0 ? g_ui.model->guilds[g].id : NULL, id, cmd == CM_MUTE);
+        break;
+    case CM_COPY_LINK:
+        copy_link(g >= 0 ? g_ui.model->guilds[g].id : NULL, id, NULL);
+        break;
+    case CM_COPY_ID:
+        copy_text(id);
+        break;
+    }
+    update_title();
+    redraw();
+}
+
+static void guild_menu(int g)
+{
+    HMENU menu = CreatePopupMenu();
+    guild_t *gd = &g_ui.model->guilds[g];
+    int unread, mentions, cmd;
+    char id[24];
+
+    guild_state(g, &unread, &mentions);
+    AppendMenuW(menu, MF_STRING | (unread || mentions ? 0 : MF_GRAYED), CM_MARK_READ, L"Mark As Read");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, gd->muted ? CM_UNMUTE : CM_MUTE, gd->muted ? L"Unmute Server" : L"Mute Server");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Server ID");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, CM_LEAVE, L"Leave Server");
+    lstrcpynA(id, gd->id, sizeof id);
+    cmd = run_menu(menu);
+    if ((g = model_find_guild(g_ui.model, id)) < 0)
+        return;
+    gd = &g_ui.model->guilds[g];
+    switch (cmd) {
+    case CM_MARK_READ: {
+        sb_t acks = {0};
+        int n = 0;
+        for (unsigned c = gd->first; c < gd->first + gd->count; c++) {
+            channel_t *ch = &g_ui.model->channels[c];
+            if (!model_unread(g_ui.model, c) && !ch->mentions)
+                continue;
+            lstrcpynA(ch->read, ch->last_message, sizeof ch->read);
+            ch->mentions = 0;
+            sb_add(&acks, ch->id);
+            sb_addn(&acks, "", 1);
+            sb_add(&acks, ch->last_message);
+            sb_addn(&acks, "", 1);
+            n++;
+        }
+        if (n)
+            app_ack_bulk(acks.data, n);
+        sb_free(&acks);
+        break;
+    }
+    case CM_MUTE:
+    case CM_UNMUTE:
+        gd->muted = cmd == CM_MUTE;
+        app_mute(id, NULL, cmd == CM_MUTE);
+        break;
+    case CM_COPY_ID:
+        copy_text(id);
+        break;
+    case CM_LEAVE: {
+        wchar_t text[200];
+        wchar_t *name = utf8_to_wide(model_str(g_ui.model, gd->name), lstrlenA(model_str(g_ui.model, gd->name)));
+        wsprintfW(text, L"Are you sure you want to leave %.120s? You won't be able to rejoin this server unless you are re-invited.", name);
+        mem_free(name);
+        if (MessageBoxW(g_ui.wnd, text, L"Leave Server", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK)
+            app_leave_guild(id);
+        break;
+    }
+    }
+    update_title();
+    redraw();
+}
+
+static void user_menu(const char *user_id, const char *name, const char *avatar, int x, int y)
+{
+    HMENU menu = CreatePopupMenu();
+    int cmd, self = g_ui.model && lstrcmpA(user_id, g_ui.model->user_id) == 0;
+    char id[24], nm[80], av[48];
+
+    lstrcpynA(id, user_id, sizeof id);
+    lstrcpynA(nm, name ? name : "", sizeof nm);
+    lstrcpynA(av, avatar ? avatar : "", sizeof av);
+    AppendMenuW(menu, MF_STRING, CM_PROFILE, L"Profile");
+    if (!self)
+        AppendMenuW(menu, MF_STRING, CM_MESSAGE, L"Message");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, CM_COPY_USERNAME, L"Copy Name");
+    AppendMenuW(menu, MF_STRING, CM_COPY_USER_ID, L"Copy User ID");
+    cmd = run_menu(menu);
+    switch (cmd) {
+    case CM_PROFILE:
+        pop_open(id, nm, av, x, y, 0);
+        break;
+    case CM_MESSAGE: {
+        int dm = dm_with(id);
+        if (dm >= 0)
+            go_to_channel(dm);
+        else {
+            lstrcpynA(g_ui.pending_dm, id, sizeof g_ui.pending_dm);
+            app_open_dm(id, "");
+        }
+        break;
+    }
+    case CM_COPY_USERNAME:
+        copy_text(nm);
+        break;
+    case CM_COPY_USER_ID:
+        copy_text(id);
+        break;
+    }
+}
+
+/* Right click anywhere in the main window. */
+static void on_right_click(int x, int y)
+{
+    int kind, index, i, ax, ay, top;
+
+    if (g_ui.view != VIEW_APP || !g_ui.model)
+        return;
+    pop_close();
+    picker_close();
+    if ((i = ml_hit(x, y, &top)) >= 0) {
+        const ml_item_t *it = &g_ui.ml.items[i];
+        user_menu(it->id, it->name.data, it->avatar, main_right() - S(POP_W) - S(8), top);
+        return;
+    }
+    if (author_hit(x, y, &i, &ax, &ay)) {
+        user_menu(g_ui.msgs[i].author_id, author_name(&g_ui.msgs[i]), g_ui.msgs[i].avatar, ax, ay);
+        return;
+    }
+    if ((i = message_at(x, y, NULL)) >= 0 && !g_ui.msgs[i].system) {
+        message_menu(i);
+        return;
+    }
+    hit_test(x, y, &kind, &index);
+    if (kind == HIT_CHANNEL)
+        channel_menu(index);
+    else if (kind == HIT_GUILD)
+        guild_menu(index);
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -7086,6 +7366,9 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &kind, &index);
             on_click(kind, index);
         }
+        return 0;
+    case WM_RBUTTONUP:
+        on_right_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MOUSEWHEEL: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
