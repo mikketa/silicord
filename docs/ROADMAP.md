@@ -31,7 +31,9 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 
 - [ ] Gateway `zlib-stream` compression (custom inflate, assembly candidate)
 - [ ] Local cache for channels and users
-- [ ] Metrics: binary size, RAM, idle CPU, bytes received per hour
+- [x] Disk cache for CDN images, memory budget for decoded images
+- [x] Memory counters in `--debug` (Silicord's allocations against the whole process)
+- [ ] Metrics: idle CPU, bytes received per hour
 
 ## 4. Win32 UI 🚧
 

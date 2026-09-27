@@ -17,7 +17,7 @@ The official client ships a full Chromium: several processes, hundreds of MB of 
 - ~0% CPU when idle (the process sleeps until the next network event)
 - a few MB of RAM
 
-Measured while connected to an account with 20 servers: 83 KB executable, 0% CPU over 30 idle seconds, 7.8 MB of private memory.
+Measured while connected to an account with 20 servers: 185 KB executable, 0% CPU when idle, about 14 MB of memory at startup (Task Manager) and 20 to 35 MB after browsing several servers. Silicord's own data stays under 3 MB; the rest belongs to Direct2D and DirectWrite, which draw the text and color emoji.
 - a codebase small enough to read end to end
 
 ## ⚠️ Disclaimer
@@ -34,9 +34,11 @@ Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings �
 
 The token Discord sends back is stored in the Windows Credential Manager. The power button next to your name logs out and removes it.
 
+Images from Discord's CDN are kept in `%LOCALAPPDATA%\Silicord\images` (at most 64 MB, least recently used first out), so avatars and icons seen before show up in the same frame instead of being downloaded again.
+
 Clicking an avatar or a name opens that user's profile. Display names with a custom font use free fonts (SIL Open Font License) that Silicord downloads once from the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, and keeps in `%LOCALAPPDATA%\Silicord\fonts`.
 
-`silicord --debug` also opens a console with a connection log, mirrored to `%TEMP%\silicord-debug.log`.
+`silicord --debug` also opens a console with a connection log, mirrored to `%TEMP%\silicord-debug.log`. It includes a `[mem]` line each time a channel opens: memory allocated by Silicord itself (and its images) against the whole process.
 
 ## Building
 

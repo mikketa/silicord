@@ -20,6 +20,8 @@
                      <------------->  raw.githubusercontent.com
 ```
 
+Images are decoded at the size they are shown and held once, on the render target. The UI keeps up to 16 MB of them in memory, dropping the least recently drawn ones first; the files themselves stay in a disk cache, so an image seen before is decoded in the same frame (up to 8 ms per paint, the rest in the background).
+
 Display name fonts are the only files fetched outside Discord: they come from a pinned commit of the Google Fonts repository and are cached in `%LOCALAPPDATA%\Silicord\fonts`.
 
 ## Conventions
