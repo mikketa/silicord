@@ -1,47 +1,95 @@
-/* Custom-drawn Win32 UI in the Silicord palette. Everything runs on the UI thread. */
+/*
+ * Custom-drawn Win32 UI: server rail, channel list, main pane. Everything is
+ * painted into one back buffer; the only child windows are none so far.
+ * Runs on the UI thread only.
+ */
 #include <windows.h>
+#include <windowsx.h>
 #include <dwmapi.h>
 #include "ui.h"
+#include "gfx.h"
+#include "img.h"
 #include "mem.h"
 #include "qr.h"
 #include "utf.h"
 
-#define C_BG     RGB(0x0E, 0x0E, 0x0E)
-#define C_PANEL  RGB(0x16, 0x16, 0x16)
-#define C_FIELD  RGB(0x1C, 0x1C, 0x1C)
-#define C_SELECT RGB(0x26, 0x26, 0x26)
-#define C_BORDER RGB(0x2E, 0x2E, 0x2E)
-#define C_INK    RGB(0xED, 0xE6, 0xD6)
-#define C_MUTED  RGB(0x8C, 0x87, 0x7D)
-#define C_AMBER  RGB(0xFF, 0xB0, 0x00)
+/* Palette (GDI COLORREF and GDI+ ARGB). */
+#define RGBX(r, g, b) RGB(r, g, b), (0xFF000000u | ((r) << 16) | ((g) << 8) | (b))
+enum { C_RAIL, C_SIDE, C_MAIN, C_PANEL, C_ITEM, C_HOVER, C_SELECT, C_LINE, C_INK, C_MUTED, C_FAINT, C_AMBER, C_GREEN, C_TIP, C_COUNT };
+static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
+    {RGBX(0x0A, 0x0A, 0x0A)}, /* rail */
+    {RGBX(0x11, 0x11, 0x11)}, /* channel column */
+    {RGBX(0x16, 0x16, 0x16)}, /* main pane */
+    {RGBX(0x0D, 0x0D, 0x0D)}, /* user panel */
+    {RGBX(0x1F, 0x1F, 0x1F)}, /* server icon placeholder */
+    {RGBX(0x1B, 0x1B, 0x1B)}, /* hovered row */
+    {RGBX(0x26, 0x26, 0x26)}, /* selected row */
+    {RGBX(0x22, 0x22, 0x22)}, /* separators */
+    {RGBX(0xED, 0xE6, 0xD6)}, /* text */
+    {RGBX(0x9A, 0x94, 0x88)}, /* secondary text */
+    {RGBX(0x5F, 0x5B, 0x54)}, /* icons, hints */
+    {RGBX(0xFF, 0xB0, 0x00)}, /* accent */
+    {RGBX(0x3B, 0xA5, 0x5D)}, /* online */
+    {RGBX(0x05, 0x05, 0x05)}, /* tooltip */
+};
+#define GDI(c) (k_color[c].gdi)
+#define ARGB(c) (k_color[c].argb)
 
-#define ID_TOGGLE 1
-#define ID_LOGIN  2
-#define ID_LOGOUT 3
-#define ID_RETRY  4
-#define ID_TOKEN  5
-#define ID_GUILDS 6
+/* Segoe MDL2 Assets glyphs. */
+#define ICON_VOLUME L"\xE767"
+#define ICON_CHEVRON_DOWN L"\xE70D"
+#define ICON_CHEVRON_RIGHT L"\xE76C"
+#define ICON_POWER L"\xE7E8"
+#define ICON_REFRESH L"\xE72C"
+#define ICON_CHECK L"\xE73E"
 
-enum { VIEW_QR, VIEW_TOKEN, VIEW_LOADING, VIEW_MAIN };
-enum { BTN_PRIMARY = 1, BTN_LINK = 2 };
+/* Layout constants at 96 DPI. */
+#define RAIL_W 72
+#define ICON 48
+#define RAIL_STEP 56
+#define SIDE_W 240
+#define HEADER_H 48
+#define PANEL_H 56
+#define CAT_H 40
+#define ROW_H 34
+
+enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY };
 
 typedef struct {
-    HWND wnd, toggle, login, logout, retry, token, guilds;
-    HFONT f_title, f_body, f_small, f_label;
-    HBRUSH b_field, b_panel;
+    char key[96];
+    gfx_image_t *img;
+    int failed;
+} image_t;
+
+typedef struct {
+    HWND wnd;
+    HDC back;
+    HBITMAP back_bmp, back_old;
+    int back_w, back_h;
+    gfx_t *g;
+    HFONT f_title, f_h, f_body, f_small, f_cat, f_icon, f_icon_big, f_initial, f_initial_small;
     HICON icon_big, icon_small;
-    WNDPROC edit_proc;
     int dpi, view, disconnected;
+
+    /* Login. */
     qr_t *qr;
-    sb_t status, scanned, account;
-    /* Layout, in client pixels. */
-    RECT r_word, r_box, r_title, r_hint, r_status, r_field, r_side, r_top, r_center;
-    int word_unit;
+    sb_t status, scanned;
+
+    /* Session. */
+    model_t *model;
+    sb_t account;
+    int guild, channel;        /* selection, -1 = none */
+    int *last_channel;         /* per guild */
+    unsigned char *collapsed;  /* per channel (categories) */
+    int rail_scroll, side_scroll;
+    int hover_kind, hover_index;
+    image_t *images;
+    int nimages, cap_images;
 } ui_t;
 
-static ui_t g_ui;
+static ui_t g_ui = {.guild = -1, .channel = -1};
 
-/* 5x7 pixel font of the wordmark, bit 4 = leftmost column. */
 static const unsigned char k_word[8][7] = {
     {0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E}, {0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E},
     {0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}, {0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E},
@@ -49,7 +97,6 @@ static const unsigned char k_word[8][7] = {
     {0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10}, {0x01, 0x01, 0x0F, 0x11, 0x11, 0x11, 0x0F},
 };
 
-/* The speech bubble mark, 16x16, for the window icon. */
 static const unsigned short k_mark[16] = {
     0x0000, 0x0000, 0x1FF8, 0x2004, 0x4002, 0x4C02, 0x4C02, 0x4C02,
     0x4C02, 0x4002, 0x2004, 0x17F8, 0x1800, 0x1000, 0x0000, 0x0000,
@@ -59,6 +106,8 @@ static int S(int v)
 {
     return MulDiv(v, g_ui.dpi, 96);
 }
+
+/* ---- Posting from workers ---- */
 
 sb_t *ui_text(const char *text)
 {
@@ -76,295 +125,681 @@ void ui_post(UINT msg, sb_t *payload)
     }
 }
 
+void ui_post_model(model_t *model)
+{
+    if (!PostMessageW(g_ui.wnd, UI_READY, 0, (LPARAM)model))
+        model_free(model);
+}
+
 static void set_text(sb_t *dst, const char *text)
 {
     sb_clear(dst);
     sb_add(dst, text ? text : "");
 }
 
-/* ---- Drawing helpers ---- */
+static const char *str_or_empty(const sb_t *sb)
+{
+    return sb->data ? sb->data : "";
+}
 
-static void fill(HDC dc, int x, int y, int w, int h, COLORREF c)
+/* ---- Drawing primitives ---- */
+
+static void fill(int x, int y, int w, int h, int c)
 {
     RECT r = {x, y, x + w, y + h};
 
-    SetDCBrushColor(dc, c);
-    FillRect(dc, &r, (HBRUSH)GetStockObject(DC_BRUSH));
+    gfx_flush(g_ui.g);
+    SetDCBrushColor(g_ui.back, GDI(c));
+    FillRect(g_ui.back, &r, (HBRUSH)GetStockObject(DC_BRUSH));
 }
 
-static void text_w(HDC dc, HFONT font, COLORREF color, RECT r, const wchar_t *s, UINT flags)
+static void text_w(HFONT font, int c, RECT r, const wchar_t *s, int len, UINT flags)
 {
-    SelectObject(dc, font);
-    SetTextColor(dc, color);
-    SetBkMode(dc, TRANSPARENT);
-    DrawTextW(dc, s, -1, &r, flags | DT_NOPREFIX);
+    gfx_flush(g_ui.g);
+    SelectObject(g_ui.back, font);
+    SetTextColor(g_ui.back, GDI(c));
+    SetBkMode(g_ui.back, TRANSPARENT);
+    DrawTextW(g_ui.back, s, len, &r, flags | DT_NOPREFIX);
 }
 
-static void text(HDC dc, HFONT font, COLORREF color, RECT r, const char *s, UINT flags)
+static void text(HFONT font, int c, RECT r, const char *s, UINT flags)
 {
     wchar_t *w = utf8_to_wide(s, lstrlenA(s));
 
-    text_w(dc, font, color, r, w, flags);
+    text_w(font, c, r, w, -1, flags);
     mem_free(w);
 }
 
-static int word_width(int unit)
+static int text_width(HFONT font, const char *s)
 {
-    return (8 * 6 + 4) * unit; /* 8 glyphs + gaps, then the cursor */
+    wchar_t *w = utf8_to_wide(s, lstrlenA(s));
+    RECT r = {0, 0, 10000, 100};
+
+    SelectObject(g_ui.back, font);
+    DrawTextW(g_ui.back, w, -1, &r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    mem_free(w);
+    return r.right;
 }
 
-static void draw_wordmark(HDC dc, int x, int y, int unit)
+static RECT rect(int x, int y, int w, int h)
+{
+    RECT r = {x, y, x + w, y + h};
+    return r;
+}
+
+static void draw_wordmark(int x, int y, int unit)
 {
     for (int g = 0; g < 8; g++)
         for (int row = 0; row < 7; row++)
             for (int col = 0; col < 5; col++)
                 if ((k_word[g][row] >> (4 - col)) & 1)
-                    fill(dc, x + (g * 6 + col) * unit, y + row * unit, unit, unit, C_INK);
-    fill(dc, x + 48 * unit, y, 4 * unit, 7 * unit, C_AMBER);
+                    fill(x + (g * 6 + col) * unit, y + row * unit, unit, unit, C_INK);
+    fill(x + 48 * unit, y, 4 * unit, 7 * unit, C_AMBER);
 }
 
-static void draw_qr_box(HDC dc)
+static int wordmark_width(int unit)
 {
-    RECT r = g_ui.r_box;
-    int w = r.right - r.left;
-
-    if (g_ui.scanned.len) {
-        RECT t = r;
-        fill(dc, r.left, r.top, w, w, C_PANEL);
-        t.top += w / 2 - S(40);
-        text(dc, g_ui.f_body, C_MUTED, t, "Scanned by", DT_CENTER | DT_SINGLELINE);
-        t.top += S(24);
-        text(dc, g_ui.f_title, C_INK, t, g_ui.scanned.data, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        t.top += S(40);
-        text(dc, g_ui.f_body, C_AMBER, t, "Confirm on your phone", DT_CENTER | DT_SINGLELINE);
-        return;
-    }
-    fill(dc, r.left, r.top, w, w, C_INK);
-    if (!g_ui.qr) {
-        text(dc, g_ui.f_body, C_BG, r, "Getting a code\xE2\x80\xA6", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        return;
-    }
-    {
-        int n = g_ui.qr->size + 8; /* 4-module quiet zone */
-        int m = w / n;
-        int off = (w - m * g_ui.qr->size) / 2;
-        for (int y = 0; y < g_ui.qr->size; y++)
-            for (int x = 0; x < g_ui.qr->size; x++)
-                if (qr_dark(g_ui.qr, x, y))
-                    fill(dc, r.left + off + x * m, r.top + off + y * m, m, m, C_BG);
-    }
+    return 52 * unit;
 }
 
-static void draw_field_frame(HDC dc)
+static void draw_mark(int x, int y, int unit, int c)
 {
-    RECT r = g_ui.r_field;
-    int focus = GetFocus() == g_ui.token;
-
-    fill(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, focus ? C_AMBER : C_BORDER);
-    fill(dc, r.left + 1, r.top + 1, r.right - r.left - 2, r.bottom - r.top - 2, C_FIELD);
+    for (int row = 0; row < 16; row++)
+        for (int col = 0; col < 16; col++)
+            if ((k_mark[row] >> (15 - col)) & 1)
+                fill(x + col * unit, y + row * unit, unit, unit, c);
 }
 
-static void paint_login(HDC dc)
-{
-    int qr = g_ui.view == VIEW_QR;
-    RECT label = g_ui.r_field;
+/* ---- Images ---- */
 
-    draw_wordmark(dc, g_ui.r_word.left, g_ui.r_word.top, g_ui.word_unit);
-    if (qr) {
-        draw_qr_box(dc);
+static image_t *image_find(const char *key)
+{
+    for (int i = 0; i < g_ui.nimages; i++)
+        if (lstrcmpA(g_ui.images[i].key, key) == 0)
+            return &g_ui.images[i];
+    return NULL;
+}
+
+/* Returns the image if loaded; starts loading it the first time it is asked for. */
+static gfx_image_t *image_get(const char *key, const char *path)
+{
+    image_t *im = image_find(key);
+
+    if (im)
+        return im->img;
+    if (g_ui.nimages == g_ui.cap_images) {
+        g_ui.cap_images = g_ui.cap_images ? g_ui.cap_images * 2 : 64;
+        g_ui.images = mem_realloc(g_ui.images, (size_t)g_ui.cap_images * sizeof *g_ui.images);
+    }
+    im = &g_ui.images[g_ui.nimages++];
+    lstrcpynA(im->key, key, sizeof im->key);
+    im->img = NULL;
+    im->failed = 0;
+    img_request(key, path);
+    return NULL;
+}
+
+static void images_clear(void)
+{
+    img_clear();
+    for (int i = 0; i < g_ui.nimages; i++)
+        gfx_image_free(g_ui.images[i].img);
+    g_ui.nimages = 0;
+}
+
+static gfx_image_t *guild_icon(const guild_t *gd)
+{
+    char key[96], path[160];
+
+    if (!gd->icon[0])
+        return NULL;
+    wsprintfA(key, "g:%s:%s", gd->id, gd->icon);
+    wsprintfA(path, "/icons/%s/%s.png?size=96", gd->id, gd->icon);
+    return image_get(key, path);
+}
+
+static gfx_image_t *user_avatar(const char *id, const char *hash)
+{
+    char key[96], path[160];
+
+    if (hash[0]) {
+        wsprintfA(key, "a:%s:%s", id, hash);
+        wsprintfA(path, "/avatars/%s/%s.png?size=64", id, hash);
     } else {
-        label.bottom = label.top;
-        label.top -= S(26);
-        text(dc, g_ui.f_label, C_MUTED, label, "TOKEN", DT_LEFT | DT_SINGLELINE);
-        draw_field_frame(dc);
+        /* Default avatar: (id >> 22) % 6 */
+        unsigned long long n = 0;
+        for (const char *p = id; *p >= '0' && *p <= '9'; p++)
+            n = n * 10 + (unsigned long long)(*p - '0');
+        wsprintfA(key, "d:%d", (int)((n >> 22) % 6));
+        wsprintfA(path, "/embed/avatars/%d.png", (int)((n >> 22) % 6));
     }
-    text(dc, g_ui.f_title, C_INK, g_ui.r_title,
-         qr ? "Log in with your phone" : "Log in with a token", DT_CENTER | DT_SINGLELINE);
-    text(dc, g_ui.f_body, C_MUTED, g_ui.r_hint,
-         qr ? "Open Discord on your phone, then Settings \xE2\x80\xBA Scan QR Code. "
-              "Passkeys and two-factor codes are handled there."
-            : "Your token is checked with Discord, then stored encrypted in the Windows Credential Manager.",
-         DT_CENTER | DT_WORDBREAK);
-    text(dc, g_ui.f_body, C_AMBER, g_ui.r_status, g_ui.status.data ? g_ui.status.data : "",
+    return image_get(key, path);
+}
+
+/* ---- Login view ---- */
+
+static RECT login_card(void)
+{
+    RECT rc;
+    int w = S(760), h = S(380);
+
+    GetClientRect(g_ui.wnd, &rc);
+    return rect((rc.right - w) / 2, (rc.bottom - h) / 2 + S(30), w, h);
+}
+
+static void paint_step(int x, int y, const char *n, const char *label)
+{
+    gfx_circle(g_ui.g, x, y, S(24), ARGB(C_AMBER));
+    text(g_ui.f_small, C_RAIL, rect(x, y, S(24), S(24)), n, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_body, C_INK, rect(x + S(38), y, S(360), S(24)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void paint_login(RECT rc)
+{
+    RECT card = login_card();
+    int x = card.left + S(44), y = card.top + S(44);
+    int tile = S(232), tx = card.right - S(44) - tile, ty = card.top + (card.bottom - card.top - tile) / 2;
+
+    fill(0, 0, rc.right, rc.bottom, C_RAIL);
+    draw_wordmark((rc.right - wordmark_width(S(3))) / 2, card.top - S(72), S(3));
+    gfx_round_rect(g_ui.g, card.left, card.top, card.right - card.left, card.bottom - card.top, S(16), ARGB(C_MAIN));
+
+    text(g_ui.f_title, C_INK, rect(x, y, S(400), S(32)), "Log in with your phone", DT_LEFT | DT_SINGLELINE);
+    text(g_ui.f_body, C_MUTED, rect(x, y + S(40), S(400), S(24)),
+         "Scan the code with the Discord mobile app.", DT_LEFT | DT_SINGLELINE);
+    paint_step(x, y + S(92), "1", "Open Discord on your phone");
+    paint_step(x, y + S(132), "2", "Go to Settings \xE2\x80\xBA Scan QR Code");
+    paint_step(x, y + S(172), "3", "Scan this code and confirm");
+    text(g_ui.f_small, C_FAINT, rect(x, y + S(230), S(400), S(40)),
+         "Passkeys, two-factor codes and SMS checks happen on your phone.", DT_LEFT | DT_WORDBREAK);
+
+    gfx_round_rect(g_ui.g, tx, ty, tile, tile, S(12), g_ui.scanned.len ? ARGB(C_PANEL) : ARGB(C_INK));
+    if (g_ui.scanned.len) {
+        text_w(g_ui.f_icon_big, C_AMBER, rect(tx, ty + S(52), tile, S(48)), ICON_CHECK, -1, DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_h, C_INK, rect(tx + S(8), ty + S(116), tile - S(16), S(24)), g_ui.scanned.data,
+             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_small, C_MUTED, rect(tx, ty + S(144), tile, S(20)), "Confirm the login on your phone",
+             DT_CENTER | DT_SINGLELINE);
+    } else if (g_ui.qr) {
+        int m = (tile - S(40)) / g_ui.qr->size; /* leaves a ~4 module quiet zone */
+        int off = (tile - m * g_ui.qr->size) / 2;
+        for (int qy = 0; qy < g_ui.qr->size; qy++)
+            for (int qx = 0; qx < g_ui.qr->size; qx++)
+                if (qr_dark(g_ui.qr, qx, qy))
+                    fill(tx + off + qx * m, ty + off + qy * m, m, m, C_RAIL);
+        /* Silicord mark in the middle: level M error correction absorbs it. */
+        gfx_round_rect(g_ui.g, tx + tile / 2 - S(15), ty + tile / 2 - S(15), S(30), S(30), S(8), ARGB(C_INK));
+        gfx_round_rect(g_ui.g, tx + tile / 2 - S(12), ty + tile / 2 - S(12), S(24), S(24), S(6), ARGB(C_RAIL));
+        draw_mark(tx + tile / 2 - S(8), ty + tile / 2 - S(8), S(1), C_AMBER);
+    } else {
+        text(g_ui.f_body, C_RAIL, rect(tx, ty, tile, tile), "Getting a code\xE2\x80\xA6",
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    text(g_ui.f_body, C_AMBER, rect(0, card.bottom + S(24), rc.right, S(24)), str_or_empty(&g_ui.status),
          DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
-static void paint_loading(HDC dc)
+static void paint_loading(RECT rc)
 {
-    draw_wordmark(dc, g_ui.r_word.left, g_ui.r_word.top, g_ui.word_unit);
-    text(dc, g_ui.f_body, C_MUTED, g_ui.r_status, g_ui.status.data ? g_ui.status.data : "",
-         DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-}
+    int unit = S(4);
 
-static void paint_main(HDC dc)
-{
-    RECT r = g_ui.r_side, t = g_ui.r_top, c = g_ui.r_center;
-
-    fill(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, C_PANEL);
-    r.left += S(20);
-    r.top += S(22);
-    text(dc, g_ui.f_label, C_MUTED, r, "SERVERS", DT_LEFT | DT_SINGLELINE);
-
-    fill(dc, t.left, t.bottom - 1, t.right - t.left, 1, C_BORDER);
-    t.left += S(28);
-    t.bottom -= S(22);
-    t.top += S(12);
-    text(dc, g_ui.f_title, C_INK, t, g_ui.account.data ? g_ui.account.data : "",
-         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    t.top = t.bottom;
-    t.bottom = t.top + S(18);
-    text(dc, g_ui.f_small, g_ui.disconnected ? C_AMBER : C_MUTED, t,
-         g_ui.status.data ? g_ui.status.data : "", DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    draw_wordmark(dc, g_ui.r_word.left, g_ui.r_word.top, g_ui.word_unit);
-    c.top = g_ui.r_word.bottom + S(28);
-    text(dc, g_ui.f_body, C_INK, c, "Pick a server on the left.", DT_CENTER | DT_SINGLELINE);
-    c.top += S(24);
-    text(dc, g_ui.f_body, C_MUTED, c, "Reading and sending messages comes in the next version.",
+    fill(0, 0, rc.right, rc.bottom, C_RAIL);
+    draw_wordmark((rc.right - wordmark_width(unit)) / 2, rc.bottom / 2 - S(40), unit);
+    text(g_ui.f_body, C_MUTED, rect(0, rc.bottom / 2 + S(10), rc.right, S(24)), str_or_empty(&g_ui.status),
          DT_CENTER | DT_SINGLELINE);
+}
+
+/* ---- App view: geometry ---- */
+
+static int rail_y(int i) /* i = -1 for home */
+{
+    return S(12) + (i + 1) * S(RAIL_STEP) + (i >= 0 ? S(12) : 0) - g_ui.rail_scroll;
+}
+
+static int rail_content(void)
+{
+    return S(12) + (g_ui.model ? (int)g_ui.model->nguilds + 1 : 1) * S(RAIL_STEP) + S(12) + S(12);
+}
+
+static const channel_t *chan(int i)
+{
+    return &g_ui.model->channels[i];
+}
+
+/* Whether channel i is hidden inside a collapsed category. */
+static int hidden(const guild_t *gd, unsigned i)
+{
+    for (unsigned j = i; j-- > gd->first;)
+        if (chan((int)j)->type == CH_CATEGORY)
+            return g_ui.collapsed[j];
+    return 0;
+}
+
+static int row_height(unsigned i)
+{
+    return chan((int)i)->type == CH_CATEGORY ? S(CAT_H) : S(ROW_H);
+}
+
+static int side_content(void)
+{
+    const guild_t *gd;
+    int h = S(8);
+
+    if (!g_ui.model || g_ui.guild < 0)
+        return 0;
+    gd = &g_ui.model->guilds[g_ui.guild];
+    for (unsigned i = gd->first; i < gd->first + gd->count; i++)
+        if (chan((int)i)->type == CH_CATEGORY || !hidden(gd, i))
+            h += row_height(i);
+    return h + S(8);
+}
+
+static int side_view(RECT rc)
+{
+    return rc.bottom - S(HEADER_H) - S(PANEL_H);
+}
+
+static void clamp_scroll(void)
+{
+    RECT rc;
+    int max;
+
+    GetClientRect(g_ui.wnd, &rc);
+    max = rail_content() - rc.bottom;
+    if (g_ui.rail_scroll > max)
+        g_ui.rail_scroll = max;
+    if (g_ui.rail_scroll < 0)
+        g_ui.rail_scroll = 0;
+    max = side_content() - side_view(rc);
+    if (g_ui.side_scroll > max)
+        g_ui.side_scroll = max;
+    if (g_ui.side_scroll < 0)
+        g_ui.side_scroll = 0;
+}
+
+static void hit_test(int x, int y, int *kind, int *index)
+{
+    RECT rc;
+
+    *kind = HIT_NONE;
+    *index = -1;
+    GetClientRect(g_ui.wnd, &rc);
+    if (x < S(RAIL_W)) {
+        if (y >= rail_y(-1) && y < rail_y(-1) + S(ICON)) {
+            *kind = HIT_HOME;
+            return;
+        }
+        for (int i = 0; g_ui.model && i < (int)g_ui.model->nguilds; i++)
+            if (y >= rail_y(i) && y < rail_y(i) + S(ICON)) {
+                *kind = HIT_GUILD;
+                *index = i;
+                return;
+            }
+    } else if (x < S(RAIL_W + SIDE_W)) {
+        int top = rc.bottom - S(PANEL_H) + (S(PANEL_H) - S(32)) / 2;
+        int right = S(RAIL_W + SIDE_W) - S(8);
+        if (y >= rc.bottom - S(PANEL_H)) {
+            if (y >= top && y < top + S(32) && x >= right - S(32) && x < right)
+                *kind = HIT_LOGOUT;
+            else if (g_ui.disconnected && y >= top && y < top + S(32) && x >= right - S(68) && x < right - S(36))
+                *kind = HIT_RETRY;
+            return;
+        }
+        if (y >= S(HEADER_H) && g_ui.model && g_ui.guild >= 0) {
+            const guild_t *gd = &g_ui.model->guilds[g_ui.guild];
+            int ry = S(HEADER_H) + S(8) - g_ui.side_scroll;
+            for (unsigned i = gd->first; i < gd->first + gd->count; i++) {
+                int h;
+                if (chan((int)i)->type != CH_CATEGORY && hidden(gd, i))
+                    continue;
+                h = row_height(i);
+                if (y >= ry && y < ry + h) {
+                    *kind = HIT_CHANNEL;
+                    *index = (int)i;
+                    return;
+                }
+                ry += h;
+            }
+        }
+    }
+}
+
+/* ---- App view: painting ---- */
+
+static void initials(const char *name, wchar_t *out, int max)
+{
+    wchar_t *w = utf8_to_wide(name, lstrlenA(name));
+    int n = 0, word = 1;
+
+    for (wchar_t *p = w; *p && n < max - 2; p++) {
+        if (*p == L' ') {
+            word = 1;
+        } else if (word) {
+            out[n++] = *p;
+            if (*p >= 0xD800 && *p < 0xDC00 && p[1])
+                out[n++] = *++p;
+            word = 0;
+            if (n >= 3)
+                break;
+        }
+    }
+    out[n] = 0;
+    mem_free(w);
+}
+
+static void paint_pill(int y, int height)
+{
+    gfx_round_rect(g_ui.g, -S(4), y + (S(ICON) - height) / 2, S(8), height, S(4), ARGB(C_INK));
+}
+
+static void paint_rail(RECT rc)
+{
+    int x = (S(RAIL_W) - S(ICON)) / 2;
+    int home_y = rail_y(-1), sel_home = g_ui.guild < 0, hov_home = g_ui.hover_kind == HIT_HOME;
+
+    fill(0, 0, S(RAIL_W), rc.bottom, C_RAIL);
+
+    /* Home: the Silicord mark. */
+    gfx_round_rect(g_ui.g, x, home_y, S(ICON), S(ICON), sel_home || hov_home ? S(16) : S(ICON) / 2,
+                   sel_home || hov_home ? ARGB(C_AMBER) : ARGB(C_ITEM));
+    draw_mark(x + S(8), home_y + S(8), S(2), sel_home || hov_home ? C_RAIL : C_AMBER);
+    if (sel_home)
+        paint_pill(home_y, S(40));
+    fill(x + S(8), home_y + S(ICON) + S(10), S(32), S(2), C_LINE);
+
+    for (int i = 0; g_ui.model && i < (int)g_ui.model->nguilds; i++) {
+        const guild_t *gd = &g_ui.model->guilds[i];
+        int y = rail_y(i), sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i;
+        int radius = sel || hov ? S(16) : S(ICON) / 2;
+        gfx_image_t *img;
+
+        if (y + S(ICON) < 0 || y > rc.bottom)
+            continue;
+        img = guild_icon(gd);
+        if (img) {
+            gfx_image(g_ui.g, img, x, y, S(ICON), S(ICON), radius);
+        } else {
+            wchar_t ini[8];
+            initials(model_str(g_ui.model, gd->name), ini, 8);
+            gfx_round_rect(g_ui.g, x, y, S(ICON), S(ICON), radius, sel || hov ? ARGB(C_AMBER) : ARGB(C_ITEM));
+            text_w(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial, sel || hov ? C_RAIL : C_INK,
+                   rect(x, y, S(ICON), S(ICON)), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        if (sel || hov)
+            paint_pill(y, sel ? S(40) : S(20));
+    }
+}
+
+static void paint_scrollbar(int x, int top, int view, int content, int scroll)
+{
+    int h, y;
+
+    if (content <= view)
+        return;
+    h = view * view / content;
+    if (h < S(24))
+        h = S(24);
+    y = top + (view - h) * scroll / (content - view);
+    gfx_round_rect(g_ui.g, x, y, S(4), h, S(2), 0xFF2E2E2E);
+}
+
+static void paint_channel_row(unsigned i, int y)
+{
+    const channel_t *c = chan((int)i);
+    int x = S(RAIL_W) + S(8), w = S(SIDE_W) - S(16);
+    int sel = g_ui.channel == (int)i, hov = g_ui.hover_kind == HIT_CHANNEL && g_ui.hover_index == (int)i;
+    const char *name = model_str(g_ui.model, c->name);
+
+    if (c->type == CH_CATEGORY) {
+        text_w(g_ui.f_icon, hov ? C_INK : C_FAINT, rect(x - S(2), y + S(18), S(14), S(18)),
+               g_ui.collapsed[i] ? ICON_CHEVRON_RIGHT : ICON_CHEVRON_DOWN, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_cat, hov ? C_INK : C_MUTED, rect(x + S(14), y + S(18), w - S(14), S(18)), name,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    if (sel || hov)
+        gfx_round_rect(g_ui.g, x, y + S(1), w, S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+    if (c->type == CH_VOICE || c->type == CH_STAGE)
+        text_w(g_ui.f_icon, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)), ICON_VOLUME, -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    else
+        text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_body, sel ? C_INK : hov ? C_INK : C_MUTED, rect(x + S(34), y, w - S(40), S(ROW_H)), name,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static void paint_user_panel(RECT rc)
+{
+    int x0 = S(RAIL_W), y = rc.bottom - S(PANEL_H), cy = y + (S(PANEL_H) - S(32)) / 2;
+    int right = S(RAIL_W + SIDE_W) - S(8);
+    const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name)
+                                                          : str_or_empty(&g_ui.account);
+    int dot = g_ui.disconnected ? C_FAINT : g_ui.model ? C_GREEN : C_AMBER;
+
+    fill(x0, y, S(SIDE_W), S(PANEL_H), C_PANEL);
+    if (g_ui.model && g_ui.model->user_id[0]) {
+        gfx_image_t *img = user_avatar(g_ui.model->user_id, g_ui.model->user_avatar);
+        if (img)
+            gfx_image(g_ui.g, img, x0 + S(10), cy, S(32), S(32), S(16));
+        else
+            gfx_circle(g_ui.g, x0 + S(10), cy, S(32), ARGB(C_ITEM));
+    } else {
+        gfx_circle(g_ui.g, x0 + S(10), cy, S(32), ARGB(C_ITEM));
+    }
+    gfx_circle(g_ui.g, x0 + S(10) + S(21), cy + S(21), S(14), ARGB(C_PANEL));
+    gfx_circle(g_ui.g, x0 + S(10) + S(23), cy + S(23), S(10), ARGB(dot));
+
+    text(g_ui.f_h, C_INK, rect(x0 + S(52), cy - S(2), S(120), S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(52), cy + S(17), S(120), S(18)), str_or_empty(&g_ui.status),
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (g_ui.hover_kind == HIT_LOGOUT)
+        gfx_round_rect(g_ui.g, right - S(32), cy, S(32), S(32), S(6), ARGB(C_SELECT));
+    text_w(g_ui.f_icon, g_ui.hover_kind == HIT_LOGOUT ? C_INK : C_MUTED, rect(right - S(32), cy, S(32), S(32)),
+           ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (g_ui.disconnected) {
+        if (g_ui.hover_kind == HIT_RETRY)
+            gfx_round_rect(g_ui.g, right - S(68), cy, S(32), S(32), S(6), ARGB(C_SELECT));
+        text_w(g_ui.f_icon, C_AMBER, rect(right - S(68), cy, S(32), S(32)), ICON_REFRESH, -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+static void paint_side(RECT rc)
+{
+    int x0 = S(RAIL_W), view = side_view(rc);
+
+    fill(x0, 0, S(SIDE_W), rc.bottom, C_SIDE);
+
+    if (g_ui.model && g_ui.guild >= 0) {
+        const guild_t *gd = &g_ui.model->guilds[g_ui.guild];
+        int y = S(HEADER_H) + S(8) - g_ui.side_scroll;
+        HRGN clip = CreateRectRgn(x0, S(HEADER_H), x0 + S(SIDE_W), S(HEADER_H) + view);
+
+        gfx_flush(g_ui.g);
+        SelectClipRgn(g_ui.back, clip);
+        gfx_end(g_ui.g);
+        g_ui.g = gfx_begin(g_ui.back); /* GDI+ picks up the clip region */
+        for (unsigned i = gd->first; i < gd->first + gd->count; i++) {
+            if (chan((int)i)->type != CH_CATEGORY && hidden(gd, i))
+                continue;
+            if (y + row_height(i) > S(HEADER_H) && y < S(HEADER_H) + view)
+                paint_channel_row(i, y);
+            y += row_height(i);
+        }
+        paint_scrollbar(x0 + S(SIDE_W) - S(6), S(HEADER_H) + S(4), view - S(8), side_content(), g_ui.side_scroll);
+        gfx_end(g_ui.g);
+        SelectClipRgn(g_ui.back, NULL);
+        DeleteObject(clip);
+        g_ui.g = gfx_begin(g_ui.back);
+
+        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), model_str(g_ui.model, gd->name),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), "Home",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (g_ui.model) {
+            char line[64];
+            wsprintfA(line, "%u servers", g_ui.model->nguilds);
+            text(g_ui.f_body, C_MUTED, rect(x0 + S(16), S(HEADER_H) + S(12), S(SIDE_W) - S(32), S(24)), line,
+                 DT_LEFT | DT_SINGLELINE);
+        }
+    }
+    fill(x0, S(HEADER_H) - 1, S(SIDE_W), 1, C_LINE);
+    paint_user_panel(rc);
+}
+
+static void paint_main(RECT rc)
+{
+    int x0 = S(RAIL_W + SIDE_W), w = rc.right - x0;
+
+    fill(x0, 0, w, rc.bottom, C_MAIN);
+    fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
+
+    if (g_ui.model && g_ui.channel >= 0) {
+        const channel_t *c = chan(g_ui.channel);
+        const char *name = model_str(g_ui.model, c->name);
+        int voice = c->type == CH_VOICE || c->type == CH_STAGE;
+        int by = rc.bottom - S(24) - S(44) - S(24) - S(170);
+        char title[160];
+
+        if (voice)
+            text_w(g_ui.f_icon, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), ICON_VOLUME, -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        else
+            text(g_ui.f_title, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, w - S(62), S(HEADER_H)), name,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        /* Start-of-channel welcome, like the top of an empty history. */
+        gfx_circle(g_ui.g, x0 + S(24), by, S(68), ARGB(C_ITEM));
+        if (voice)
+            text_w(g_ui.f_icon_big, C_INK, rect(x0 + S(24), by, S(68), S(68)), ICON_VOLUME, -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        else
+            text(g_ui.f_title, C_INK, rect(x0 + S(24), by, S(68), S(68)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        wsprintfA(title, "Welcome to %s%.120s", voice ? "" : "#", name);
+        text(g_ui.f_title, C_INK, rect(x0 + S(24), by + S(84), w - S(48), S(32)), title,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_body, C_MUTED, rect(x0 + S(24), by + S(122), w - S(48), S(24)),
+             voice ? "Voice channels are not supported yet." : "Reading and sending messages arrives in the next version.",
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        /* Composer, not wired yet. */
+        if (!voice) {
+            char hint[160];
+            int cy = rc.bottom - S(24) - S(44);
+            gfx_round_rect(g_ui.g, x0 + S(16), cy, w - S(32), S(44), S(10), 0xFF1F1F1F);
+            wsprintfA(hint, "Message #%.120s", name);
+            text(g_ui.f_body, C_FAINT, rect(x0 + S(32), cy, w - S(64), S(44)), hint,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    } else {
+        int unit = S(4);
+        int y = rc.bottom / 2 - S(60);
+        draw_wordmark(x0 + (w - wordmark_width(unit)) / 2, y, unit);
+        text(g_ui.f_h, C_INK, rect(x0, y + S(56), w, S(24)),
+             g_ui.model ? "Pick a server on the left" : "Connecting\xE2\x80\xA6", DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_body, C_MUTED, rect(x0, y + S(84), w, S(24)),
+             "Native, tiny, and asleep until something happens.", DT_CENTER | DT_SINGLELINE);
+    }
+}
+
+static void paint_tooltip(void)
+{
+    const char *name;
+    int y, tw, th = S(36);
+
+    if (g_ui.hover_kind != HIT_GUILD || !g_ui.model)
+        return;
+    name = model_str(g_ui.model, g_ui.model->guilds[g_ui.hover_index].name);
+    tw = text_width(g_ui.f_h, name) + S(24);
+    if (tw > S(320))
+        tw = S(320);
+    y = rail_y(g_ui.hover_index) + (S(ICON) - th) / 2;
+    gfx_round_rect(g_ui.g, S(RAIL_W) + S(4), y, tw, th, S(6), ARGB(C_TIP));
+    text(g_ui.f_h, C_INK, rect(S(RAIL_W) + S(16), y, tw - S(24), th), name,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static void paint_app(RECT rc)
+{
+    paint_main(rc);
+    paint_side(rc);
+    paint_rail(rc);
+    paint_tooltip();
+}
+
+static void ensure_back_buffer(HDC dc, int w, int h)
+{
+    if (g_ui.back && g_ui.back_w == w && g_ui.back_h == h)
+        return;
+    if (g_ui.back) {
+        SelectObject(g_ui.back, g_ui.back_old);
+        DeleteObject(g_ui.back_bmp);
+        DeleteDC(g_ui.back);
+    }
+    g_ui.back = CreateCompatibleDC(dc);
+    g_ui.back_bmp = CreateCompatibleBitmap(dc, w, h);
+    g_ui.back_old = SelectObject(g_ui.back, g_ui.back_bmp);
+    g_ui.back_w = w;
+    g_ui.back_h = h;
 }
 
 static void paint(HWND wnd)
 {
     PAINTSTRUCT ps;
     RECT rc;
-    HDC dc = BeginPaint(wnd, &ps), mem;
-    HBITMAP bmp, old;
+    HDC dc = BeginPaint(wnd, &ps);
 
     GetClientRect(wnd, &rc);
-    mem = CreateCompatibleDC(dc);
-    bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
-    old = SelectObject(mem, bmp);
-    fill(mem, 0, 0, rc.right, rc.bottom, C_BG);
-
-    if (g_ui.view == VIEW_MAIN)
-        paint_main(mem);
-    else if (g_ui.view == VIEW_LOADING)
-        paint_loading(mem);
-    else
-        paint_login(mem);
-
-    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteObject(bmp);
-    DeleteDC(mem);
+    if (rc.right > 0 && rc.bottom > 0) {
+        ensure_back_buffer(dc, rc.right, rc.bottom);
+        g_ui.g = gfx_begin(g_ui.back);
+        if (g_ui.view == VIEW_APP)
+            paint_app(rc);
+        else if (g_ui.view == VIEW_LOADING)
+            paint_loading(rc);
+        else
+            paint_login(rc);
+        gfx_end(g_ui.g);
+        g_ui.g = NULL;
+        BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
+               ps.rcPaint.bottom - ps.rcPaint.top, g_ui.back, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+    }
     EndPaint(wnd, &ps);
 }
 
-/* ---- Layout ---- */
-
-static void place(HWND h, int show, int x, int y, int w, int hgt)
+static void redraw(void)
 {
-    if (show)
-        MoveWindow(h, x, y, w, hgt, TRUE);
-    ShowWindow(h, show ? SW_SHOWNA : SW_HIDE);
-}
-
-static void set_button_text(HWND h, const wchar_t *s)
-{
-    SetWindowTextW(h, s);
-    InvalidateRect(h, NULL, FALSE);
-}
-
-static void layout(void)
-{
-    RECT rc;
-    int w, h, col, x, y, box, login = g_ui.view == VIEW_QR || g_ui.view == VIEW_TOKEN;
-
-    GetClientRect(g_ui.wnd, &rc);
-    w = rc.right;
-    h = rc.bottom;
-
-    if (g_ui.view == VIEW_MAIN) {
-        int side = S(260), top = S(72), cw = w - side;
-        SetRect(&g_ui.r_side, 0, 0, side, h);
-        SetRect(&g_ui.r_top, side, 0, w, top);
-        g_ui.word_unit = S(3);
-        x = side + (cw - word_width(g_ui.word_unit)) / 2;
-        y = top + (h - top) / 2 - S(60);
-        SetRect(&g_ui.r_word, x, y, x + word_width(g_ui.word_unit), y + 7 * g_ui.word_unit);
-        SetRect(&g_ui.r_center, side, 0, w, h);
-        place(g_ui.guilds, 1, S(8), S(52), side - S(16), h - S(60));
-        place(g_ui.logout, 1, w - S(28) - S(90), S(22), S(90), S(28));
-        place(g_ui.retry, g_ui.disconnected, side + (cw - S(160)) / 2, g_ui.r_word.bottom + S(96), S(160), S(40));
-        place(g_ui.toggle, 0, 0, 0, 0, 0);
-        place(g_ui.login, 0, 0, 0, 0, 0);
-        place(g_ui.token, 0, 0, 0, 0, 0);
-    } else {
-        col = S(400);
-        box = S(240);
-        g_ui.word_unit = S(4);
-        y = (h - S(520)) / 2;
-        if (y < S(24))
-            y = S(24);
-        if (!login)
-            y = h / 2 - S(40);
-        x = (w - word_width(g_ui.word_unit)) / 2;
-        SetRect(&g_ui.r_word, x, y, x + word_width(g_ui.word_unit), y + 7 * g_ui.word_unit);
-        y = g_ui.r_word.bottom + S(36);
-        x = (w - col) / 2;
-        if (g_ui.view == VIEW_TOKEN) {
-            /* Title and hint first, then the form, in the same overall height as the QR view. */
-            SetRect(&g_ui.r_title, x, y, x + col, y + S(28));
-            SetRect(&g_ui.r_hint, x, y + S(34), x + col, y + S(34) + S(60));
-            y += S(34) + S(60) + S(36);
-            SetRect(&g_ui.r_field, x, y, x + col, y + S(40));
-            y = g_ui.r_word.bottom + S(36) + box + S(28) + S(34) + S(60) + S(10);
-        } else {
-            SetRect(&g_ui.r_box, (w - box) / 2, y, (w + box) / 2, y + box);
-            y += box + S(28);
-            SetRect(&g_ui.r_title, x, y, x + col, y + S(28));
-            SetRect(&g_ui.r_hint, x, y + S(34), x + col, y + S(34) + S(60));
-            y += S(34) + S(60) + S(10);
-        }
-        SetRect(&g_ui.r_status, x - S(60), y, x + col + S(60), y + S(20));
-        if (!login)
-            SetRect(&g_ui.r_status, 0, g_ui.r_word.bottom + S(28), w, g_ui.r_word.bottom + S(48));
-
-        place(g_ui.toggle, login, x, y + S(32), col, S(28));
-        place(g_ui.token, g_ui.view == VIEW_TOKEN, g_ui.r_field.left + S(12), g_ui.r_field.top + S(10),
-              col - S(24), S(22));
-        place(g_ui.login, g_ui.view == VIEW_TOKEN, x, g_ui.r_field.bottom + S(16), col, S(40));
-        place(g_ui.guilds, 0, 0, 0, 0, 0);
-        place(g_ui.logout, 0, 0, 0, 0, 0);
-        place(g_ui.retry, 0, 0, 0, 0, 0);
-        set_button_text(g_ui.toggle, g_ui.view == VIEW_QR ? L"Use a token instead" : L"Use a QR code instead");
-    }
     InvalidateRect(g_ui.wnd, NULL, FALSE);
 }
 
-static void set_view(int view)
-{
-    g_ui.view = view;
-    layout();
-    if (view == VIEW_TOKEN)
-        SetFocus(g_ui.token);
-    else
-        SetFocus(g_ui.wnd);
-}
+/* ---- Fonts, icon ---- */
 
-/* ---- Fonts, DPI, icon ---- */
-
-static HFONT make_font(int px, int weight)
+static HFONT make_font(const wchar_t *face, int px, int weight)
 {
     return CreateFontW(-S(px), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
 }
 
 static void make_fonts(void)
 {
-    HFONT old[4] = {g_ui.f_title, g_ui.f_body, g_ui.f_small, g_ui.f_label};
+    HFONT *f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat,
+                  &g_ui.f_icon, &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small};
 
-    g_ui.f_title = make_font(20, FW_SEMIBOLD);
-    g_ui.f_body = make_font(14, FW_NORMAL);
-    g_ui.f_small = make_font(12, FW_NORMAL);
-    g_ui.f_label = make_font(11, FW_BOLD);
-    for (int i = 0; i < 4; i++)
-        if (old[i])
-            DeleteObject(old[i]);
-    SendMessageW(g_ui.token, WM_SETFONT, (WPARAM)g_ui.f_body, FALSE);
-    SendMessageW(g_ui.guilds, WM_SETFONT, (WPARAM)g_ui.f_body, FALSE);
-    SendMessageW(g_ui.guilds, LB_SETITEMHEIGHT, 0, S(36));
+    for (int i = 0; i < (int)ARRAYSIZE(f); i++)
+        if (*f[i])
+            DeleteObject(*f[i]);
+    g_ui.f_title = make_font(L"Segoe UI", 22, FW_SEMIBOLD);
+    g_ui.f_h = make_font(L"Segoe UI", 15, FW_SEMIBOLD);
+    g_ui.f_body = make_font(L"Segoe UI", 15, FW_NORMAL);
+    g_ui.f_small = make_font(L"Segoe UI", 13, FW_NORMAL);
+    g_ui.f_cat = make_font(L"Segoe UI", 12, FW_BOLD);
+    g_ui.f_icon = make_font(L"Segoe MDL2 Assets", 14, FW_NORMAL);
+    g_ui.f_icon_big = make_font(L"Segoe MDL2 Assets", 32, FW_NORMAL);
+    g_ui.f_initial = make_font(L"Segoe UI", 17, FW_SEMIBOLD);
+    g_ui.f_initial_small = make_font(L"Segoe UI", 13, FW_SEMIBOLD);
 }
 
 static HICON make_icon(int px)
@@ -399,121 +834,89 @@ static HICON make_icon(int px)
     return icon;
 }
 
-/* ---- Owner drawing ---- */
+/* ---- Selection ---- */
 
-static void draw_button(const DRAWITEMSTRUCT *di)
+static void select_guild(int i)
 {
-    wchar_t label[64];
-    int kind = (int)GetWindowLongPtrW(di->hwndItem, GWLP_USERDATA);
-    RECT r = di->rcItem;
-    HDC dc = di->hDC;
-    int pressed = (di->itemState & ODS_SELECTED) != 0;
-
-    GetWindowTextW(di->hwndItem, label, ARRAYSIZE(label));
-    fill(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, C_BG);
-    if (kind == BTN_PRIMARY) {
-        fill(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, pressed ? RGB(0xD9, 0x96, 0x00) : C_AMBER);
-        text_w(dc, g_ui.f_body, C_BG, r, label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    } else {
-        text_w(dc, g_ui.f_body, pressed ? C_INK : C_AMBER, r, label,
-               DT_VCENTER | DT_SINGLELINE | (di->hwndItem == g_ui.logout ? DT_RIGHT : DT_CENTER));
-    }
-}
-
-static void draw_guild(const DRAWITEMSTRUCT *di)
-{
-    wchar_t name[256];
-    RECT r = di->rcItem;
-    HDC dc = di->hDC;
-    int selected = (di->itemState & ODS_SELECTED) != 0;
-
-    if (di->itemID == (UINT)-1)
+    if (!g_ui.model)
         return;
-    fill(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, selected ? C_SELECT : C_PANEL);
-    if (selected)
-        fill(dc, r.left, r.top + S(8), S(3), r.bottom - r.top - S(16), C_AMBER);
-    if (SendMessageW(di->hwndItem, LB_GETTEXTLEN, di->itemID, 0) < (LRESULT)ARRAYSIZE(name)) {
-        SendMessageW(di->hwndItem, LB_GETTEXT, di->itemID, (LPARAM)name);
-        r.left += S(14);
-        r.right -= S(8);
-        text_w(dc, g_ui.f_body, selected ? C_INK : C_MUTED, r, name,
-               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    g_ui.guild = i;
+    g_ui.side_scroll = 0;
+    g_ui.channel = i >= 0 ? g_ui.last_channel[i] : -1;
+    if (i >= 0 && g_ui.channel < 0) {
+        const guild_t *gd = &g_ui.model->guilds[i];
+        for (unsigned c = gd->first; c < gd->first + gd->count; c++)
+            if (chan((int)c)->type != CH_CATEGORY && chan((int)c)->type != CH_VOICE && chan((int)c)->type != CH_STAGE) {
+                g_ui.channel = (int)c;
+                break;
+            }
+    }
+    redraw();
+}
+
+static void on_click(int kind, int index)
+{
+    switch (kind) {
+    case HIT_HOME:
+        select_guild(-1);
+        break;
+    case HIT_GUILD:
+        select_guild(index);
+        break;
+    case HIT_CHANNEL:
+        if (chan(index)->type == CH_CATEGORY) {
+            g_ui.collapsed[index] ^= 1;
+            clamp_scroll();
+        } else {
+            g_ui.channel = index;
+            g_ui.last_channel[g_ui.guild] = index;
+        }
+        redraw();
+        break;
+    case HIT_LOGOUT:
+        app_logout();
+        break;
+    case HIT_RETRY:
+        g_ui.disconnected = 0;
+        set_text(&g_ui.status, "Connecting\xE2\x80\xA6");
+        redraw();
+        app_reconnect();
+        break;
     }
 }
 
-/* ---- Token field ---- */
-
-static void submit_token(void)
+static void set_model(model_t *m)
 {
-    int n = GetWindowTextLengthW(g_ui.token);
-    wchar_t *w;
-    sb_t token = {0};
-    size_t a = 0, b;
-
-    if (n <= 0)
-        return;
-    w = mem_alloc(((size_t)n + 1) * sizeof(wchar_t));
-    GetWindowTextW(g_ui.token, w, n + 1);
-    SetWindowTextW(g_ui.token, L"");
-    wide_to_utf8(w, (size_t)n, &token);
-    SecureZeroMemory(w, ((size_t)n + 1) * sizeof(wchar_t));
-    mem_free(w);
-
-    b = token.len;
-    while (a < b && (token.data[a] == ' ' || token.data[a] == '"' || token.data[a] == '\''))
-        a++;
-    while (b > a && (token.data[b - 1] == ' ' || token.data[b - 1] == '"' || token.data[b - 1] == '\'' ||
-                     token.data[b - 1] == '\r' || token.data[b - 1] == '\n'))
-        b--;
-    if (b > a) {
-        token.data[b] = 0;
-        app_login_token(token.data + a);
-    }
-    sb_free(&token);
+    model_free(g_ui.model);
+    mem_free(g_ui.last_channel);
+    mem_free(g_ui.collapsed);
+    g_ui.model = m;
+    g_ui.last_channel = mem_alloc(((size_t)m->nguilds + 1) * sizeof *g_ui.last_channel);
+    for (unsigned i = 0; i < m->nguilds; i++)
+        g_ui.last_channel[i] = -1;
+    g_ui.collapsed = mem_alloc((size_t)m->nchannels + 1);
+    g_ui.guild = g_ui.channel = -1;
+    g_ui.rail_scroll = g_ui.side_scroll = 0;
 }
 
-static LRESULT CALLBACK edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+static void clear_session(void)
 {
-    if (msg == WM_CHAR && wp == VK_RETURN) {
-        submit_token();
-        return 0;
+    if (g_ui.model) {
+        model_free(g_ui.model);
+        g_ui.model = NULL;
     }
-    if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS)
-        InvalidateRect(g_ui.wnd, &g_ui.r_field, FALSE);
-    return CallWindowProcW(g_ui.edit_proc, h, msg, wp, lp);
+    images_clear();
+    g_ui.guild = g_ui.channel = -1;
+    g_ui.hover_kind = HIT_NONE;
+    sb_clear(&g_ui.account);
 }
 
 /* ---- Messages from workers ---- */
 
-static void fill_guilds(const sb_t *payload)
+static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
 {
-    const char *p = payload->data, *end = payload->data + payload->len;
-    int first = 1;
-
-    SendMessageW(g_ui.guilds, WM_SETREDRAW, FALSE, 0);
-    SendMessageW(g_ui.guilds, LB_RESETCONTENT, 0, 0);
-    while (p < end) {
-        const char *nl = p;
-        while (nl < end && *nl != '\n')
-            nl++;
-        if (first) {
-            sb_clear(&g_ui.account);
-            sb_addn(&g_ui.account, p, (size_t)(nl - p));
-            first = 0;
-        } else if (nl > p) {
-            wchar_t *w = utf8_to_wide(p, (size_t)(nl - p));
-            SendMessageW(g_ui.guilds, LB_ADDSTRING, 0, (LPARAM)w);
-            mem_free(w);
-        }
-        p = nl + 1;
-    }
-    SendMessageW(g_ui.guilds, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g_ui.guilds, NULL, TRUE);
-}
-
-static void on_worker(UINT msg, sb_t *p)
-{
-    const char *s = p ? p->data : "";
+    sb_t *p = (sb_t *)lp;
+    const char *s = p && p->data ? p->data : "";
 
     switch (msg) {
     case UI_QR:
@@ -527,7 +930,7 @@ static void on_worker(UINT msg, sb_t *p)
         set_text(&g_ui.status, "");
         break;
     case UI_SCANNED:
-        set_text(&g_ui.scanned, *s ? s : "your account");
+        set_text(&g_ui.scanned, *s ? s : "Your account");
         break;
     case UI_STATUS:
         set_text(&g_ui.status, s);
@@ -543,27 +946,40 @@ static void on_worker(UINT msg, sb_t *p)
         set_text(&g_ui.account, s);
         set_text(&g_ui.status, "Connecting\xE2\x80\xA6");
         g_ui.disconnected = 0;
-        SendMessageW(g_ui.guilds, LB_RESETCONTENT, 0, 0);
-        set_view(VIEW_MAIN);
+        g_ui.view = VIEW_APP;
         break;
     case UI_READY:
-        fill_guilds(p);
+        set_model((model_t *)lp);
         set_text(&g_ui.status, "Online");
-        break;
+        g_ui.view = VIEW_APP;
+        redraw();
+        return;
     case UI_DISCONNECTED:
         g_ui.disconnected = 1;
         set_text(&g_ui.status, s);
-        if (g_ui.view == VIEW_LOADING)
-            set_view(VIEW_MAIN);
-        else
-            layout();
+        g_ui.view = VIEW_APP;
+        break;
+    case UI_IMAGE: {
+        image_t *im = image_find(s);
+        if (im) {
+            im->img = (gfx_image_t *)wp;
+            im->failed = !wp;
+        } else {
+            gfx_image_free((gfx_image_t *)wp);
+        }
         break;
     }
-    InvalidateRect(g_ui.wnd, NULL, FALSE);
+    }
+    if (p) {
+        sb_free(p);
+        mem_free(p);
+    }
+    redraw();
 }
 
 void ui_show_login(void)
 {
+    clear_session();
     if (g_ui.qr) {
         mem_free(g_ui.qr);
         g_ui.qr = NULL;
@@ -571,45 +987,30 @@ void ui_show_login(void)
     sb_clear(&g_ui.scanned);
     set_text(&g_ui.status, "");
     g_ui.disconnected = 0;
-    set_view(VIEW_QR);
+    g_ui.view = VIEW_LOGIN;
+    redraw();
 }
 
 void ui_show_loading(const char *s)
 {
     set_text(&g_ui.status, s);
-    set_view(VIEW_LOADING);
+    g_ui.view = VIEW_LOADING;
+    redraw();
 }
 
 /* ---- Window procedure ---- */
 
-static void on_command(int id)
+static void update_hover(int x, int y)
 {
-    switch (id) {
-    case ID_TOGGLE:
-        set_view(g_ui.view == VIEW_QR ? VIEW_TOKEN : VIEW_QR);
-        break;
-    case ID_LOGIN:
-        submit_token();
-        break;
-    case ID_LOGOUT:
-        app_logout();
-        break;
-    case ID_RETRY:
-        g_ui.disconnected = 0;
-        set_text(&g_ui.status, "Connecting\xE2\x80\xA6");
-        layout();
-        app_reconnect();
-        break;
+    int kind, index;
+
+    hit_test(x, y, &kind, &index);
+    if (kind != g_ui.hover_kind || index != g_ui.hover_index) {
+        g_ui.hover_kind = kind;
+        g_ui.hover_index = index;
+        SetCursor(LoadCursorW(NULL, (LPCWSTR)(kind != HIT_NONE ? IDC_HAND : IDC_ARROW)));
+        redraw();
     }
-}
-
-static HWND make_button(HWND parent, int id, int kind, const wchar_t *label)
-{
-    HWND h = CreateWindowExW(0, L"BUTTON", label, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
-                             0, 0, 0, 0, parent, (HMENU)(INT_PTR)id, NULL, NULL);
-
-    SetWindowLongPtrW(h, GWLP_USERDATA, kind);
-    return h;
 }
 
 static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -618,25 +1019,16 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         g_ui.wnd = wnd;
         g_ui.dpi = GetDpiForWindow(wnd);
-        g_ui.toggle = make_button(wnd, ID_TOGGLE, BTN_LINK, L"Use a token instead");
-        g_ui.login = make_button(wnd, ID_LOGIN, BTN_PRIMARY, L"Log in");
-        g_ui.logout = make_button(wnd, ID_LOGOUT, BTN_LINK, L"Log out");
-        g_ui.retry = make_button(wnd, ID_RETRY, BTN_PRIMARY, L"Reconnect");
-        g_ui.token = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
-                                     0, 0, 0, 0, wnd, (HMENU)(INT_PTR)ID_TOKEN, NULL, NULL);
-        g_ui.edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.token, GWLP_WNDPROC, (LONG_PTR)edit_proc);
-        g_ui.guilds = CreateWindowExW(0, L"LISTBOX", L"",
-                                      WS_CHILD | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
-                                          LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
-                                      0, 0, 0, 0, wnd, (HMENU)(INT_PTR)ID_GUILDS, NULL, NULL);
         make_fonts();
+        img_init(wnd, UI_IMAGE);
         return 0;
     case WM_SIZE:
-        layout();
+        clamp_scroll();
+        redraw();
         return 0;
     case WM_GETMINMAXINFO:
-        ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(720, GetDpiForWindow(wnd), 96);
-        ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(600, GetDpiForWindow(wnd), 96);
+        ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(940, GetDpiForWindow(wnd), 96);
+        ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(620, GetDpiForWindow(wnd), 96);
         return 0;
     case WM_DPICHANGED: {
         RECT *r = (RECT *)lp;
@@ -644,7 +1036,6 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         make_fonts();
         SetWindowPos(wnd, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-        layout();
         return 0;
     }
     case WM_ERASEBKGND:
@@ -652,30 +1043,48 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PAINT:
         paint(wnd);
         return 0;
-    case WM_CTLCOLOREDIT:
-        SetTextColor((HDC)wp, C_INK);
-        SetBkColor((HDC)wp, C_FIELD);
-        return (LRESULT)g_ui.b_field;
-    case WM_CTLCOLORLISTBOX:
-        return (LRESULT)g_ui.b_panel;
-    case WM_MEASUREITEM:
-        ((MEASUREITEMSTRUCT *)lp)->itemHeight = S(36);
-        return TRUE;
-    case WM_DRAWITEM: {
-        const DRAWITEMSTRUCT *di = (const DRAWITEMSTRUCT *)lp;
-        if (di->CtlType == ODT_BUTTON)
-            draw_button(di);
-        else if (di->CtlType == ODT_LISTBOX)
-            draw_guild(di);
-        return TRUE;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.hover_kind != HIT_NONE ? IDC_HAND : IDC_ARROW)));
+            return TRUE;
+        }
+        break;
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, wnd, 0};
+        TrackMouseEvent(&tme);
+        if (g_ui.view == VIEW_APP)
+            update_hover(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
     }
-    case WM_COMMAND:
-        if (HIWORD(wp) == BN_CLICKED)
-            on_command(LOWORD(wp));
+    case WM_MOUSELEAVE:
+        if (g_ui.hover_kind != HIT_NONE) {
+            g_ui.hover_kind = HIT_NONE;
+            g_ui.hover_index = -1;
+            redraw();
+        }
         return 0;
-    case WM_LBUTTONDOWN:
-        SetFocus(wnd);
+    case WM_LBUTTONUP:
+        if (g_ui.view == VIEW_APP) {
+            int kind, index;
+            hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &kind, &index);
+            on_click(kind, index);
+        }
         return 0;
+    case WM_MOUSEWHEEL: {
+        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        int delta = -GET_WHEEL_DELTA_WPARAM(wp) * S(ROW_H) * 3 / WHEEL_DELTA;
+        ScreenToClient(wnd, &pt);
+        if (g_ui.view != VIEW_APP)
+            return 0;
+        if (pt.x < S(RAIL_W))
+            g_ui.rail_scroll += delta;
+        else if (pt.x < S(RAIL_W + SIDE_W))
+            g_ui.side_scroll += delta;
+        clamp_scroll();
+        update_hover(pt.x, pt.y);
+        redraw();
+        return 0;
+    }
     case WM_CLOSE:
         app_quit();
         return 0;
@@ -683,28 +1092,23 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_DISCONNECTED) {
-            sb_t *p = (sb_t *)lp;
-            on_worker(msg, p);
-            if (p) {
-                sb_free(p);
-                mem_free(p);
-            }
+        if (msg >= UI_QR && msg <= UI_IMAGE) {
+            on_worker(msg, wp, lp);
             return 0;
         }
-        return DefWindowProcW(wnd, msg, wp, lp);
+        break;
     }
+    return DefWindowProcW(wnd, msg, wp, lp);
 }
 
 HWND ui_create(HINSTANCE inst)
 {
     WNDCLASSEXW wc = {0};
     BOOL dark = TRUE;
-    COLORREF caption = C_BG;
+    COLORREF caption = GDI(C_RAIL);
     UINT dpi = GetDpiForSystem();
 
-    g_ui.b_field = CreateSolidBrush(C_FIELD);
-    g_ui.b_panel = CreateSolidBrush(C_PANEL);
+    gfx_init();
     g_ui.icon_big = make_icon(32);
     g_ui.icon_small = make_icon(16);
 
@@ -717,8 +1121,8 @@ HWND ui_create(HINSTANCE inst)
     wc.lpszClassName = L"Silicord";
     RegisterClassExW(&wc);
 
-    g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                               CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1000, dpi, 96), MulDiv(680, dpi, 96),
+    g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW,
+                               CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1200, dpi, 96), MulDiv(760, dpi, 96),
                                NULL, NULL, inst, NULL);
     DwmSetWindowAttribute(g_ui.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
     DwmSetWindowAttribute(g_ui.wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof caption);

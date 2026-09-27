@@ -1,10 +1,12 @@
 #pragma once
 #include <windows.h>
+#include "model.h"
 #include "sb.h"
 
 /*
  * Win32 window. Worker threads talk to it with ui_post(): the payload is a
- * heap sb_t* (see ui_text) that the UI thread frees, or NULL.
+ * heap sb_t* (see ui_text) that the UI thread frees, or NULL. UI_READY
+ * carries a model_t* instead (ui_post_model).
  */
 enum {
     UI_QR = WM_APP + 1, /* URL to show as a QR code */
@@ -13,14 +15,16 @@ enum {
     UI_TOKEN,           /* token received from the QR login */
     UI_LOGIN_FAILED,    /* back to the login screen, text = reason */
     UI_ACCOUNT,         /* logged in, text = account name */
-    UI_READY,           /* account name, then one server name per line */
+    UI_READY,           /* model_t* built from READY */
     UI_DISCONNECTED,    /* session ended, text = reason */
+    UI_IMAGE,           /* image loader result, see img.h */
 };
 
 HWND ui_create(HINSTANCE inst);
 void ui_show_login(void);
 void ui_show_loading(const char *text);
 void ui_post(UINT msg, sb_t *payload);
+void ui_post_model(model_t *model);
 sb_t *ui_text(const char *text);
 
 /* Implemented by the application, called on the UI thread. */

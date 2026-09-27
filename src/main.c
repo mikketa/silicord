@@ -6,6 +6,7 @@
 #include "http.h"
 #include "json.h"
 #include "mem.h"
+#include "model.h"
 #include "ra.h"
 #include "sb.h"
 #include "ui.h"
@@ -140,34 +141,84 @@ static void on_gw_status(void *ctx, const char *text)
         ui_post(UI_STATUS, ui_text(text));
 }
 
+/* Debug only: logs the shape of READY (key names, never values). */
+static void log_keys(const char *label, json_t v)
+{
+    json_iter_t it;
+    json_t k;
+    sb_t out = {0};
+
+    if (!g_debug)
+        return;
+    sb_add(&out, label);
+    sb_add(&out, json_type(v) == JSON_ARRAY ? " (array) " : " ");
+    if (json_type(v) == JSON_ARRAY) {
+        sb_u64(&out, json_count(v));
+        sb_add(&out, " items");
+    } else {
+        json_iter(v, &it);
+        while (json_next(&it, &k, NULL)) {
+            sb_addn(&out, k.p + 1, (size_t)(k.end - k.p - 2));
+            sb_add(&out, " ");
+        }
+    }
+    log_line("ready: ", out.data);
+    sb_free(&out);
+}
+
+static void log_ready_shape(json_t d)
+{
+    json_t guilds, g, v, first;
+    json_iter_t it;
+
+    log_keys("d:", d);
+    if (json_get(d, "guilds", &guilds)) {
+        json_iter(guilds, &it);
+        if (json_next(&it, NULL, &g)) {
+            log_keys("guild:", g);
+            if (json_get(g, "properties", &v))
+                log_keys("guild.properties:", v);
+            if (json_get(g, "channels", &v)) {
+                json_iter(v, &it);
+                if (json_next(&it, NULL, &first))
+                    log_keys("guild.channels[0]:", first);
+            }
+            if (json_get(g, "roles", &v)) {
+                json_iter(v, &it);
+                if (json_next(&it, NULL, &first))
+                    log_keys("guild.roles[0]:", first);
+            }
+            if (json_get(g, "members", &v))
+                log_keys("guild.members:", v);
+        }
+    }
+    if (json_get(d, "merged_members", &v)) {
+        log_keys("merged_members:", v);
+        json_iter(v, &it);
+        if (json_next(&it, NULL, &first)) {
+            log_keys("merged_members[0]:", first);
+            json_iter(first, &it);
+            if (json_next(&it, NULL, &g))
+                log_keys("merged_members[0][0]:", g);
+        }
+    }
+    if (json_get(d, "user", &v))
+        log_keys("user:", v);
+}
+
 static void on_ready(void *ctx, json_t d)
 {
     session_t *s = ctx;
-    json_t user, name, guilds, g, props;
-    json_iter_t it;
-    sb_t *out = mem_alloc(sizeof *out);
+    model_t *model;
 
-    if (json_get(d, "user", &user) && json_get(user, "username", &name))
-        json_str(name, out);
-    if (json_get(d, "guilds", &guilds)) {
-        json_iter(guilds, &it);
-        while (json_next(&it, NULL, &g)) {
-            /* User sessions may send guilds with their fields under "properties". */
-            if (json_get(g, "name", &name) || (json_get(g, "properties", &props) && json_get(props, "name", &name))) {
-                sb_add(out, "\n");
-                json_str(name, out);
-            }
-        }
-    }
     log_line("gateway: ", "ready");
+    log_ready_shape(d);
+    model = model_from_ready(d);
     if (current(s))
-        ui_post(UI_READY, out);
-    else {
-        sb_free(out);
-        mem_free(out);
-    }
+        ui_post_model(model);
+    else
+        model_free(model);
 }
-
 /* GET /users/@me. Returns the HTTP status (0 if unreachable) and the account name. */
 static DWORD check_token(const char *token, sb_t *name)
 {
