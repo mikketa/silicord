@@ -208,6 +208,9 @@ static void push_channel(model_t *m, unsigned *cap, const tmp_channel_t *c)
         m->channels = mem_realloc(m->channels, *cap * sizeof *m->channels);
     }
     out = &m->channels[m->nchannels++];
+    *out = (channel_t){0};
+    if (json_get(c->json, "last_message_id", &name))
+        json_raw(name, out->last_message, sizeof out->last_message);
     for (unsigned k = 0; k < sizeof out->id; k++)
         if (!(out->id[k] = c->id[k]))
             break;
@@ -463,6 +466,117 @@ static void add_dms(model_t *m, unsigned *cap, json_t d)
     mem_free(tmp);
 }
 
+/* ---- Read state and mutes ---- */
+
+int model_id_cmp(const char *a, const char *b)
+{
+    return id_cmp(a, b);
+}
+
+int model_find_channel(const model_t *m, const char *id)
+{
+    for (unsigned i = 0; i < m->nchannels; i++)
+        if (str_eq(m->channels[i].id, id))
+            return (int)i;
+    return -1;
+}
+
+int model_channel_guild(const model_t *m, unsigned i)
+{
+    for (unsigned g = 0; g < m->nguilds; g++)
+        if (i >= m->guilds[g].first && i < m->guilds[g].first + m->guilds[g].count)
+            return (int)g;
+    return -1;
+}
+
+int model_unread(const model_t *m, unsigned i)
+{
+    const channel_t *c = &m->channels[i];
+
+    if (c->type == CH_CATEGORY || c->type == CH_VOICE || c->type == CH_STAGE || c->type == CH_FORUM ||
+        c->type == CH_MEDIA || !c->last_message[0] || !c->read[0])
+        return c->mentions > 0;
+    return id_cmp(c->last_message, c->read) > 0;
+}
+
+/* READY sends these either as {"entries": [...]} or as a bare array. */
+static int entries(json_t d, const char *key, json_t *out)
+{
+    json_t v;
+
+    if (!json_get(d, key, &v))
+        return 0;
+    if (json_type(v) == JSON_OBJECT)
+        return json_get(v, "entries", out);
+    *out = v;
+    return json_type(v) == JSON_ARRAY;
+}
+
+static int is_true(json_t v)
+{
+    return json_type(v) == JSON_TRUE;
+}
+
+static void apply_read_state(model_t *m, json_t d)
+{
+    json_t list, e, v;
+    json_iter_t it;
+    char id[24];
+
+    if (!entries(d, "read_state", &list))
+        return;
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &e)) {
+        int i;
+        if (!json_get(e, "id", &v))
+            continue;
+        json_raw(v, id, sizeof id);
+        i = model_find_channel(m, id);
+        if (i < 0)
+            continue;
+        if (json_get(e, "last_message_id", &v))
+            json_raw(v, m->channels[i].read, sizeof m->channels[i].read);
+        if (json_get(e, "mention_count", &v)) {
+            long long n = 0;
+            json_int(v, &n);
+            m->channels[i].mentions = (int)n;
+        }
+    }
+}
+
+static void apply_mutes(model_t *m, json_t d)
+{
+    json_t list, e, v, overrides, o;
+    json_iter_t it, oit;
+    char id[24];
+
+    if (!entries(d, "user_guild_settings", &list))
+        return;
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &e)) {
+        id[0] = 0;
+        if (json_get(e, "guild_id", &v))
+            json_raw(v, id, sizeof id);
+        if (id[0] && json_get(e, "muted", &v) && is_true(v))
+            for (unsigned g = 0; g < m->nguilds; g++)
+                if (str_eq(m->guilds[g].id, id))
+                    m->guilds[g].muted = 1;
+        if (!json_get(e, "channel_overrides", &overrides))
+            continue;
+        json_iter(overrides, &oit);
+        while (json_next(&oit, NULL, &o)) {
+            int i;
+            if (!json_get(o, "channel_id", &v) || !json_get(o, "muted", &v) || !is_true(v))
+                continue;
+            json_get(o, "channel_id", &v);
+            json_raw(v, id, sizeof id);
+            i = model_find_channel(m, id);
+            if (i >= 0)
+                m->channels[i].muted = 1;
+        }
+    }
+}
+
 model_t *model_from_ready(json_t d)
 {
     model_t *m = mem_alloc(sizeof *m);
@@ -482,6 +596,8 @@ model_t *model_from_ready(json_t d)
     }
     if (!json_get(d, "guilds", &guilds)) {
         add_dms(m, &cap, d);
+        apply_read_state(m, d);
+        apply_mutes(m, d);
         return m;
     }
 
@@ -523,6 +639,8 @@ model_t *model_from_ready(json_t d)
     }
     mem_free(rank);
     add_dms(m, &cap, d);
+    apply_read_state(m, d);
+    apply_mutes(m, d);
     return m;
 }
 

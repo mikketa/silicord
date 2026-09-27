@@ -22,6 +22,7 @@ typedef struct {
     unsigned name;
     unsigned first;     /* first channel, channels are stored in display order */
     unsigned count;
+    int muted;
 } guild_t;
 
 typedef struct {
@@ -31,6 +32,11 @@ typedef struct {
     /* Direct messages: the other user (or the group icon, with user_id empty). */
     char user_id[24];
     char avatar[40];
+    /* Read state: unread when last_message > read, mentions counts pings (and DMs). */
+    char last_message[24];
+    char read[24];
+    int mentions;
+    int muted;
 } channel_t;
 
 typedef struct {
@@ -49,6 +55,13 @@ typedef struct {
 /* Builds the model from the READY payload `d`. Never returns NULL. */
 model_t *model_from_ready(json_t d);
 void model_free(model_t *m);
+
+/* Snowflake order: negative, zero or positive like strcmp. */
+int model_id_cmp(const char *a, const char *b);
+int model_find_channel(const model_t *m, const char *id);
+/* Index of the guild owning channel i, -1 for direct messages. */
+int model_channel_guild(const model_t *m, unsigned i);
+int model_unread(const model_t *m, unsigned i);
 
 static __inline const char *model_str(const model_t *m, unsigned off)
 {
