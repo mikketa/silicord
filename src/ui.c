@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "render.h"
 #include "img.h"
+#include "md.h"
 #include "mem.h"
 #include "qr.h"
 #include "utf.h"
@@ -66,6 +67,9 @@ typedef struct {
 typedef struct {
     HWND wnd;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
+    r_font_t *f_mono, *f_h1, *f_h2, *f_h3;
+    r_rich_style_t rich;
+    int hover_link;
     HICON icon_big, icon_small;
     int dpi, view, disconnected;
 
@@ -863,6 +867,7 @@ static void paint_side(RECT rc)
 /* ---- Messages ---- */
 
 static void place_composer(void);
+static void invalidate_views(void);
 
 #define GROUP_MS (7 * 60 * 1000)
 #define COMPOSER_H 44
@@ -992,12 +997,61 @@ static void update_grouping(void)
     }
 }
 
+typedef struct {
+    md_doc_t doc;
+    r_rich_t *rich;
+    int width;
+} msg_view_t;
+
+static void drop_view(msg_t *m)
+{
+    msg_view_t *v = m->ui;
+
+    if (!v)
+        return;
+    r_rich_free(v->rich);
+    md_free(&v->doc);
+    mem_free(v);
+    m->ui = NULL;
+    m->height_w = 0;
+}
+
+static void ui_msg_free(msg_t *m)
+{
+    drop_view(m);
+    msg_free(m);
+}
+
+static void invalidate_views(void)
+{
+    for (int i = 0; i < g_ui.nmsgs; i++)
+        drop_view(&g_ui.msgs[i]);
+}
+
+/* Parsed and laid-out body of a message, rebuilt when the width changes. */
+static r_rich_t *msg_rich(msg_t *m, int width)
+{
+    msg_view_t *v = m->ui;
+
+    if (!v) {
+        v = mem_alloc(sizeof *v);
+        md_parse(m->text.data ? m->text.data : "", m->text.len, &v->doc);
+        m->ui = v;
+    }
+    if (!v->rich || v->width != width) {
+        r_rich_free(v->rich);
+        v->rich = r_rich_build(&v->doc, &g_ui.rich, width);
+        v->width = width;
+    }
+    return v->rich;
+}
+
 static int msg_height(msg_t *m)
 {
     int w = text_w_px();
 
     if (m->height_w != w) {
-        int h = text_height(&m->text, w);
+        int h = m->text.len ? r_rich_height(msg_rich(m, w)) : 0;
         if (m->system)
             h = S(16) + S(22);
         else if (m->grouped == 1)
@@ -1066,8 +1120,9 @@ static void resolve_channels(msg_t *m)
                 lstrcpynA(id, s + i + 2, (int)(j - i - 1));
                 for (unsigned c = 0; g_ui.model && c < g_ui.model->nchannels; c++)
                     if (lstrcmpA(g_ui.model->channels[c].id, id) == 0) {
-                        sb_add(&out, "#");
+                        sb_add(&out, MD_MENTION_OPEN "#");
                         sb_add(&out, model_str(g_ui.model, g_ui.model->channels[c].name));
+                        sb_add(&out, MD_MENTION_CLOSE);
                         found = 1;
                         break;
                     }
@@ -1092,7 +1147,7 @@ static void resolve_channels(msg_t *m)
 static void free_messages(void)
 {
     for (int i = 0; i < g_ui.nmsgs; i++)
-        msg_free(&g_ui.msgs[i]);
+        ui_msg_free(&g_ui.msgs[i]);
     g_ui.nmsgs = 0;
 }
 
@@ -1157,6 +1212,7 @@ static void on_batch(msg_batch_t *b)
         int i = find_msg(b->msgs[0].id);
         /* Partial updates (embeds resolving) carry no author: keep the text we have. */
         if (i >= 0 && b->msgs[0].author_id[0]) {
+            drop_view(&g_ui.msgs[i]);
             sb_free(&g_ui.msgs[i].text);
             g_ui.msgs[i].text = b->msgs[0].text;
             b->msgs[0].text = (sb_t){0};
@@ -1166,7 +1222,7 @@ static void on_batch(msg_batch_t *b)
     case BATCH_DELETE: {
         int i = find_msg(b->msgs[0].id);
         if (i >= 0) {
-            msg_free(&g_ui.msgs[i]);
+            ui_msg_free(&g_ui.msgs[i]);
             memmove(g_ui.msgs + i, g_ui.msgs + i + 1, (size_t)(g_ui.nmsgs - i - 1) * sizeof *g_ui.msgs);
             g_ui.nmsgs--;
         }
@@ -1233,7 +1289,6 @@ static void paint_message(int i, int x0, int y, int w)
 {
     msg_t *m = &g_ui.msgs[i];
     int tx = text_x(), tw = w - (tx - x0) - S(24), h = msg_height(m);
-    wchar_t *body;
 
     if (m->grouped == 2) {
         paint_divider(x0, y, w, m->id);
@@ -1282,11 +1337,8 @@ static void paint_message(int i, int x0, int y, int w)
         }
         y += S(2);
     }
-    if (m->text.len) {
-        body = utf8_to_wide(m->text.data, m->text.len);
-        text_w(g_ui.f_body, C_INK, rect(tx, y, tw, S(4000)), body, -1, DT_LEFT | DT_WORDBREAK | DT_EDITCONTROL);
-        mem_free(body);
-    }
+    if (m->text.len)
+        r_rich_draw(msg_rich(m, tw), tx, y, m->revealed);
 }
 
 static void paint_messages(RECT rc, const char *name)
@@ -1382,7 +1434,7 @@ static void paint_main(RECT rc)
 }
 
 /* Hit test for message hover: index of the message under y, or -1. */
-static int message_at(int x, int y)
+static int message_at(int x, int y, int *top)
 {
     RECT a = message_area();
     int yy = a.bottom + g_ui.msg_scroll - S(16);
@@ -1392,8 +1444,11 @@ static int message_at(int x, int y)
     for (int i = g_ui.nmsgs; i-- > 0;) {
         int h = msg_height(&g_ui.msgs[i]);
         yy -= h;
-        if (y >= yy && y < yy + h)
+        if (y >= yy && y < yy + h) {
+            if (top)
+                *top = yy;
             return i;
+        }
         if (yy < a.top)
             break;
     }
@@ -1453,8 +1508,11 @@ static void redraw(void)
 
 static void make_fonts(void)
 {
-    r_font_t **f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat,
-                      &g_ui.f_icon, &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small};
+    r_font_t **f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat, &g_ui.f_icon,
+                      &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small, &g_ui.f_mono, &g_ui.f_h1,
+                      &g_ui.f_h2, &g_ui.f_h3};
+
+    invalidate_views(); /* message layouts point at the old fonts */
     HFONT old = g_ui.composer ? (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0) : NULL;
 
     for (int i = 0; i < (int)ARRAYSIZE(f); i++)
@@ -1468,6 +1526,18 @@ static void make_fonts(void)
     g_ui.f_icon_big = r_font(L"Segoe MDL2 Assets", S(32), FW_NORMAL, 0);
     g_ui.f_initial = r_font(L"Segoe UI", S(17), FW_SEMIBOLD, 0);
     g_ui.f_initial_small = r_font(L"Segoe UI", S(13), FW_SEMIBOLD, 0);
+    g_ui.f_mono = r_font(L"Consolas", S(14), FW_NORMAL, 0);
+    g_ui.f_h1 = r_font(L"Segoe UI", S(24), FW_BOLD, 0);
+    g_ui.f_h2 = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
+    g_ui.f_h3 = r_font(L"Segoe UI", S(17), FW_BOLD, 0);
+
+    g_ui.rich = (r_rich_style_t){
+        .body = g_ui.f_body, .mono = g_ui.f_mono, .h1 = g_ui.f_h1, .h2 = g_ui.f_h2, .h3 = g_ui.f_h3,
+        .subtext = g_ui.f_small,
+        .ink = ARGB(C_INK), .muted = ARGB(C_MUTED), .link = 0xFF6CB6FFu, .mention = 0xFFFFC857u,
+        .mention_bg = 0x33FFB000u, .code_bg = 0xFF0F0F0Fu, .quote_bar = 0xFF3A3A3Au, .spoiler = 0xFF2E2E2Eu,
+        .quote_indent = S(16), .code_pad = S(8), .block_gap = S(4), .radius = S(6),
+    };
 
     /* The composer is a real EDIT control: it keeps a GDI font. */
     if (g_ui.composer) {
@@ -1558,8 +1628,14 @@ static void notify(int i, const activity_t *a)
 
     g_ui.tray.uFlags = NIF_INFO;
     utf8_to_buf(title, (size_t)lstrlenA(title), g_ui.tray.szInfoTitle, ARRAYSIZE(g_ui.tray.szInfoTitle));
-    if (a->preview.len)
+    if (a->preview.len) {
+        wchar_t *src = g_ui.tray.szInfo, *dst = g_ui.tray.szInfo;
         utf8_to_buf(a->preview.data, a->preview.len, g_ui.tray.szInfo, ARRAYSIZE(g_ui.tray.szInfo));
+        for (; *src; src++)
+            if (*src != 0xE000 && *src != 0xE001)
+                *dst++ = *src;
+        *dst = 0;
+    }
     else
         lstrcpyW(g_ui.tray.szInfo, L"Sent a message");
     g_ui.tray.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
@@ -2007,6 +2083,69 @@ void ui_show_loading(const char *s)
     redraw();
 }
 
+/* ---- Clicks in messages ---- */
+
+/*
+ * Styled span under (x, y) in the message list: returns 1 over a link or a
+ * hidden spoiler, and reports which message and span.
+ */
+static int rich_hit(int x, int y, int *msg, int *link)
+{
+    int top, i = message_at(x, y, &top), tx = text_x();
+    unsigned flags = 0;
+    int l = -1;
+    msg_t *m;
+
+    if (i < 0)
+        return 0;
+    m = &g_ui.msgs[i];
+    if (m->system || !m->text.len || !m->ui)
+        return 0;
+    if (m->grouped == 2)
+        top += S(44);
+    top += m->grouped == 1 ? S(2) : S(16) + (m->reply.len ? S(22) : 0) + S(22);
+    if (!r_rich_hit(((msg_view_t *)m->ui)->rich, x - tx, y - top, &flags, &l))
+        return 0;
+    if (!(flags & MD_LINK) && !((flags & MD_SPOILER) && !m->revealed))
+        return 0;
+    if (msg)
+        *msg = i;
+    if (link)
+        *link = (flags & MD_SPOILER) && !m->revealed ? -1 : l;
+    return 1;
+}
+
+static void open_url(const char *url)
+{
+    wchar_t *w;
+
+    int n = lstrlenA(url);
+
+    /* Only web links: never hand a file path or another scheme to the shell. */
+    if (!(n > 8 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, url, 8, "https://", 8) == CSTR_EQUAL) &&
+        !(n > 7 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, url, 7, "http://", 7) == CSTR_EQUAL))
+        return;
+    w = utf8_to_wide(url, n);
+    ShellExecuteW(g_ui.wnd, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+    mem_free(w);
+}
+
+static int click_message(int x, int y)
+{
+    int i, link;
+
+    if (!rich_hit(x, y, &i, &link))
+        return 0;
+    if (link < 0) {
+        g_ui.msgs[i].revealed = 1;
+        redraw();
+    } else {
+        msg_view_t *v = g_ui.msgs[i].ui;
+        open_url(md_link(&v->doc, link));
+    }
+    return 1;
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -2053,17 +2192,18 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 static void update_hover(int x, int y)
 {
-    int kind, index, m = message_at(x, y);
+    int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL);
 
     hit_test(x, y, &kind, &index);
-    if (m != g_ui.hover_msg) {
+    if (m != g_ui.hover_msg || link != g_ui.hover_link) {
         g_ui.hover_msg = m;
+        g_ui.hover_link = link;
         redraw();
     }
     if (kind != g_ui.hover_kind || index != g_ui.hover_index) {
         g_ui.hover_kind = kind;
         g_ui.hover_index = index;
-        SetCursor(LoadCursorW(NULL, (LPCWSTR)(kind != HIT_NONE ? IDC_HAND : IDC_ARROW)));
+        SetCursor(LoadCursorW(NULL, (LPCWSTR)(kind != HIT_NONE || link ? IDC_HAND : IDC_ARROW)));
         redraw();
     }
 }
@@ -2110,7 +2250,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
-            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.hover_kind != HIT_NONE ? IDC_HAND : IDC_ARROW)));
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.hover_kind != HIT_NONE || g_ui.hover_link ? IDC_HAND : IDC_ARROW)));
             return TRUE;
         }
         break;
@@ -2131,6 +2271,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
         if (g_ui.view == VIEW_APP) {
             int kind, index;
+            if (click_message(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+                return 0;
             hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &kind, &index);
             on_click(kind, index);
         }

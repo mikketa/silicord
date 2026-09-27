@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include "md.h"
 
 /*
  * Drawing through Direct2D (software rasterizer, no GPU driver loaded) and
@@ -42,6 +43,24 @@ enum {
 void r_text(r_font_t *f, unsigned argb, int x, int y, int w, int h, const wchar_t *s, int len, unsigned flags);
 int r_text_width(r_font_t *f, const wchar_t *s, int len);
 int r_text_height(r_font_t *f, const wchar_t *s, int len, int width);
+
+/* ---- Rich text (parsed markdown) ---- */
+
+typedef struct {
+    r_font_t *body, *mono, *h1, *h2, *h3, *subtext;
+    unsigned ink, muted, link, mention, mention_bg, code_bg, quote_bar, spoiler;
+    int quote_indent, code_pad, block_gap, radius;
+} r_rich_style_t;
+
+typedef struct r_rich r_rich_t;
+
+/* Lays out `doc` at `width`. The doc and style must outlive the result. */
+r_rich_t *r_rich_build(const md_doc_t *doc, const r_rich_style_t *style, int width);
+int r_rich_height(r_rich_t *r);
+void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers);
+/* Styled span under (x, y), relative to the origin used to draw. Returns 0 over plain text. */
+int r_rich_hit(r_rich_t *r, int x, int y, unsigned *flags, int *link);
+void r_rich_free(r_rich_t *r);
 
 /* PNG, JPEG, GIF, WebP... decoded to premultiplied BGRA. Safe from any thread. */
 r_image_t *r_image_decode(const void *data, size_t n);

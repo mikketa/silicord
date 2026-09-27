@@ -315,3 +315,255 @@ extern "C" void r_image_free(r_image_t *img)
     mem_free(img->pixels);
     mem_free(img);
 }
+
+/* ---- Rich text ---- */
+
+struct rich_block {
+    IDWriteTextLayout *layout;
+    int kind;
+    int start, len;   /* range in the doc */
+    int x, y, h;      /* text origin relative to the rich origin, block height */
+};
+
+struct r_rich {
+    const md_doc_t *doc;
+    const r_rich_style_t *st;
+    int width;
+    unsigned generation;
+    rich_block *blocks;
+    int nblocks;
+    int height;
+    ID2D1SolidColorBrush *link, *mention, *muted;
+};
+
+static ID2D1SolidColorBrush *new_brush(unsigned argb)
+{
+    ID2D1SolidColorBrush *b = NULL;
+    D2D1_COLOR_F c = color(argb);
+
+    g_rt->CreateSolidColorBrush(&c, NULL, &b);
+    return b;
+}
+
+static void release_rich(r_rich_t *r)
+{
+    for (int i = 0; i < r->nblocks; i++)
+        if (r->blocks[i].layout)
+            r->blocks[i].layout->Release();
+    mem_free(r->blocks);
+    r->blocks = NULL;
+    r->nblocks = 0;
+    if (r->link)
+        r->link->Release();
+    if (r->mention)
+        r->mention->Release();
+    if (r->muted)
+        r->muted->Release();
+    r->link = r->mention = r->muted = NULL;
+}
+
+static r_font_t *block_font(const r_rich_style_t *st, int kind)
+{
+    switch (kind) {
+    case MD_CODEBLOCK: return st->mono;
+    case MD_H1: return st->h1;
+    case MD_H2: return st->h2;
+    case MD_H3: return st->h3;
+    case MD_SUBTEXT: return st->subtext;
+    default: return st->body;
+    }
+}
+
+static void style_range(r_rich_t *r, IDWriteTextLayout *l, const md_span_t *sp, int start, int len)
+{
+    DWRITE_TEXT_RANGE range;
+    int a = sp->start > start ? sp->start : start;
+    int b = sp->start + sp->len < start + len ? sp->start + sp->len : start + len;
+    WCHAR family[64];
+
+    if (b <= a)
+        return;
+    range.startPosition = (UINT32)(a - start);
+    range.length = (UINT32)(b - a);
+    if (sp->flags & MD_BOLD)
+        l->SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range);
+    if (sp->flags & MD_ITALIC)
+        l->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range);
+    if (sp->flags & MD_UNDERLINE)
+        l->SetUnderline(TRUE, range);
+    if (sp->flags & MD_STRIKE)
+        l->SetStrikethrough(TRUE, range);
+    if ((sp->flags & MD_CODE) && SUCCEEDED(r->st->mono->format->GetFontFamilyName(family, 64))) {
+        l->SetFontFamilyName(family, range);
+        l->SetFontSize(r->st->mono->format->GetFontSize(), range);
+    }
+    if (sp->flags & MD_LINK)
+        l->SetDrawingEffect(r->link, range);
+    if (sp->flags & MD_MENTION) {
+        l->SetDrawingEffect(r->mention, range);
+        l->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range);
+    }
+}
+
+static void build_rich(r_rich_t *r)
+{
+    const md_doc_t *d = r->doc;
+    const r_rich_style_t *st = r->st;
+    int y = 0;
+
+    r->generation = g_generation;
+    r->link = new_brush(st->link);
+    r->mention = new_brush(st->mention);
+    r->muted = new_brush(st->muted);
+    r->blocks = (rich_block *)mem_alloc(((size_t)d->nblocks + 1) * sizeof *r->blocks);
+    for (int i = 0; i < d->nblocks; i++) {
+        const md_block_t *b = &d->blocks[i];
+        rich_block *out = &r->blocks[r->nblocks];
+        r_font_t *f = block_font(st, b->kind);
+        int inset = b->kind == MD_QUOTE ? st->quote_indent : b->kind == MD_CODEBLOCK ? st->code_pad : 0;
+        int w = r->width - inset - (b->kind == MD_CODEBLOCK ? st->code_pad : 0);
+        DWRITE_TEXT_METRICS m;
+
+        if (!f || w <= 0 ||
+            FAILED(g_dw->CreateTextLayout(d->text + b->start, (UINT32)b->len, f->format, (float)w, 100000.0f,
+                                          &out->layout)))
+            continue;
+        out->layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        if (b->kind != MD_CODEBLOCK)
+            for (int s = 0; s < d->nspans; s++)
+                style_range(r, out->layout, &d->spans[s], b->start, b->len);
+        if (b->kind == MD_SUBTEXT) {
+            DWRITE_TEXT_RANGE all = {0, (UINT32)b->len};
+            out->layout->SetDrawingEffect(r->muted, all);
+        }
+        out->layout->GetMetrics(&m);
+        if (i && (b->kind == MD_H1 || b->kind == MD_H2 || b->kind == MD_H3))
+            y += st->block_gap * 2;
+        out->kind = b->kind;
+        out->start = b->start;
+        out->len = b->len;
+        out->x = inset;
+        out->y = y + (b->kind == MD_CODEBLOCK ? st->code_pad : 0);
+        out->h = (int)(m.height + 0.99f) + (b->kind == MD_CODEBLOCK ? 2 * st->code_pad : 0);
+        y += out->h + st->block_gap;
+        r->nblocks++;
+    }
+    r->height = y > 0 ? y - st->block_gap : 0;
+}
+
+extern "C" r_rich_t *r_rich_build(const md_doc_t *doc, const r_rich_style_t *style, int width)
+{
+    r_rich_t *r = (r_rich_t *)mem_alloc(sizeof *r);
+
+    r->doc = doc;
+    r->st = style;
+    r->width = width;
+    if (g_rt)
+        build_rich(r);
+    return r;
+}
+
+/* Layouts hold brushes of the render target they were built with. */
+static void refresh(r_rich_t *r)
+{
+    if (r->generation != g_generation && g_rt) {
+        release_rich(r);
+        build_rich(r);
+    }
+}
+
+extern "C" int r_rich_height(r_rich_t *r)
+{
+    refresh(r);
+    return r->height;
+}
+
+/* Calls fn for each box covering the spans with `flag` in block b. */
+template <typename F>
+static void span_boxes(r_rich_t *r, const rich_block *b, unsigned flag, F fn)
+{
+    DWRITE_HIT_TEST_METRICS boxes[16];
+
+    for (int s = 0; s < r->doc->nspans; s++) {
+        const md_span_t *sp = &r->doc->spans[s];
+        int a = sp->start > b->start ? sp->start : b->start;
+        int e = sp->start + sp->len < b->start + b->len ? sp->start + sp->len : b->start + b->len;
+        UINT32 n = 0;
+
+        if (!(sp->flags & flag) || e <= a)
+            continue;
+        if (FAILED(b->layout->HitTestTextRange((UINT32)(a - b->start), (UINT32)(e - a), 0, 0, boxes, 16, &n)))
+            continue;
+        for (UINT32 k = 0; k < n && k < 16; k++)
+            fn(boxes[k], sp->flags);
+    }
+}
+
+extern "C" void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers)
+{
+    const r_rich_style_t *st = r->st;
+
+    refresh(r);
+    for (int i = 0; i < r->nblocks; i++) {
+        rich_block *b = &r->blocks[i];
+        float bx = (float)(x + b->x), by = (float)(y + b->y);
+        D2D1_POINT_2F at = {bx, by};
+
+        if (b->kind == MD_QUOTE) {
+            DWRITE_TEXT_METRICS m;
+            b->layout->GetMetrics(&m);
+            r_round(x, y + b->y, st->quote_indent / 4, (int)(m.height + 0.99f), st->quote_indent / 8, st->quote_bar);
+        } else if (b->kind == MD_CODEBLOCK) {
+            r_round(x, y + b->y - st->code_pad, r->width, b->h, st->radius, st->code_bg);
+        }
+        if (b->kind != MD_CODEBLOCK) {
+            /* Code spans get the code background, mentions a tinted chip. */
+            span_boxes(r, b, MD_CODE | MD_MENTION, [&](const DWRITE_HIT_TEST_METRICS &m, unsigned flags) {
+                D2D1_ROUNDED_RECT rr = {{bx + m.left - 2, by + m.top, bx + m.left + m.width + 2, by + m.top + m.height},
+                                        (float)st->radius / 2, (float)st->radius / 2};
+                g_rt->FillRoundedRectangle(&rr, brush((flags & MD_MENTION) ? st->mention_bg : st->code_bg));
+            });
+        }
+        g_rt->DrawTextLayout(at, b->layout, brush(st->ink), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        if (!reveal_spoilers)
+            span_boxes(r, b, MD_SPOILER, [&](const DWRITE_HIT_TEST_METRICS &m, unsigned) {
+                D2D1_ROUNDED_RECT rr = {{bx + m.left - 1, by + m.top, bx + m.left + m.width + 1, by + m.top + m.height},
+                                        (float)st->radius / 2, (float)st->radius / 2};
+                g_rt->FillRoundedRectangle(&rr, brush(st->spoiler));
+            });
+    }
+}
+
+extern "C" int r_rich_hit(r_rich_t *r, int x, int y, unsigned *flags, int *link)
+{
+    refresh(r);
+    for (int i = 0; i < r->nblocks; i++) {
+        rich_block *b = &r->blocks[i];
+        BOOL trailing, inside;
+        DWRITE_HIT_TEST_METRICS m;
+
+        if (y < b->y || y >= b->y + b->h)
+            continue;
+        if (FAILED(b->layout->HitTestPoint((float)(x - b->x), (float)(y - b->y), &trailing, &inside, &m)) || !inside)
+            return 0;
+        for (int s = 0; s < r->doc->nspans; s++) {
+            const md_span_t *sp = &r->doc->spans[s];
+            int pos = (int)m.textPosition + b->start;
+            if (pos >= sp->start && pos < sp->start + sp->len) {
+                *flags = sp->flags;
+                *link = sp->link;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+extern "C" void r_rich_free(r_rich_t *r)
+{
+    if (!r)
+        return;
+    release_rich(r);
+    mem_free(r);
+}

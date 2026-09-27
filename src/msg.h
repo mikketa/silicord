@@ -13,7 +13,9 @@ typedef struct {
     sb_t reply;      /* "name: first line" of the message replied to, or empty */
     int system;      /* join notices and other non-user messages */
     int deleted;
-    /* Layout cache, owned by the UI. */
+    /* Layout cache and view state, owned by the UI. */
+    void *ui;
+    int revealed;    /* spoilers shown */
     int height;
     int height_w;
     int grouped;
