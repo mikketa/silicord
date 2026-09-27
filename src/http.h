@@ -24,4 +24,6 @@ int http_request(const char *method, const char *path, const char *token,
                  const char *body, size_t body_len, http_resp_t *resp);
 /* GET on the media CDN, path starting with '/'. */
 int http_cdn_get(const char *path, http_resp_t *resp);
+/* GET on another HTTPS host, without credentials. */
+int http_get(const wchar_t *host, const char *path, http_resp_t *resp);
 void http_resp_free(http_resp_t *resp);

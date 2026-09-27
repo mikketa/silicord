@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "model.h"
 #include "msg.h"
+#include "profile.h"
 #include "sb.h"
 
 /*
@@ -25,6 +26,9 @@ enum {
     UI_EVENT,           /* text = event name, a NUL, then the event JSON (servers, channels, roles) */
     UI_RECONNECTING,    /* connection lost, text = status */
     UI_ONLINE,          /* session resumed */
+    UI_PROFILE,         /* profile_t* (username empty when it could not be loaded) */
+    UI_DM_OPENED,       /* text = channel id of a direct message we asked to open */
+    UI_FONT,            /* wParam = display name font id, payload = the font file (NULL on failure) */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -48,6 +52,8 @@ void ui_post(UINT msg, sb_t *payload);
 void ui_post_model(model_t *model);
 void ui_post_batch(msg_batch_t *batch);
 void ui_post_activity(activity_t *a);
+void ui_post_profile(profile_t *p);
+void ui_post_font(int id, sb_t *data);
 void activity_free(activity_t *a);
 sb_t *ui_text(const char *text);
 
@@ -65,3 +71,15 @@ void app_send_message(const char *channel_id, const char *text);
 void app_ack(const char *channel_id, const char *message_id);
 /* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
 void app_fetch_channel(const char *channel_id);
+/* Loads a profile popout; `guild_id` (may be empty) adds the server profile and mutual servers. */
+void app_fetch_profile(const char *user_id, const char *guild_id);
+/*
+ * Opens (or creates) the direct message with a user and sends `text` there if it is
+ * not empty. The channel arrives as UI_EVENT CHANNEL_CREATE, then UI_DM_OPENED.
+ */
+void app_open_dm(const char *user_id, const char *text);
+/*
+ * Loads a display name font: `file` is its path in the Google Fonts
+ * repository (all of them are under the SIL Open Font License). Cached on disk.
+ */
+void app_fetch_font(int id, const char *file);

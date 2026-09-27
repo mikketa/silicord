@@ -171,6 +171,22 @@ void ui_post_activity(activity_t *a)
         activity_free(a);
 }
 
+void ui_post_profile(profile_t *p)
+{
+    if (!PostMessageW(g_ui.wnd, UI_PROFILE, 0, (LPARAM)p)) {
+        profile_free(p);
+        mem_free(p);
+    }
+}
+
+void ui_post_font(int id, sb_t *data)
+{
+    if (!PostMessageW(g_ui.wnd, UI_FONT, (WPARAM)id, (LPARAM)data) && data) {
+        sb_free(data);
+        mem_free(data);
+    }
+}
+
 void ui_post_batch(msg_batch_t *batch)
 {
     if (!PostMessageW(g_ui.wnd, UI_MESSAGES, 0, (LPARAM)batch))

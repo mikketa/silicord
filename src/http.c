@@ -118,6 +118,21 @@ int http_cdn_get(const char *path, http_resp_t *resp)
     return ok;
 }
 
+int http_get(const wchar_t *host, const char *path, http_resp_t *resp)
+{
+    HINTERNET conn = WinHttpConnect(g_session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    sb_t url = {0};
+    int ok;
+
+    if (!conn)
+        return 0;
+    sb_add(&url, path);
+    ok = do_request(conn, "GET", &url, NULL, NULL, 0, resp);
+    sb_free(&url);
+    WinHttpCloseHandle(conn);
+    return ok;
+}
+
 void http_resp_free(http_resp_t *resp)
 {
     sb_free(&resp->body);

@@ -645,6 +645,168 @@ static DWORD WINAPI channel_main(LPVOID arg)
     return 0;
 }
 
+static DWORD WINAPI profile_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    profile_t *p = mem_alloc(sizeof *p);
+    json_t root;
+    char path[160];
+
+    /* j->channel holds the user id, j->before the server. */
+    wsprintfA(path, "/users/%s/profile?with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=true%s%s",
+              j->channel, j->before[0] ? "&guild_id=" : "", j->before);
+    if (!(http_request("GET", path, j->token.data, NULL, 0, &resp) && resp.status == 200 &&
+          json_parse(resp.body.data, resp.body.len, &root) && profile_parse(root, j->before, p))) {
+        profile_free(p);
+        lstrcpynA(p->id, j->channel, sizeof p->id);
+        lstrcpynA(p->guild_id, j->before, sizeof p->guild_id);
+    }
+    ui_post_profile(p);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_profile(const char *user_id, const char *guild_id)
+{
+    rest_job_t *j = new_job(user_id);
+
+    lstrcpynA(j->before, guild_id ? guild_id : "", sizeof j->before);
+    CloseHandle(CreateThread(NULL, 0, profile_main, j, 0, NULL));
+}
+
+static DWORD WINAPI dm_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t body = {0};
+    json_t root, id;
+    char channel[24] = "";
+
+    /* Returns the existing DM if there is one. */
+    sb_add(&body, "{\"recipients\":[\"");
+    sb_add(&body, j->channel);
+    sb_add(&body, "\"]}");
+    if (http_request("POST", "/users/@me/channels", j->token.data, body.data, body.len, &resp) &&
+        resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root) && json_get(root, "id", &id)) {
+        sb_t *p = mem_alloc(sizeof *p);
+        json_raw(id, channel, sizeof channel);
+        sb_add(p, "CHANNEL_CREATE");
+        sb_addn(p, "", 1);
+        sb_addn(p, resp.body.data, resp.body.len);
+        ui_post(UI_EVENT, p);
+        ui_post(UI_DM_OPENED, ui_text(channel));
+    } else {
+        ui_post(UI_SEND_FAILED, ui_text("Could not open the conversation"));
+    }
+    sb_free(&body);
+    http_resp_free(&resp);
+    if (channel[0] && j->text.len) {
+        lstrcpynA(j->channel, channel, sizeof j->channel);
+        return send_main(j); /* frees the job */
+    }
+    free_job(j);
+    return 0;
+}
+
+void app_open_dm(const char *user_id, const char *text)
+{
+    rest_job_t *j = new_job(user_id);
+
+    sb_add(&j->text, text ? text : "");
+    CloseHandle(CreateThread(NULL, 0, dm_main, j, 0, NULL));
+}
+
+/* ---- Display name fonts ---- */
+
+#define FONTS_HOST L"raw.githubusercontent.com"
+#define FONTS_REPO "/google/fonts/23e54b51ddffbc7713c583748e3bd86f62b1fa4a/"
+
+typedef struct {
+    int id;
+    char file[96];
+} font_job_t;
+
+static int font_cache_path(int id, wchar_t *out, int size)
+{
+    wchar_t dir[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);
+
+    if (!n || n > MAX_PATH - 40)
+        return 0;
+    lstrcatW(dir, L"\\Silicord");
+    CreateDirectoryW(dir, NULL);
+    lstrcatW(dir, L"\\fonts");
+    CreateDirectoryW(dir, NULL);
+    if (size < MAX_PATH)
+        return 0;
+    wsprintfW(out, L"%s\\font-%d.ttf", dir, id);
+    return 1;
+}
+
+static int is_font(const sb_t *b)
+{
+    const unsigned char *p = (const unsigned char *)b->data;
+
+    return b->len > 1024 && ((p[0] == 0 && p[1] == 1 && p[2] == 0 && p[3] == 0) || (p[0] == 'O' && p[1] == 'T' && p[2] == 'T' && p[3] == 'O') ||
+                             (p[0] == 't' && p[1] == 'r' && p[2] == 'u' && p[3] == 'e'));
+}
+
+static DWORD WINAPI font_main(LPVOID arg)
+{
+    font_job_t *j = arg;
+    sb_t *data = mem_alloc(sizeof *data);
+    wchar_t path[MAX_PATH];
+    int cached = font_cache_path(j->id, path, MAX_PATH);
+    HANDLE f;
+
+    if (cached && (f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE) {
+        DWORD size = GetFileSize(f, NULL), got = 0;
+        if (size != INVALID_FILE_SIZE && size < (8u << 20)) {
+            sb_reserve(data, size);
+            if (ReadFile(f, data->data, size, &got, NULL))
+                data->len = got;
+        }
+        CloseHandle(f);
+    }
+    if (!is_font(data)) {
+        http_resp_t resp = {0};
+        sb_t url = {0};
+        sb_clear(data);
+        sb_add(&url, FONTS_REPO);
+        sb_add(&url, j->file);
+        if (http_get(FONTS_HOST, url.data, &resp) && resp.status == 200 && is_font(&resp.body)) {
+            *data = resp.body;
+            resp.body = (sb_t){0};
+            if (cached && (f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)) != INVALID_HANDLE_VALUE) {
+                DWORD put;
+                WriteFile(f, data->data, (DWORD)data->len, &put, NULL);
+                CloseHandle(f);
+            }
+        }
+        http_resp_free(&resp);
+        sb_free(&url);
+    }
+    if (!is_font(data)) {
+        sb_free(data);
+        mem_free(data);
+        data = NULL;
+    }
+    ui_post_font(j->id, data);
+    mem_free(j);
+    return 0;
+}
+
+void app_fetch_font(int id, const char *file)
+{
+    font_job_t *j = mem_alloc(sizeof *j);
+
+    j->id = id;
+    lstrcpynA(j->file, file, sizeof j->file);
+    CloseHandle(CreateThread(NULL, 0, font_main, j, 0, NULL));
+}
+
 void app_fetch_channel(const char *channel_id)
 {
     CloseHandle(CreateThread(NULL, 0, channel_main, new_job(channel_id), 0, NULL));
