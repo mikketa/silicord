@@ -31,6 +31,7 @@ typedef struct {
     unsigned long long base_perms;
     int sees_all;       /* owner, administrator, or our roles are unknown */
     unsigned my_roles;  /* comma-separated role ids */
+    unsigned roles;     /* packed role list, read with model_role_next() */
 } guild_t;
 
 typedef struct {
@@ -68,7 +69,8 @@ void model_free(model_t *m);
 
 /*
  * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, GUILD_CREATE/UPDATE/DELETE,
- * GUILD_MEMBER_UPDATE for us). Returns a new model, or NULL when nothing changed.
+ * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_MEMBER_UPDATE for us). Returns a new
+ * model, or NULL when nothing changed.
  * `m` is left untouched; read state carries over by channel id.
  */
 model_t *model_apply(const model_t *m, const char *event, json_t d);
@@ -80,6 +82,20 @@ int model_find_guild(const model_t *m, const char *id);
 /* Index of the guild owning channel i, -1 for direct messages. */
 int model_channel_guild(const model_t *m, unsigned i);
 int model_unread(const model_t *m, unsigned i);
+typedef struct {
+    char id[24];
+    unsigned color;     /* 0xRRGGBB, 0 for none */
+    int position;
+    int hoist;          /* shown apart in the member list */
+    const char *name;
+    int name_len;
+} model_role_t;
+
+/* Iterates the roles of guild g: start with *cursor = 0; returns 0 at the end. */
+int model_role_next(const model_t *m, int g, unsigned *cursor, model_role_t *out);
+/* Color of the highest colored role among `roles` (comma-separated ids), 0 if none. */
+unsigned model_role_color(const model_t *m, int g, const char *roles);
+
 /* Whether we have role `role_id` in guild g. */
 int model_has_role(const model_t *m, int g, const char *role_id);
 

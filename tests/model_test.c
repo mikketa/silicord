@@ -111,6 +111,45 @@ static void test_updates(const model_t *m)
     model_free(n);
 }
 
+static void test_roles(const model_t *m)
+{
+    model_t *a, *b, *c;
+    model_role_t r;
+    unsigned cursor = 0;
+    int n = 0;
+
+    while (model_role_next(m, 0, &cursor, &r))
+        n++;
+    check(n == 2, "roles are listed");
+
+    a = apply(m, "GUILD_ROLE_CREATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"60\",\"name\":\"Mods\",\"color\":16711680,"
+                                       "\"position\":5,\"hoist\":true,\"permissions\":\"0\"}}");
+    b = a ? apply(a, "GUILD_ROLE_CREATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"61\",\"name\":\"Admins\","
+                                          "\"colors\":{\"primary_color\":255},\"position\":9,\"permissions\":\"0\"}}")
+          : NULL;
+    check(a && b, "role creates apply");
+    if (b) {
+        int found = 0;
+        cursor = 0;
+        while (model_role_next(b, 0, &cursor, &r))
+            if (lstrcmpA(r.id, "60") == 0)
+                found = r.color == 0xFF0000 && r.position == 5 && r.hoist && r.name_len == 4;
+        check(found, "role fields");
+        check(model_role_color(b, 0, "50,60") == 0xFF0000, "color of the only colored role");
+        check(model_role_color(b, 0, "60,61") == 0x0000FF, "highest colored role wins");
+        check(model_role_color(b, 0, "50") == 0 && model_role_color(b, 0, "") == 0, "no color without colored roles");
+        c = apply(b, "GUILD_ROLE_DELETE", "{\"guild_id\":\"1\",\"role_id\":\"61\"}");
+        check(c && model_role_color(c, 0, "60,61") == 0xFF0000, "deleted role loses its color");
+        model_free(c);
+        c = apply(b, "GUILD_ROLE_UPDATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"60\",\"name\":\"Mods\",\"color\":65280,"
+                                          "\"position\":20,\"permissions\":\"0\"}}");
+        check(c && model_role_color(c, 0, "60,61") == 0x00FF00, "updated role takes its new color and position");
+        model_free(c);
+    }
+    model_free(a);
+    model_free(b);
+}
+
 void entry(void)
 {
     json_t d;
@@ -150,6 +189,7 @@ void entry(void)
     check(model_has_role(m, 0, "50") && !model_has_role(m, 0, "1"), "our roles are remembered");
 
     test_updates(m);
+    test_roles(m);
     model_free(m);
     finish();
 }

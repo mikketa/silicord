@@ -227,6 +227,141 @@ int model_has_role(const model_t *m, int g, const char *role_id)
     return 0;
 }
 
+/* ---- Role list ----
+ * Packed in the string table, one role per line: "id color position hoist\tname\n".
+ */
+
+static void pack_role(sb_t *out, json_t role)
+{
+    json_t v, colors;
+    char id[24] = "";
+    long long color = 0, pos = 0;
+    sb_t name = {0};
+
+    if (!json_get(role, "id", &v))
+        return;
+    json_raw(v, id, sizeof id);
+    if (json_get(role, "colors", &colors) && json_get(colors, "primary_color", &v))
+        json_int(v, &color);
+    else if (json_get(role, "color", &v))
+        json_int(v, &color);
+    if (json_get(role, "position", &v))
+        json_int(v, &pos);
+    if (json_get(role, "name", &v))
+        json_str(v, &name);
+    for (size_t i = 0; i < name.len; i++)
+        if (name.data[i] == '\n' || name.data[i] == '\t')
+            name.data[i] = ' ';
+    sb_add(out, id);
+    sb_add(out, " ");
+    sb_i64(out, color);
+    sb_add(out, " ");
+    sb_i64(out, pos);
+    sb_add(out, json_get(role, "hoist", &v) && is_true(v) ? " 1\t" : " 0\t");
+    if (name.len)
+        sb_addn(out, name.data, name.len);
+    sb_add(out, "\n");
+    sb_free(&name);
+}
+
+static unsigned pack_roles(model_t *m, json_t roles)
+{
+    sb_t packed = {0};
+    json_iter_t it;
+    json_t role;
+    unsigned off;
+
+    json_iter(roles, &it);
+    while (json_next(&it, NULL, &role))
+        pack_role(&packed, role);
+    off = (unsigned)m->strings.len;
+    if (packed.len)
+        sb_addn(&m->strings, packed.data, packed.len);
+    sb_addn(&m->strings, "", 1);
+    sb_free(&packed);
+    return off;
+}
+
+static long long parse_num(const char **p)
+{
+    long long n = 0;
+    int neg = **p == '-';
+
+    if (neg)
+        (*p)++;
+    while (**p >= '0' && **p <= '9')
+        n = n * 10 + (*(*p)++ - '0');
+    if (**p == ' ')
+        (*p)++;
+    return neg ? -n : n;
+}
+
+int model_role_next(const model_t *m, int g, unsigned *cursor, model_role_t *out)
+{
+    const char *base, *p, *line_end;
+    int k = 0;
+
+    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].roles)
+        return 0;
+    base = m->strings.data + m->guilds[g].roles;
+    p = base + *cursor;
+    if (!*p)
+        return 0;
+    while (p[k] && p[k] != ' ' && k < (int)sizeof out->id - 1) {
+        out->id[k] = p[k];
+        k++;
+    }
+    out->id[k] = 0;
+    p += k + (p[k] == ' ');
+    out->color = (unsigned)parse_num(&p) & 0xFFFFFF;
+    out->position = (int)parse_num(&p);
+    out->hoist = *p == '1';
+    while (*p && *p != '\t' && *p != '\n')
+        p++;
+    if (*p == '\t')
+        p++;
+    for (line_end = p; *line_end && *line_end != '\n'; line_end++)
+        ;
+    out->name = p;
+    out->name_len = (int)(line_end - p);
+    *cursor = (unsigned)(line_end - base) + (*line_end == '\n');
+    return 1;
+}
+
+unsigned model_role_color(const model_t *m, int g, const char *roles)
+{
+    model_role_t r;
+    unsigned cursor = 0, color = 0;
+    int best = -1;
+
+    while (model_role_next(m, g, &cursor, &r)) {
+        size_t n = 0;
+        const char *p = roles;
+        if (!r.color || r.position <= best)
+            continue;
+        while (r.id[n])
+            n++;
+        /* Is r.id one of the comma-separated ids? */
+        while (p && *p) {
+            size_t k = 0;
+            while (p[k] && p[k] != ',')
+                k++;
+            if (k == n) {
+                size_t i = 0;
+                while (i < n && p[i] == r.id[i])
+                    i++;
+                if (i == n) {
+                    best = r.position;
+                    color = r.color;
+                    break;
+                }
+            }
+            p += k + (p[k] == ',');
+        }
+    }
+    return color;
+}
+
 /* Base permissions: @everyone plus our roles. Owners and administrators see everything. */
 static void guild_perms(model_t *m, guild_t *out, json_t g, const role_id_t *mine, int nmine)
 {
@@ -376,6 +511,8 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
         json_raw(v, out->icon, sizeof out->icon);
     if (field(g, "name", &v))
         out->name = add_str(m, v);
+    if (field(g, "roles", &v))
+        out->roles = pack_roles(m, v);
     nmine = my_roles(d, g, index, m->user_id, mine);
     if (nmine < 0 && !from_ready)
         nmine = 0; /* just joined: no roles yet */
@@ -924,6 +1061,7 @@ static model_t *apply_guild_patch(const model_t *m, const char *event, json_t d)
         if (field(d, "icon", &v))
             json_raw(v, g->icon, sizeof g->icon);
         if (json_get(d, "roles", &v)) {
+            g->roles = pack_roles(n, v);
             nmine = parse_roles(n, g->my_roles, mine);
             guild_perms(n, g, d, mine, nmine);
         }
@@ -931,8 +1069,61 @@ static model_t *apply_guild_patch(const model_t *m, const char *event, json_t d)
     return n;
 }
 
+/* GUILD_ROLE_CREATE / UPDATE carry {guild_id, role}, GUILD_ROLE_DELETE {guild_id, role_id}. */
+static model_t *apply_role(const model_t *m, json_t d, int deleted)
+{
+    json_t v, role = {0};
+    char gid[24] = "", rid[24] = "";
+    unsigned cap = 0, cursor = 0;
+    model_role_t r;
+    model_t *n;
+    sb_t packed = {0};
+    int gi;
+
+    if (json_get(d, "guild_id", &v))
+        json_raw(v, gid, sizeof gid);
+    if ((gi = model_find_guild(m, gid)) < 0)
+        return NULL;
+    if (deleted) {
+        if (json_get(d, "role_id", &v))
+            json_raw(v, rid, sizeof rid);
+    } else if (!json_get(d, "role", &role) || !json_get(role, "id", &v)) {
+        return NULL;
+    } else {
+        json_raw(v, rid, sizeof rid);
+    }
+    /* Keep every other role line as it was, then add the new version. */
+    while (model_role_next(m, gi, &cursor, &r)) {
+        const char *line = m->strings.data + m->guilds[gi].roles, *start, *end;
+        if (str_eq(r.id, rid))
+            continue;
+        for (start = r.name; start > line && start[-1] != '\n'; start--)
+            ;
+        end = r.name + r.name_len;
+        sb_addn(&packed, start, (size_t)(end - start));
+        sb_add(&packed, "\n");
+    }
+    if (!deleted)
+        pack_role(&packed, role);
+
+    n = clone_empty(m, 0);
+    for (unsigned g = 0; g < m->nguilds; g++)
+        copy_guild(n, &cap, m, g, NULL);
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    n->guilds[gi].roles = (unsigned)n->strings.len;
+    if (packed.len)
+        sb_addn(&n->strings, packed.data, packed.len);
+    sb_addn(&n->strings, "", 1);
+    sb_free(&packed);
+    return n;
+}
+
 model_t *model_apply(const model_t *m, const char *event, json_t d)
 {
+    if (str_eq(event, "GUILD_ROLE_CREATE") || str_eq(event, "GUILD_ROLE_UPDATE"))
+        return apply_role(m, d, 0);
+    if (str_eq(event, "GUILD_ROLE_DELETE"))
+        return apply_role(m, d, 1);
     if (str_eq(event, "CHANNEL_CREATE") || str_eq(event, "CHANNEL_UPDATE"))
         return apply_channel(m, d, 0);
     if (str_eq(event, "CHANNEL_DELETE"))
