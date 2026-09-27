@@ -119,8 +119,14 @@ static int handle(gw_t *g, const sb_t *msg)
     case OP_DISPATCH:
         if (json_get(root, "s", &s) && json_int(s, &seq))
             InterlockedExchange64(&g->seq, seq);
-        if (json_get(root, "t", &t) && json_str_eq(t, "READY") && g->ev->ready)
-            g->ev->ready(g->ev->ctx, d);
+        if (!json_get(root, "t", &t))
+            return 1;
+        if (json_str_eq(t, "READY")) {
+            if (g->ev->ready)
+                g->ev->ready(g->ev->ctx, d);
+        } else if (g->ev->dispatch) {
+            g->ev->dispatch(g->ev->ctx, t, d);
+        }
         return 1;
     case OP_RECONNECT:
         status(g, "Discord asked to reconnect");

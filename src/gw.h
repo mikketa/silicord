@@ -9,6 +9,8 @@ typedef struct {
     void *ctx;
     void (*status)(void *ctx, const char *text);
     void (*ready)(void *ctx, json_t d);
+    /* Every other dispatch: t is the event name (a JSON string), d its payload. */
+    void (*dispatch)(void *ctx, json_t t, json_t d);
 } gw_events_t;
 
 /* Blocks until the connection closes or gw_stop() is called. */
