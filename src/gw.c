@@ -284,6 +284,11 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
     return (gw_result_t)result;
 }
 
+int gw_send(const sb_t *payload)
+{
+    return g_gw.ready && ws_send(&g_gw.ws, payload);
+}
+
 int gw_wait(unsigned ms)
 {
     init_once(&g_gw);

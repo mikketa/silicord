@@ -1,5 +1,6 @@
 #pragma once
 #include "json.h"
+#include "sb.h"
 
 /*
  * Discord gateway: Hello, Identify or Resume, Heartbeat, dispatches.
@@ -28,6 +29,8 @@ typedef enum {
  * RESUMED was received, so callers can reset their backoff.
  */
 gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *established);
+/* Sends a payload on the open connection (any thread). Returns 0 when not connected. */
+int gw_send(const sb_t *payload);
 /* Waits up to `ms`; returns 1 if gw_stop() was called meanwhile. */
 int gw_wait(unsigned ms);
 /* Safe from any thread. Stays in effect, so later gw_run() calls return at once, until gw_reset(). */
