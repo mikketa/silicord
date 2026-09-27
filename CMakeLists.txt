@@ -84,6 +84,10 @@ add_test(NAME md COMMAND md_test)
 silicord_test(profile_test)
 add_test(NAME profile COMMAND profile_test)
 
+silicord_test(render_test ole32 gdi32 user32 dwrite windowscodecs)
+target_sources(render_test PRIVATE src/render.cpp)
+add_test(NAME render COMMAND render_test)
+
 # The QR test needs an independent decoder: pip install numpy zxing-cpp
 silicord_test(qr_test)
 find_package(Python3 COMPONENTS Interpreter)
