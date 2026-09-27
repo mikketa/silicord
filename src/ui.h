@@ -22,6 +22,7 @@ enum {
     UI_MESSAGES,        /* msg_batch_t* */
     UI_SEND_FAILED,     /* text = reason */
     UI_ACTIVITY,        /* activity_t*: a message anywhere, or a read marker from another device */
+    UI_EVENT,           /* text = event name, a NUL, then the event JSON (servers, channels, roles) */
     UI_RECONNECTING,    /* connection lost, text = status */
     UI_ONLINE,          /* session resumed */
 };
@@ -31,6 +32,7 @@ enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
 typedef struct {
     int kind;
     char channel_id[24];
+    char guild_id[24];
     char message_id[24];
     int from_me;
     int mentions_me;
@@ -60,3 +62,5 @@ void app_fetch_messages(const char *channel_id, const char *before);
 void app_send_message(const char *channel_id, const char *text);
 /* Tells Discord (and your other devices) the channel was read up to message_id. */
 void app_ack(const char *channel_id, const char *message_id);
+/* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
+void app_fetch_channel(const char *channel_id);

@@ -248,15 +248,53 @@ static int mentions_me(json_t d, const char *me)
 static void post_activity(session_t *s, json_t d, const msg_t *m)
 {
     activity_t *a = mem_alloc(sizeof *a);
+    json_t v;
 
     a->kind = ACTIVITY_MESSAGE;
     lstrcpynA(a->channel_id, m->channel_id, sizeof a->channel_id);
+    if (json_get(d, "guild_id", &v))
+        json_raw(v, a->guild_id, sizeof a->guild_id);
     lstrcpynA(a->message_id, m->id, sizeof a->message_id);
     a->from_me = s->me[0] && lstrcmpA(m->author_id, s->me) == 0;
     a->mentions_me = !a->from_me && mentions_me(d, s->me);
     sb_addn(&a->author, m->author.data ? m->author.data : "", m->author.len);
     sb_addn(&a->preview, m->text.data ? m->text.data : "", m->text.len);
     ui_post_activity(a);
+}
+
+static int is_structure_event(json_t t)
+{
+    static const char *const names[] = {
+        "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE",
+        "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
+    };
+
+    for (int i = 0; i < (int)ARRAYSIZE(names); i++)
+        if (json_str_eq(t, names[i]))
+            return 1;
+    return 0;
+}
+
+/* Hands the raw event to the UI thread, which owns the model. */
+static void forward_event(session_t *s, json_t t, json_t d)
+{
+    json_t user, v;
+    sb_t *p;
+
+    if (!current(s))
+        return;
+    if (json_str_eq(t, "GUILD_MEMBER_UPDATE")) {
+        char id[24] = {0};
+        if (json_get(d, "user", &user) && json_get(user, "id", &v))
+            json_raw(v, id, sizeof id);
+        if (lstrcmpA(id, s->me) != 0)
+            return; /* only our own roles matter */
+    }
+    p = mem_alloc(sizeof *p);
+    sb_addn(p, t.p + 1, (size_t)(t.end - t.p - 2));
+    sb_addn(p, "", 1);
+    sb_addn(p, d.p, (size_t)(d.end - d.p));
+    ui_post(UI_EVENT, p);
 }
 
 static void on_dispatch(void *ctx, json_t t, json_t d)
@@ -277,6 +315,10 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
         if (json_get(d, "message_id", &v))
             json_raw(v, a->message_id, sizeof a->message_id);
         ui_post_activity(a);
+        return;
+    }
+    if (is_structure_event(t)) {
+        forward_event(s, t, d);
         return;
     }
     if (json_str_eq(t, "MESSAGE_CREATE"))
@@ -571,6 +613,30 @@ static DWORD WINAPI ack_main(LPVOID arg)
     http_resp_free(&resp);
     free_job(j);
     return 0;
+}
+
+static DWORD WINAPI channel_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[96];
+
+    wsprintfA(path, "/channels/%s", j->channel);
+    if (http_request("GET", path, j->token.data, NULL, 0, &resp) && resp.status == 200) {
+        sb_t *p = mem_alloc(sizeof *p);
+        sb_add(p, "CHANNEL_CREATE");
+        sb_addn(p, "", 1);
+        sb_addn(p, resp.body.data, resp.body.len);
+        ui_post(UI_EVENT, p);
+    }
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_channel(const char *channel_id)
+{
+    CloseHandle(CreateThread(NULL, 0, channel_main, new_job(channel_id), 0, NULL));
 }
 
 void app_ack(const char *channel_id, const char *message_id)

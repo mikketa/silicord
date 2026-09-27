@@ -107,6 +107,7 @@ typedef struct {
     int notified_channel;
     int ack_pending;
     int reconnecting;
+    activity_t *pending[8];   /* messages in DMs we are still looking up */
 } ui_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1};
@@ -443,6 +444,16 @@ static int side_range(unsigned *first, unsigned *count)
     return 1;
 }
 
+/* Categories stay in the model when empty so new channels have a home; they are not shown. */
+static int empty_category(unsigned first, unsigned count, unsigned i)
+{
+    const channel_t *c = chan((int)i);
+
+    if (c->type != CH_CATEGORY)
+        return 0;
+    return i + 1 >= first + count || lstrcmpA(chan((int)i + 1)->parent, c->id) != 0;
+}
+
 /* Whether channel i is hidden inside a collapsed category. */
 static int hidden(unsigned first, unsigned i)
 {
@@ -468,7 +479,7 @@ static int side_content(void)
     if (!side_range(&first, &count))
         return 0;
     for (unsigned i = first; i < first + count; i++)
-        if (chan((int)i)->type == CH_CATEGORY || !hidden(first, i))
+        if (!empty_category(first, count, i) && (chan((int)i)->type == CH_CATEGORY || !hidden(first, i)))
             h += row_height(i);
     return h + S(8);
 }
@@ -529,7 +540,7 @@ static void hit_test(int x, int y, int *kind, int *index)
             int ry = S(HEADER_H) + S(8) - g_ui.side_scroll;
             for (unsigned i = first; i < first + count; i++) {
                 int h;
-                if (chan((int)i)->type != CH_CATEGORY && hidden(first, i))
+                if (empty_category(first, count, i) || (chan((int)i)->type != CH_CATEGORY && hidden(first, i)))
                     continue;
                 h = row_height(i);
                 if (y >= ry && y < ry + h) {
@@ -824,7 +835,7 @@ static void paint_side(RECT rc)
         gfx_end(g_ui.g);
         g_ui.g = gfx_begin(g_ui.back); /* GDI+ picks up the clip region */
         for (unsigned i = first; i < first + count; i++) {
-            if (chan((int)i)->type != CH_CATEGORY && hidden(first, i))
+            if (empty_category(first, count, i) || (chan((int)i)->type != CH_CATEGORY && hidden(first, i)))
                 continue;
             if (y + row_height(i) > S(HEADER_H) && y < S(HEADER_H) + view)
                 paint_channel_row(i, y);
@@ -1596,8 +1607,23 @@ static void on_activity(activity_t *a)
     channel_t *c;
     int i;
 
-    if (!g_ui.model || (i = model_find_channel(g_ui.model, a->channel_id)) < 0)
+    if (!g_ui.model)
         return;
+    if ((i = model_find_channel(g_ui.model, a->channel_id)) < 0) {
+        /* A DM we have never seen: look it up, then replay this message. */
+        if (a->kind == ACTIVITY_MESSAGE && !a->guild_id[0]) {
+            for (int k = 0; k < (int)ARRAYSIZE(g_ui.pending); k++)
+                if (!g_ui.pending[k]) {
+                    activity_t *copy = mem_alloc(sizeof *copy);
+                    *copy = *a;
+                    a->author = a->preview = (sb_t){0};
+                    g_ui.pending[k] = copy;
+                    app_fetch_channel(a->channel_id);
+                    break;
+                }
+        }
+        return;
+    }
     c = &g_ui.model->channels[i];
 
     if (a->kind == ACTIVITY_ACK) {
@@ -1776,8 +1802,95 @@ static void set_model(model_t *m)
     g_ui.rail_scroll = g_ui.side_scroll = 0;
 }
 
+static const char *id_or_empty(int i)
+{
+    return i >= 0 ? chan(i)->id : "";
+}
+
+static int map_channel(const model_t *m, const char *id)
+{
+    return id[0] ? model_find_channel(m, id) : -1;
+}
+
+/* Swaps in an updated model (live event or new READY) and keeps what the user was looking at. */
+static void replace_model(model_t *m)
+{
+    model_t *old = g_ui.model;
+    char guild[24], channel[24], last_dm[24], notified[24];
+    int *last = mem_alloc(((size_t)m->nguilds + 1) * sizeof *last);
+    unsigned char *collapsed = mem_alloc((size_t)m->nchannels + 1);
+    int ch;
+
+    lstrcpynA(guild, g_ui.guild >= 0 ? old->guilds[g_ui.guild].id : "", sizeof guild);
+    lstrcpynA(channel, id_or_empty(g_ui.channel), sizeof channel);
+    lstrcpynA(last_dm, id_or_empty(g_ui.last_dm), sizeof last_dm);
+    lstrcpynA(notified, id_or_empty(g_ui.notified_channel), sizeof notified);
+    for (unsigned g = 0; g < m->nguilds; g++) {
+        int og = model_find_guild(old, m->guilds[g].id);
+        last[g] = og >= 0 ? map_channel(m, id_or_empty(g_ui.last_channel[og])) : -1;
+    }
+    for (unsigned i = 0; i < old->nchannels; i++)
+        if (g_ui.collapsed[i]) {
+            int ni = model_find_channel(m, old->channels[i].id);
+            if (ni >= 0)
+                collapsed[ni] = 1;
+        }
+
+    mem_free(g_ui.last_channel);
+    mem_free(g_ui.collapsed);
+    g_ui.last_channel = last;
+    g_ui.collapsed = collapsed;
+    g_ui.model = m;
+    g_ui.guild = guild[0] ? model_find_guild(m, guild) : -1;
+    g_ui.last_dm = map_channel(m, last_dm);
+    g_ui.notified_channel = map_channel(m, notified);
+    g_ui.hover_kind = HIT_NONE;
+    ch = map_channel(m, channel);
+    model_free(old);
+
+    if (guild[0] && g_ui.guild < 0) {
+        select_guild(-1); /* we left the server we were looking at */
+    } else if (channel[0] && ch < 0) {
+        open_channel(-1); /* the channel is gone */
+    } else {
+        g_ui.channel = ch; /* same channel, new index: keep its messages */
+    }
+    clamp_scroll();
+    update_title();
+}
+
+static void on_event(sb_t *p)
+{
+    const char *name = p->data;
+    size_t n = (size_t)lstrlenA(name) + 1;
+    json_t d;
+    model_t *m;
+
+    if (!g_ui.model || n >= p->len || !json_parse(p->data + n, p->len - n, &d))
+        return;
+    m = model_apply(g_ui.model, name, d);
+    if (m)
+        replace_model(m);
+
+    /* Replay messages that were waiting for this channel. */
+    for (int k = 0; k < (int)ARRAYSIZE(g_ui.pending); k++) {
+        activity_t *a = g_ui.pending[k];
+        if (a && model_find_channel(g_ui.model, a->channel_id) >= 0) {
+            g_ui.pending[k] = NULL;
+            on_activity(a);
+            activity_free(a);
+        }
+    }
+}
+
 static void clear_session(void)
 {
+    for (int k = 0; k < (int)ARRAYSIZE(g_ui.pending); k++)
+        if (g_ui.pending[k]) {
+            activity_free(g_ui.pending[k]);
+            g_ui.pending[k] = NULL;
+        }
+    g_ui.reconnecting = 0;
     if (g_ui.model) {
         model_free(g_ui.model);
         g_ui.model = NULL;
@@ -1841,12 +1954,19 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         break;
     case UI_READY:
         g_ui.reconnecting = 0;
-        set_model((model_t *)lp);
+        if (g_ui.model)
+            replace_model((model_t *)lp); /* reconnected with a fresh session */
+        else
+            set_model((model_t *)lp);
         update_title();
         set_text(&g_ui.status, "Online");
         g_ui.view = VIEW_APP;
         redraw();
         return;
+    case UI_EVENT:
+        if (p)
+            on_event(p);
+        break;
     case UI_RECONNECTING:
         g_ui.reconnecting = 1;
         set_text(&g_ui.status, s);
