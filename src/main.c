@@ -279,6 +279,7 @@ static int is_structure_event(json_t t)
         "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE",
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
+        "GUILD_MEMBER_LIST_UPDATE",
     };
 
     for (int i = 0; i < (int)ARRAYSIZE(names); i++)
@@ -873,7 +874,7 @@ void app_react(const char *channel_id, const char *message_id, const msg_reactio
     CloseHandle(CreateThread(NULL, 0, react_main, j, 0, NULL));
 }
 
-void app_subscribe(const char *guild_id, const char *channel_id)
+void app_subscribe_range(const char *guild_id, const char *channel_id, int start)
 {
     sb_t msg = {0};
 
@@ -881,9 +882,20 @@ void app_subscribe(const char *guild_id, const char *channel_id)
     sb_add(&msg, guild_id);
     sb_add(&msg, "\",\"typing\":true,\"threads\":true,\"activities\":true,\"members\":[],\"channels\":{\"");
     sb_add(&msg, channel_id);
-    sb_add(&msg, "\":[[0,99]]}}}");
+    sb_add(&msg, "\":[[0,99]");
+    if (start > 0) {
+        char r[48];
+        wsprintfA(r, ",[%d,%d]", start, start + 99);
+        sb_add(&msg, r);
+    }
+    sb_add(&msg, "]}}}");
     gw_send(&msg);
     sb_free(&msg);
+}
+
+void app_subscribe(const char *guild_id, const char *channel_id)
+{
+    app_subscribe_range(guild_id, channel_id, 0);
 }
 
 void app_request_members(const char *guild_id, const char *const *user_ids, int n)

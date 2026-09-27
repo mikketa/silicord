@@ -12,6 +12,7 @@
 #include "render.h"
 #include "img.h"
 #include "md.h"
+#include "memberlist.h"
 #include "mem.h"
 #include "qr.h"
 #include "utf.h"
@@ -105,6 +106,7 @@ typedef struct {
     image_t *images;
     int nimages, cap_images;
     unsigned frame;            /* paint counter, for the image cache */
+    int image_first;           /* requests jump the queue (message images) */
     int log_memory;
     LARGE_INTEGER frame_start, qpf;
 
@@ -146,6 +148,10 @@ typedef struct {
     int pop_rich_w;
     char pending_dm[24];      /* user whose new DM we open once it exists */
 
+    /* Member list. */
+    ml_t ml;
+    int show_members, ml_scroll, ml_hover, ml_chunk;
+
     /* Message actions. */
     int hover_tool;            /* toolbar button under the mouse, -1 none */
     int bar;                   /* BAR_* above the composer */
@@ -179,7 +185,8 @@ typedef struct member {
     const model_t *color_model;
 } member_t;
 
-static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1};
+static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1,
+                    .show_members = 1, .ml_hover = -1};
 
 #define WM_TRAY (WM_APP + 60)
 #define TIMER_ACK 1
@@ -415,8 +422,12 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
     im->failed = 0;
     im->used = g_ui.frame;
     im->img = frame_ms() < SYNC_DECODE_MS ? img_cached(path, max_px) : NULL;
-    if (!im->img)
-        img_request(key, path, max_px);
+    if (!im->img) {
+        if (g_ui.image_first)
+            img_request_first(key, path, max_px);
+        else
+            img_request(key, path, max_px);
+    }
     return im->img;
 }
 
@@ -1024,6 +1035,13 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static int members_shown(void);
+static int main_right(void);
+static void paint_members(RECT rc);
+static int ml_hit(int x, int y, int *top);
+static void ml_request_visible(void);
+static void ml_clamp(void);
+static void on_member_list(json_t d);
 static void paint_bar(int x0, int w, int cy);
 static void paint_confirm(void);
 static void paint_typing(int x0, int w, int y);
@@ -1105,7 +1123,7 @@ static RECT message_area(void)
 
     GetClientRect(g_ui.wnd, &rc);
     r.left = S(RAIL_W + SIDE_W);
-    r.right = rc.right;
+    r.right = main_right();
     r.top = S(HEADER_H);
     r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8) - (g_ui.bar ? S(BAR_H) : 0);
     return r;
@@ -1351,7 +1369,9 @@ static r_image_t *part_image(const msg_t *m, char kind, int index, const sb_t *u
         wsprintfA(q, "%cwidth=%d&height=%d", query ? '&' : '?', w, h);
         sb_add(&full, q);
     }
+    g_ui.image_first = 1;
     img = image_get(key, full.data, w > h ? w : h);
+    g_ui.image_first = 0;
     sb_free(&full);
     return img;
 }
@@ -2128,7 +2148,7 @@ static void paint_messages(RECT rc, const char *name)
 
 static void paint_main(RECT rc)
 {
-    int x0 = S(RAIL_W + SIDE_W), w = rc.right - x0;
+    int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0;
 
     fill(x0, 0, w, rc.bottom, C_MAIN);
     fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
@@ -2153,6 +2173,9 @@ static void paint_main(RECT rc)
         }
         paint_messages(rc, name);
         paint_toolbar();
+        if (g_ui.guild >= 0)
+            text_w(g_ui.f_icon, g_ui.show_members ? C_INK : C_MUTED, rect(x0 + w - S(48), 0, S(32), S(HEADER_H)), L"\xE716",
+                   -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         /* Composer frame; the edit control sits inside it. */
         {
@@ -2218,6 +2241,8 @@ static void paint_tooltip(void)
 static void paint_app(RECT rc)
 {
     paint_main(rc);
+    if (members_shown())
+        paint_members(rc);
     paint_side(rc);
     paint_rail(rc);
     paint_tooltip();
@@ -2503,7 +2528,7 @@ static void place_composer(void)
     if (show) {
         int cy = rc.bottom - S(24) - S(COMPOSER_H);
         int eh = S(22);
-        MoveWindow(g_ui.composer, x0 + S(32), cy + (S(COMPOSER_H) - eh) / 2, rc.right - x0 - S(64), eh, TRUE);
+        MoveWindow(g_ui.composer, x0 + S(32), cy + (S(COMPOSER_H) - eh) / 2, main_right() - x0 - S(64), eh, TRUE);
     }
     ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
 }
@@ -2555,6 +2580,12 @@ static void select_guild(int i)
 {
     if (!g_ui.model)
         return;
+    if (i != g_ui.guild) {
+        ml_free(&g_ui.ml);
+        g_ui.ml_scroll = 0;
+        g_ui.ml_chunk = 0;
+        g_ui.ml_hover = -1;
+    }
     g_ui.guild = i;
     g_ui.side_scroll = 0;
     g_ui.channel = i >= 0 ? g_ui.last_channel[i] : g_ui.last_dm;
@@ -2709,6 +2740,10 @@ static void on_event(sb_t *p)
 
     if (!g_ui.model || n >= p->len || !json_parse(p->data + n, p->len - n, &d))
         return;
+    if (lstrcmpA(name, "GUILD_MEMBER_LIST_UPDATE") == 0) {
+        on_member_list(d);
+        return;
+    }
     if (lstrcmpA(name, "GUILD_MEMBERS_CHUNK") == 0 || lstrcmpA(name, "GUILD_MEMBER_UPDATE") == 0) {
         json_t v, list, item;
         json_iter_t it;
@@ -2756,6 +2791,7 @@ static void clear_session(void)
     pop_close();
     profiles_clear();
     members_clear();
+    ml_free(&g_ui.ml);
     images_clear();
     g_ui.guild = -1;
     open_channel(-1);
@@ -4027,7 +4063,7 @@ static int click_bar(int x, int y)
     if (!g_ui.bar)
         return 0;
     GetClientRect(g_ui.wnd, &rc);
-    w = rc.right - x0;
+    w = main_right() - x0;
     cy = rc.bottom - S(24) - S(COMPOSER_H);
     top = cy - S(BAR_H);
     if (y < top || y >= cy)
@@ -4238,6 +4274,236 @@ static void composer_changed(void)
     }
 }
 
+/* ---- Member list (right column) ---- */
+
+#define MEMBERS_W 240
+#define ML_GROUP_H 40
+#define ML_ROW_H 44
+
+static int members_shown(void)
+{
+    return g_ui.show_members && g_ui.view == VIEW_APP && g_ui.guild >= 0 && open_is_text();
+}
+
+/* Right edge of the message column. */
+static int main_right(void)
+{
+    RECT rc;
+
+    GetClientRect(g_ui.wnd, &rc);
+    return rc.right - (members_shown() ? S(MEMBERS_W) : 0);
+}
+
+static unsigned status_color(int status)
+{
+    switch (status) {
+    case ML_ONLINE: return 0xFF23A55Au;
+    case ML_IDLE: return 0xFFF0B232u;
+    case ML_DND: return 0xFFF23F43u;
+    default: return 0xFF80848Eu;
+    }
+}
+
+/* Status dot on an avatar of size d at (x, y), with a ring of the background color. */
+static void paint_status(int x, int y, int d, int status, unsigned bg)
+{
+    int s = d * 10 / 32, ring = s + S(6), cx = x + d - s + S(1), cy = y + d - s + S(1);
+
+    r_circle(cx - (ring - s) / 2, cy - (ring - s) / 2, ring, bg);
+    if (status == ML_OFFLINE || status == ML_UNKNOWN) {
+        r_circle(cx, cy, s, status_color(status));
+        r_circle(cx + s / 4, cy + s / 4, s / 2, bg); /* hollow like Discord's offline dot */
+    } else if (status == ML_IDLE) {
+        r_circle(cx, cy, s, status_color(status));
+        r_circle(cx - s / 6, cy - s / 6, s * 5 / 8, bg); /* crescent moon */
+    } else if (status == ML_DND) {
+        r_circle(cx, cy, s, status_color(status));
+        r_round(cx + s / 5, cy + s / 2 - S(1), s - 2 * (s / 5), S(2) > 1 ? S(2) : 1, S(1), bg);
+    } else {
+        r_circle(cx, cy, s, status_color(status));
+    }
+}
+
+static int ml_row_h(const ml_item_t *it)
+{
+    return it->group ? S(ML_GROUP_H) : S(ML_ROW_H);
+}
+
+static int ml_content(void)
+{
+    int h = S(8);
+
+    for (int i = 0; i < g_ui.ml.n; i++)
+        h += ml_row_h(&g_ui.ml.items[i]);
+    return h;
+}
+
+static void ml_clamp(void)
+{
+    RECT rc;
+    int view, max;
+
+    GetClientRect(g_ui.wnd, &rc);
+    view = rc.bottom - S(HEADER_H);
+    max = ml_content() - view;
+    if (g_ui.ml_scroll > max)
+        g_ui.ml_scroll = max;
+    if (g_ui.ml_scroll < 0)
+        g_ui.ml_scroll = 0;
+}
+
+static void group_title(const ml_item_t *it, char *out, int size)
+{
+    model_role_t r;
+    unsigned cursor = 0;
+    const char *name = it->id;
+    char buf[96], role[64];
+
+    if (lstrcmpA(it->id, "online") == 0)
+        name = "Online";
+    else if (lstrcmpA(it->id, "offline") == 0)
+        name = "Offline";
+    else
+        while (model_role_next(g_ui.model, g_ui.guild, &cursor, &r))
+            if (lstrcmpA(r.id, it->id) == 0) {
+                lstrcpynA(role, r.name, r.name_len + 1 < (int)sizeof role ? r.name_len + 1 : (int)sizeof role);
+                name = role;
+                break;
+            }
+    wsprintfA(buf, "%.60s \xE2\x80\x94 %d", name, it->count ? it->count : ml_group_count(&g_ui.ml, it->id));
+    for (char *c = buf; *c; c++) /* uppercase like Discord (ASCII only: names may be UTF-8) */
+        if (*c >= 'a' && *c <= 'z')
+            *c = (char)(*c - 'a' + 'A');
+    lstrcpynA(out, buf, size);
+}
+
+static void paint_members(RECT rc)
+{
+    int x0 = rc.right - S(MEMBERS_W), y = S(HEADER_H) + S(8) - g_ui.ml_scroll;
+
+    fill(x0, 0, S(MEMBERS_W), rc.bottom, C_SIDE);
+    fill(x0, S(HEADER_H) - 1, S(MEMBERS_W), 1, C_LINE);
+    r_clip(x0, S(HEADER_H), S(MEMBERS_W), rc.bottom - S(HEADER_H));
+    for (int i = 0; i < g_ui.ml.n; i++) {
+        const ml_item_t *it = &g_ui.ml.items[i];
+        int h = ml_row_h(it);
+
+        if (y + h > S(HEADER_H) && y < rc.bottom && r_visible(y, h)) {
+            if (it->group && it->valid) {
+                char title[128];
+                group_title(it, title, sizeof title);
+                text(g_ui.f_cat, C_MUTED, rect(x0 + S(16), y + S(16), S(MEMBERS_W) - S(24), S(20)), title,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            } else if (it->valid) {
+                int offline = it->status == ML_OFFLINE || it->status == ML_UNKNOWN;
+                r_image_t *img = user_avatar(it->id, it->avatar);
+                unsigned color = model_role_color(g_ui.model, g_ui.guild, it->roles.data ? it->roles.data : "");
+                unsigned ink = color ? 0xFF000000u | color : ARGB(C_INK);
+                int ay = y + (h - S(32)) / 2, tx = x0 + S(56), tw = S(MEMBERS_W) - S(64);
+                wchar_t *name;
+
+                if (g_ui.ml_hover == i)
+                    r_round(x0 + S(8), y + S(1), S(MEMBERS_W) - S(16), h - S(2), S(6), ARGB(C_HOVER));
+                if (img)
+                    r_image(img, x0 + S(16), ay, S(32), S(32), S(16));
+                else
+                    r_circle(x0 + S(16), ay, S(32), ARGB(C_ITEM));
+                if (!offline)
+                    paint_status(x0 + S(16), ay, S(32), it->status, g_ui.ml_hover == i ? ARGB(C_HOVER) : ARGB(C_SIDE));
+                else /* offline members are dimmed */
+                    r_circle(x0 + S(16), ay, S(32), 0x80111111u);
+                if (offline)
+                    ink = (ink & 0xFFFFFF) | 0x80000000u;
+                name = utf8_to_wide(it->name.data ? it->name.data : "", it->name.len);
+                r_text(g_ui.f_h, ink, tx, it->activity.len ? y + S(4) : y, tw - (it->bot ? S(34) : 0),
+                       it->activity.len ? S(20) : h, name, -1, R_LEFT | R_SINGLE | R_ELLIPSIS | (it->activity.len ? 0 : R_VCENTER));
+                if (it->bot) {
+                    int bw = r_text_width(g_ui.f_h, name, -1);
+                    int bx = tx + (bw < tw - S(34) ? bw : tw - S(34)) + S(4), by = (it->activity.len ? y + S(6) : y + (h - S(16)) / 2);
+                    r_round(bx, by, S(30), S(16), S(4), 0xFF5865F2u);
+                    text(g_ui.f_cat, C_INK, rect(bx, by, S(30), S(16)), "APP", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+                mem_free(name);
+                if (it->activity.len)
+                    text(g_ui.f_small, C_MUTED, rect(tx, y + S(22), tw, S(18)), it->activity.data,
+                         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+        }
+        y += h;
+    }
+    r_unclip();
+}
+
+/* Member row under (x, y), -1 if none. */
+static int ml_hit(int x, int y, int *top)
+{
+    RECT rc;
+    int yy = S(HEADER_H) + S(8) - g_ui.ml_scroll;
+
+    if (!members_shown())
+        return -1;
+    GetClientRect(g_ui.wnd, &rc);
+    if (x < rc.right - S(MEMBERS_W) || y < S(HEADER_H))
+        return -1;
+    for (int i = 0; i < g_ui.ml.n; i++) {
+        int h = ml_row_h(&g_ui.ml.items[i]);
+        if (y >= yy && y < yy + h) {
+            if (top)
+                *top = yy;
+            return g_ui.ml.items[i].valid && !g_ui.ml.items[i].group ? i : -1;
+        }
+        yy += h;
+    }
+    return -1;
+}
+
+/* Asks for the part of the list being scrolled to (Discord streams it by ranges of 100). */
+static void ml_request_visible(void)
+{
+    RECT rc;
+    int yy = S(HEADER_H) + S(8) - g_ui.ml_scroll, first = -1;
+
+    if (!members_shown())
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    for (int i = 0; i < g_ui.ml.n && first < 0; i++) {
+        yy += ml_row_h(&g_ui.ml.items[i]);
+        if (yy > S(HEADER_H))
+            first = i;
+    }
+    if (first < 0)
+        first = g_ui.ml.n;
+    if (first / 100 != g_ui.ml_chunk) {
+        g_ui.ml_chunk = first / 100;
+        app_subscribe_range(g_ui.model->guilds[g_ui.guild].id, g_ui.msgs_channel, g_ui.ml_chunk * 100);
+    }
+}
+
+static void on_member_list(json_t d)
+{
+    const char *guild = open_guild_id();
+    json_t v;
+    char gid[24] = "";
+
+    if (json_get(d, "guild_id", &v))
+        json_raw(v, gid, sizeof gid);
+    if (!guild || lstrcmpA(gid, guild) != 0)
+        return;
+    ml_apply(&g_ui.ml, d);
+    /* The list tells us members' roles and nicknames: authors get their colors without asking. */
+    for (int i = 0; i < g_ui.ml.n; i++) {
+        const ml_item_t *it = &g_ui.ml.items[i];
+        member_t *mb;
+        if (!it->valid || it->group || ((mb = member_find(gid, it->id)) && mb->known))
+            continue;
+        mb = member_add(gid, it->id);
+        mb->known = 1;
+        sb_clear(&mb->roles);
+        sb_add(&mb->roles, it->roles.data ? it->roles.data : "");
+    }
+    ml_clamp();
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -4312,6 +4578,14 @@ static void update_hover(int x, int y)
     int tool = toolbar_hit(x, y, NULL);
     part_t part;
 
+    {
+        int mh = ml_hit(x, y, NULL);
+        if (mh != g_ui.ml_hover) {
+            g_ui.ml_hover = mh;
+            redraw();
+        }
+        link = link || mh >= 0;
+    }
     if (g_ui.confirm) {
         int h = confirm_hit(x, y);
         if (h != g_ui.confirm_hover) {
@@ -4440,6 +4714,23 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (click_bar(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
+            {
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), top, mi;
+                if (g_ui.guild >= 0 && open_is_text() && y < S(HEADER_H) && x >= main_right() - S(48) &&
+                    x < main_right() - S(16)) {
+                    g_ui.show_members ^= 1;
+                    place_composer();
+                    invalidate_views();
+                    clamp_msg_scroll();
+                    redraw();
+                    return 0;
+                }
+                if ((mi = ml_hit(x, y, &top)) >= 0) {
+                    const ml_item_t *it = &g_ui.ml.items[mi];
+                    pop_open(it->id, it->name.data, it->avatar, main_right() - S(POP_W) - S(8), top, 0);
+                    return 0;
+                }
+            }
             if (click_author(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || click_message(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
             hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &kind, &index);
@@ -4453,7 +4744,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.view != VIEW_APP)
             return 0;
         pop_close();
-        if (pt.x < S(RAIL_W)) {
+        if (members_shown() && pt.x >= main_right()) {
+            g_ui.ml_scroll += delta;
+            ml_clamp();
+            ml_request_visible();
+        } else if (pt.x < S(RAIL_W)) {
             g_ui.rail_scroll += delta;
         } else if (pt.x < S(RAIL_W + SIDE_W)) {
             g_ui.side_scroll += delta;
