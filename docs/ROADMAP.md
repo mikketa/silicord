@@ -22,9 +22,9 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 
 - [x] List servers and channels, hiding channels you cannot see
 - [ ] List DMs
-- [ ] Live messages in a channel (`MESSAGE_CREATE`)
-- [ ] Send a message
-- [ ] Load history (`GET /channels/{id}/messages`)
+- [x] Live messages in the open channel (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `MESSAGE_DELETE`)
+- [x] Send a message
+- [x] Load history, and older messages while scrolling up (`GET /channels/{id}/messages`)
 
 ## 3. Efficiency
 
@@ -37,7 +37,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Native, custom-drawn window with dark title bar and per-monitor DPI
 - [x] Login screen with the QR code
 - [x] Server rail with round icons, channel list with collapsible categories, user panel
-- [ ] Message view and composer
+- [x] Message view (grouping, dates, replies, mentions) and composer
 - [ ] Color emoji (DirectWrite)
 - [ ] Text rendering with GDI / DirectWrite
 - [ ] Mentions, replies, edit and delete
