@@ -71,6 +71,15 @@ typedef struct {
 /* Time a paint may spend decoding images from the disk cache before deferring the rest. */
 #define SYNC_DECODE_MS 8
 
+enum { BAR_NONE, BAR_REPLY, BAR_EDIT };
+#define BAR_H 36
+
+typedef struct {
+    char user[24];
+    sb_t name;
+    DWORD until;
+} typing_t;
+
 typedef struct {
     HWND wnd;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
@@ -137,6 +146,18 @@ typedef struct {
     int pop_rich_w;
     char pending_dm[24];      /* user whose new DM we open once it exists */
 
+    /* Message actions. */
+    int hover_tool;            /* toolbar button under the mouse, -1 none */
+    int bar;                   /* BAR_* above the composer */
+    char bar_msg[24];
+    sb_t bar_name;
+    int bar_mention;
+    int confirm, confirm_hover;
+    char confirm_id[24];
+    typing_t typing[8];
+    int ntyping;
+    DWORD typing_sent;
+
     /* Server members seen in messages: nickname and roles, for names in role colors. */
     struct member *members;
     int nmembers, cap_members;
@@ -158,7 +179,7 @@ typedef struct member {
     const model_t *color_model;
 } member_t;
 
-static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1};
+static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1};
 
 #define WM_TRAY (WM_APP + 60)
 #define TIMER_ACK 1
@@ -1002,6 +1023,13 @@ static void profiles_clear(void);
 static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
+static void paint_toolbar(void);
+static void paint_bar(int x0, int w, int cy);
+static void paint_confirm(void);
+static void paint_typing(int x0, int w, int y);
+static void typing_stop(const char *user);
+static void typing_clear(void);
+static void on_typing(const sb_t *p);
 
 #define GROUP_MS (7 * 60 * 1000)
 #define COMPOSER_H 44
@@ -1079,7 +1107,7 @@ static RECT message_area(void)
     r.left = S(RAIL_W + SIDE_W);
     r.right = rc.right;
     r.top = S(HEADER_H);
-    r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8);
+    r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8) - (g_ui.bar ? S(BAR_H) : 0);
     return r;
 }
 
@@ -1858,6 +1886,7 @@ static void on_batch(msg_batch_t *b)
         b->n = 0;
         break;
     case BATCH_NEW:
+        typing_stop(b->msgs[0].author_id);
         if (g_ui.msgs_loading || find_msg(b->msgs[0].id) >= 0)
             break;
         reserve_msgs(1);
@@ -2123,14 +2152,17 @@ static void paint_main(RECT rc)
             return;
         }
         paint_messages(rc, name);
+        paint_toolbar();
 
         /* Composer frame; the edit control sits inside it. */
         {
             int cy = rc.bottom - S(24) - S(COMPOSER_H);
+            paint_bar(x0, w, cy);
             r_round(x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
             if (g_ui.send_error.len)
-                text(g_ui.f_small, C_AMBER, rect(x0 + S(20), cy - S(20), w - S(40), S(18)), g_ui.send_error.data,
-                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                text(g_ui.f_small, C_AMBER, rect(x0 + S(20), cy - S(20) - (g_ui.bar ? S(BAR_H) : 0), w - S(40), S(18)),
+                     g_ui.send_error.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            paint_typing(x0, w, rc.bottom - S(22));
         }
     } else {
         int unit = S(4);
@@ -2189,6 +2221,7 @@ static void paint_app(RECT rc)
     paint_side(rc);
     paint_rail(rc);
     paint_tooltip();
+    paint_confirm();
 }
 
 static void paint(HWND wnd)
@@ -2483,6 +2516,9 @@ static void open_channel(int index)
 
     pop_close();
     g_ui.channel = index;
+    typing_clear();
+    g_ui.bar = BAR_NONE;
+    g_ui.confirm = 0;
     free_messages();
     g_ui.msg_scroll = 0;
     g_ui.msgs_status = 0;
@@ -2499,6 +2535,8 @@ static void open_channel(int index)
     c = chan(index);
     mark_read(index);
     lstrcpynA(g_ui.msgs_channel, c->id, sizeof g_ui.msgs_channel);
+    if (g_ui.guild >= 0)
+        app_subscribe(g_ui.model->guilds[g_ui.guild].id, c->id);
     g_ui.msgs_loading = 1;
     g_ui.msgs_has_more = 1;
     app_open_channel(c->id);
@@ -2734,6 +2772,16 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
 
     if (msg == UI_MESSAGES) {
         on_batch((msg_batch_t *)lp);
+        redraw();
+        return;
+    }
+    if (msg == UI_TYPING) {
+        if (p)
+            on_typing(p);
+        if (p) {
+            sb_free(p);
+            mem_free(p);
+        }
         redraw();
         return;
     }
@@ -3799,6 +3847,397 @@ static void open_self(void)
     pop_open(g_ui.model->user_id, name, g_ui.model->user_avatar, S(RAIL_W) + S(8), rc.bottom - S(PANEL_H) - S(8), 1);
 }
 
+/* ---- Message actions: hover toolbar, reply and edit bar, delete confirmation, typing ---- */
+
+#define TOOL_BTN 32
+#define TIMER_TYPING 2
+#define TYPING_MS 10000
+
+static const wchar_t *const k_quick[] = {L"\xD83D\xDC4D", L"\x2764\xFE0F", L"\xD83D\xDE02"}; /* thumbs up, heart, joy */
+enum { TOOL_REACT0, TOOL_REACT1, TOOL_REACT2, TOOL_REPLY, TOOL_EDIT, TOOL_DELETE, TOOL_COUNT };
+
+static int own_message(const msg_t *m)
+{
+    return g_ui.model && lstrcmpA(m->author_id, g_ui.model->user_id) == 0;
+}
+
+/* Top of message i on screen (the same walk as message_at). */
+static int msg_top(int i)
+{
+    RECT a = message_area();
+    int y = a.bottom + g_ui.msg_scroll - S(16);
+
+    for (int k = g_ui.nmsgs; k-- > i;)
+        y -= msg_height(&g_ui.msgs[k]);
+    if (g_ui.msgs[i].grouped == 2)
+        y += S(44);
+    return y;
+}
+
+/* Buttons shown for message i, in order; returns how many. */
+static int tool_buttons(int i, int *out)
+{
+    int n = 0;
+
+    for (int k = TOOL_REACT0; k <= TOOL_REPLY; k++)
+        out[n++] = k;
+    if (own_message(&g_ui.msgs[i])) {
+        out[n++] = TOOL_EDIT;
+        out[n++] = TOOL_DELETE;
+    }
+    return n;
+}
+
+static RECT toolbar_rect(int i, int n)
+{
+    RECT a = message_area();
+    int w = n * S(TOOL_BTN) + S(8), y = msg_top(i) + (g_ui.msgs[i].grouped == 1 ? -S(20) : S(0));
+
+    if (y < a.top + S(4))
+        y = a.top + S(4);
+    return rect(a.right - S(24) - w, y, w, S(TOOL_BTN) + S(4));
+}
+
+static void paint_toolbar(void)
+{
+    int i = g_ui.hover_msg, btn[TOOL_COUNT], n;
+    RECT r;
+
+    if (i < 0 || i >= g_ui.nmsgs || g_ui.msgs[i].system || g_ui.msgs[i].deleted)
+        return;
+    n = tool_buttons(i, btn);
+    r = toolbar_rect(i, n);
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    for (int k = 0; k < n; k++) {
+        int x = r.left + S(4) + k * S(TOOL_BTN), y = r.top + S(2);
+        if (g_ui.hover_tool == k)
+            r_round(x, y, S(TOOL_BTN), S(TOOL_BTN), S(6), ARGB(C_SELECT));
+        if (btn[k] <= TOOL_REACT2)
+            text_w(g_ui.f_body, C_INK, rect(x, y, S(TOOL_BTN), S(TOOL_BTN)), k_quick[btn[k]], -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        else
+            text_w(g_ui.f_icon, btn[k] == TOOL_DELETE && g_ui.hover_tool == k ? C_AMBER : C_MUTED,
+                   rect(x, y, S(TOOL_BTN), S(TOOL_BTN)),
+                   btn[k] == TOOL_REPLY ? L"\xE97A" : btn[k] == TOOL_EDIT ? L"\xE70F" : L"\xE74D", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/* Index (in the toolbar) of the button under (x, y), or -1. */
+static int toolbar_hit(int x, int y, int *action)
+{
+    int i = g_ui.hover_msg, btn[TOOL_COUNT], n;
+    RECT r;
+
+    if (i < 0 || i >= g_ui.nmsgs || g_ui.msgs[i].system)
+        return -1;
+    n = tool_buttons(i, btn);
+    r = toolbar_rect(i, n);
+    if (x < r.left + S(4) || x >= r.right - S(4) || y < r.top || y >= r.bottom)
+        return -1;
+    int k = (x - r.left - S(4)) / S(TOOL_BTN);
+    if (k >= n)
+        return -1;
+    if (action)
+        *action = btn[k];
+    return k;
+}
+
+/* ---- Reply / edit bar above the composer ---- */
+
+static void set_composer_text(const char *s)
+{
+    wchar_t *w = utf8_to_wide(s ? s : "", s ? lstrlenA(s) : 0);
+
+    SetWindowTextW(g_ui.composer, w);
+    SendMessageW(g_ui.composer, EM_SETSEL, (WPARAM)lstrlenW(w), (LPARAM)lstrlenW(w));
+    mem_free(w);
+}
+
+static void bar_close(void)
+{
+    if (g_ui.bar == BAR_EDIT)
+        SetWindowTextW(g_ui.composer, L"");
+    g_ui.bar = BAR_NONE;
+    g_ui.bar_msg[0] = 0;
+    sb_clear(&g_ui.bar_name);
+    place_composer();
+    clamp_msg_scroll();
+    redraw();
+}
+
+static void start_reply(int i)
+{
+    g_ui.bar = BAR_REPLY;
+    g_ui.bar_mention = !own_message(&g_ui.msgs[i]);
+    lstrcpynA(g_ui.bar_msg, g_ui.msgs[i].id, sizeof g_ui.bar_msg);
+    set_text(&g_ui.bar_name, author_name(&g_ui.msgs[i]));
+    place_composer();
+    SetFocus(g_ui.composer);
+    redraw();
+}
+
+static void start_edit(int i)
+{
+    g_ui.bar = BAR_EDIT;
+    lstrcpynA(g_ui.bar_msg, g_ui.msgs[i].id, sizeof g_ui.bar_msg);
+    set_composer_text(g_ui.msgs[i].content.data);
+    place_composer();
+    SetFocus(g_ui.composer);
+    redraw();
+}
+
+/* Up arrow in an empty composer edits our last message, like Discord. */
+static int edit_last(void)
+{
+    for (int i = g_ui.nmsgs; i-- > 0;)
+        if (own_message(&g_ui.msgs[i]) && !g_ui.msgs[i].system) {
+            start_edit(i);
+            return 1;
+        }
+    return 0;
+}
+
+static void paint_bar(int x0, int w, int cy)
+{
+    char line[160];
+    int y = cy - S(BAR_H);
+
+    if (!g_ui.bar)
+        return;
+    r_round(x0 + S(16), y, w - S(32), S(BAR_H) + S(10), S(10), 0xFF181818);
+    if (g_ui.bar == BAR_REPLY)
+        wsprintfA(line, "Replying to %.100s", g_ui.bar_name.data ? g_ui.bar_name.data : "");
+    else
+        lstrcpyA(line, "Editing message \xE2\x80\xA2 escape to cancel \xE2\x80\xA2 enter to save");
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(32), y, w - S(160), S(BAR_H)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (g_ui.bar == BAR_REPLY)
+        text(g_ui.f_cat, g_ui.bar_mention ? C_AMBER : C_FAINT, rect(x0 + w - S(128), y, S(64), S(BAR_H)),
+             g_ui.bar_mention ? "@ ON" : "@ OFF", DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    text_w(g_ui.f_icon, C_MUTED, rect(x0 + w - S(56), y, S(24), S(BAR_H)), L"\xE711", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+/* Clicks on the bar: 1 handled. */
+static int click_bar(int x, int y)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), w, cy, top;
+
+    if (!g_ui.bar)
+        return 0;
+    GetClientRect(g_ui.wnd, &rc);
+    w = rc.right - x0;
+    cy = rc.bottom - S(24) - S(COMPOSER_H);
+    top = cy - S(BAR_H);
+    if (y < top || y >= cy)
+        return 0;
+    if (x >= x0 + w - S(56) && x < x0 + w - S(32))
+        bar_close();
+    else if (g_ui.bar == BAR_REPLY && x >= x0 + w - S(128) && x < x0 + w - S(64)) {
+        g_ui.bar_mention ^= 1;
+        redraw();
+    }
+    return 1;
+}
+
+/* ---- Delete confirmation ---- */
+
+static RECT confirm_rect(void)
+{
+    RECT rc;
+
+    GetClientRect(g_ui.wnd, &rc);
+    return rect((rc.right - S(440)) / 2, (rc.bottom - S(200)) / 2, S(440), S(200));
+}
+
+static void paint_confirm(void)
+{
+    RECT rc, r;
+    int i = g_ui.confirm ? find_msg(g_ui.confirm_id) : -1;
+    wchar_t *preview;
+
+    if (i < 0)
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    r_fill(0, 0, rc.right, rc.bottom, 0xB0000000u);
+    r = confirm_rect();
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 0xFF151515);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 1, 0xFF2A2A2A);
+    text(g_ui.f_title, C_INK, rect(r.left + S(20), r.top + S(18), S(400), S(28)), "Delete Message", DT_LEFT | DT_SINGLELINE);
+    text(g_ui.f_body, C_MUTED, rect(r.left + S(20), r.top + S(56), S(400), S(22)),
+         "Are you sure you want to delete this message?", DT_LEFT | DT_SINGLELINE);
+    preview = utf8_to_wide(g_ui.msgs[i].text.data ? g_ui.msgs[i].text.data : "", g_ui.msgs[i].text.len);
+    r_round(r.left + S(20), r.top + S(86), S(400), S(40), S(6), 0xFF1E1E1E);
+    r_text(g_ui.f_body, ARGB(C_INK), r.left + S(32), r.top + S(86), S(376), S(40), preview, -1,
+           R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
+    mem_free(preview);
+    r_round(r.right - S(220), r.bottom - S(56), S(96), S(36), S(6), g_ui.confirm_hover == 1 ? 0xFF2A2A2A : 0xFF222222);
+    text(g_ui.f_h, C_INK, rect(r.right - S(220), r.bottom - S(56), S(96), S(36)), "Cancel", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    r_round(r.right - S(116), r.bottom - S(56), S(96), S(36), S(6), g_ui.confirm_hover == 2 ? 0xFFD83C3Eu : 0xFFC0363Au);
+    text(g_ui.f_h, C_INK, rect(r.right - S(116), r.bottom - S(56), S(96), S(36)), "Delete", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+/* 1 cancel, 2 delete, 0 elsewhere in the dialog, -1 outside. */
+static int confirm_hit(int x, int y)
+{
+    RECT r = confirm_rect();
+
+    if (y >= r.bottom - S(56) && y < r.bottom - S(20)) {
+        if (x >= r.right - S(220) && x < r.right - S(124))
+            return 1;
+        if (x >= r.right - S(116) && x < r.right - S(20))
+            return 2;
+    }
+    return x >= r.left && x < r.right && y >= r.top && y < r.bottom ? 0 : -1;
+}
+
+static void confirm_close(int do_delete)
+{
+    if (do_delete && find_msg(g_ui.confirm_id) >= 0)
+        app_delete_message(g_ui.msgs_channel, g_ui.confirm_id);
+    g_ui.confirm = 0;
+    g_ui.confirm_hover = 0;
+    redraw();
+}
+
+static void run_tool(int action)
+{
+    int i = g_ui.hover_msg;
+    msg_t *m;
+
+    if (i < 0 || i >= g_ui.nmsgs)
+        return;
+    m = &g_ui.msgs[i];
+    switch (action) {
+    case TOOL_REACT0:
+    case TOOL_REACT1:
+    case TOOL_REACT2: {
+        msg_reaction_t r = {0};
+        int k, add;
+        wide_to_utf8(k_quick[action], (size_t)lstrlenW(k_quick[action]), &r.emoji);
+        for (k = 0; k < m->nreactions && !same_reaction(&m->reactions[k], &r); k++)
+            ;
+        add = !(k < m->nreactions && m->reactions[k].me);
+        app_react(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, &r, add);
+        apply_reaction(m, &r, add ? 1 : -1, 1);
+        sb_free(&r.emoji);
+        break;
+    }
+    case TOOL_REPLY:
+        start_reply(i);
+        break;
+    case TOOL_EDIT:
+        start_edit(i);
+        break;
+    case TOOL_DELETE:
+        if (GetKeyState(VK_SHIFT) < 0) { /* shift-click skips the question, like Discord */
+            app_delete_message(g_ui.msgs_channel, m->id);
+        } else {
+            g_ui.confirm = 1;
+            lstrcpynA(g_ui.confirm_id, m->id, sizeof g_ui.confirm_id);
+        }
+        break;
+    }
+    redraw();
+}
+
+/* ---- Typing ---- */
+
+static void typing_prune(void)
+{
+    DWORD now = GetTickCount();
+    int k = 0;
+
+    for (int i = 0; i < g_ui.ntyping; i++)
+        if ((int)(g_ui.typing[i].until - now) > 0)
+            g_ui.typing[k++] = g_ui.typing[i];
+        else
+            sb_free(&g_ui.typing[i].name);
+    g_ui.ntyping = k;
+    if (!k)
+        KillTimer(g_ui.wnd, TIMER_TYPING);
+}
+
+static void typing_stop(const char *user)
+{
+    for (int i = 0; i < g_ui.ntyping; i++)
+        if (lstrcmpA(g_ui.typing[i].user, user) == 0)
+            g_ui.typing[i].until = GetTickCount();
+    typing_prune();
+}
+
+static void typing_clear(void)
+{
+    for (int i = 0; i < g_ui.ntyping; i++)
+        sb_free(&g_ui.typing[i].name);
+    g_ui.ntyping = 0;
+    KillTimer(g_ui.wnd, TIMER_TYPING);
+}
+
+static void on_typing(const sb_t *p)
+{
+    const char *channel = p->data, *user = channel + lstrlenA(channel) + 1, *name = user + lstrlenA(user) + 1;
+    int i;
+
+    if (lstrcmpA(channel, g_ui.msgs_channel) != 0)
+        return;
+    for (i = 0; i < g_ui.ntyping && lstrcmpA(g_ui.typing[i].user, user) != 0; i++)
+        ;
+    if (i == g_ui.ntyping) {
+        if (i == (int)ARRAYSIZE(g_ui.typing))
+            return;
+        g_ui.typing[i] = (typing_t){0};
+        lstrcpynA(g_ui.typing[i].user, user, sizeof g_ui.typing[i].user);
+        g_ui.ntyping++;
+    }
+    sb_clear(&g_ui.typing[i].name);
+    if (*name) {
+        sb_add(&g_ui.typing[i].name, name);
+    } else { /* DMs: the name from a message or the conversation */
+        for (int k = g_ui.nmsgs; k-- > 0;)
+            if (lstrcmpA(g_ui.msgs[k].author_id, user) == 0) {
+                sb_add(&g_ui.typing[i].name, author_name(&g_ui.msgs[k]));
+                break;
+            }
+        if (!g_ui.typing[i].name.len && g_ui.channel >= 0)
+            sb_add(&g_ui.typing[i].name, model_str(g_ui.model, chan(g_ui.channel)->name));
+    }
+    g_ui.typing[i].until = GetTickCount() + TYPING_MS;
+    SetTimer(g_ui.wnd, TIMER_TYPING, 1000, NULL);
+}
+
+static void paint_typing(int x0, int w, int y)
+{
+    char line[200];
+
+    if (!g_ui.ntyping)
+        return;
+    if (g_ui.ntyping == 1)
+        wsprintfA(line, "%.80s is typing\xE2\x80\xA6", g_ui.typing[0].name.data);
+    else if (g_ui.ntyping == 2)
+        wsprintfA(line, "%.60s and %.60s are typing\xE2\x80\xA6", g_ui.typing[0].name.data, g_ui.typing[1].name.data);
+    else if (g_ui.ntyping == 3)
+        wsprintfA(line, "%.40s, %.40s and %.40s are typing\xE2\x80\xA6", g_ui.typing[0].name.data, g_ui.typing[1].name.data,
+                  g_ui.typing[2].name.data);
+    else
+        lstrcpyA(line, "Several people are typing\xE2\x80\xA6");
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(20), y, w - S(40), S(20)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+/* Tells the others we are typing, at most every 8 seconds. */
+static void composer_changed(void)
+{
+    DWORD now = GetTickCount();
+
+    if (g_ui.bar == BAR_EDIT || !open_is_text() || GetWindowTextLengthW(g_ui.composer) <= 0)
+        return;
+    if (now - g_ui.typing_sent > 8000) {
+        g_ui.typing_sent = now;
+        app_typing(g_ui.msgs_channel);
+    }
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -3822,8 +4261,16 @@ static void send_composer(void)
     if (b > a) {
         text.data[b] = 0;
         sb_clear(&g_ui.send_error);
-        app_send_message(g_ui.msgs_channel, text.data + a);
+        if (g_ui.bar == BAR_EDIT)
+            app_edit_message(g_ui.msgs_channel, g_ui.bar_msg, text.data + a);
+        else if (g_ui.bar == BAR_REPLY)
+            app_send_reply(g_ui.msgs_channel, text.data + a, g_ui.bar_msg, g_ui.bar_mention);
+        else
+            app_send_message(g_ui.msgs_channel, text.data + a);
+        g_ui.typing_sent = 0;
         SetWindowTextW(g_ui.composer, L"");
+        if (g_ui.bar)
+            bar_close();
         g_ui.msg_scroll = 0;
         redraw();
     }
@@ -3833,9 +4280,23 @@ static void send_composer(void)
 static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_CHAR && wp == VK_RETURN) {
-        send_composer();
+        if (g_ui.confirm)
+            confirm_close(1);
+        else
+            send_composer();
         return 0;
     }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && (g_ui.confirm || g_ui.bar)) {
+        if (g_ui.confirm)
+            confirm_close(0);
+        else
+            bar_close();
+        return 0;
+    }
+    if (msg == WM_CHAR && wp == VK_ESCAPE)
+        return 0;
+    if (msg == WM_KEYDOWN && wp == VK_UP && !g_ui.bar && GetWindowTextLengthW(h) == 0 && edit_last())
+        return 0;
     if (msg == WM_MOUSEWHEEL)
         return SendMessageW(g_ui.wnd, msg, wp, lp);
     if (msg == WM_LBUTTONDOWN)
@@ -3848,7 +4309,25 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 static void update_hover(int x, int y)
 {
     int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL), i, ax, ay;
+    int tool = toolbar_hit(x, y, NULL);
     part_t part;
+
+    if (g_ui.confirm) {
+        int h = confirm_hit(x, y);
+        if (h != g_ui.confirm_hover) {
+            g_ui.confirm_hover = h;
+            redraw();
+        }
+        return;
+    }
+    /* The toolbar floats over the message above: keep the hovered message while over it. */
+    if (tool >= 0)
+        m = g_ui.hover_msg;
+    if (tool != g_ui.hover_tool) {
+        g_ui.hover_tool = tool;
+        redraw();
+    }
+    link = link || tool >= 0;
 
     link = link || author_hit(x, y, &i, &ax, &ay) || part_hit(x, y, &i, &part);
 
@@ -3894,6 +4373,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         pop_place();
         redraw();
         return 0;
+    case WM_COMMAND:
+        if ((HWND)lp == g_ui.composer && HIWORD(wp) == EN_CHANGE)
+            composer_changed();
+        break;
     case WM_CTLCOLOREDIT:
         SetTextColor((HDC)wp, GDI(C_INK));
         SetBkColor((HDC)wp, RGB(0x1F, 0x1F, 0x1F));
@@ -3938,10 +4421,25 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
         if (g_ui.view == VIEW_APP) {
             int kind, index;
+            int action;
             if (g_ui.pop) {
                 pop_close(); /* a click outside only closes the popout */
                 return 0;
             }
+            if (g_ui.confirm) {
+                int h = confirm_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (h == 1 || h == -1)
+                    confirm_close(0);
+                else if (h == 2)
+                    confirm_close(1);
+                return 0;
+            }
+            if (toolbar_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &action) >= 0) {
+                run_tool(action);
+                return 0;
+            }
+            if (click_bar(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+                return 0;
             if (click_author(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || click_message(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
             hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &kind, &index);
@@ -3970,6 +4468,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
+        if (wp == TIMER_TYPING) {
+            typing_prune();
+            redraw();
+            return 0;
+        }
         if (wp == TIMER_ACK) {
             KillTimer(wnd, TIMER_ACK);
             if (g_ui.ack_pending && g_ui.model && g_ui.channel >= 0) {
@@ -4009,7 +4512,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_FONT) {
+        if (msg >= UI_QR && msg <= UI_TYPING) {
             on_worker(msg, wp, lp);
             return 0;
         }
