@@ -3,7 +3,7 @@
 ## Principles
 
 1. **No C runtime.** The entry point is `entry` (`/ENTRY:entry /NODEFAULTLIB`). Only Windows libraries are linked (`kernel32`, `user32`, `winhttp`, `d2d1`, `dwrite`, `windowscodecs`, ...). What the compiler itself needs (`memset`, `memcpy`) lives in `src/rt.c`.
-2. **Windows does the heavy lifting.** TLS, HTTP and WebSocket go through WinHTTP. No OpenSSL, no libcurl. Drawing goes through Direct2D (software rasterizer, so no GPU driver is loaded) and DirectWrite; images are decoded by WIC.
+2. **Windows does the heavy lifting.** TLS, HTTP and WebSocket go through WinHTTP. No OpenSSL, no libcurl. DirectWrite lays out and draws the text, color emoji included, into a bitmap Silicord owns; images are decoded by WIC. Neither Direct2D nor the GPU is used.
 3. **Event-driven.** No busy loop: the thread blocks (`WaitForMultipleObjects`, `GetMessage`) until the next event.
 4. **Assembly where it measurably helps.** C first, then hot functions (JSON parsing, inflate, text) are rewritten in NASM only when a benchmark shows a gain.
 
@@ -29,4 +29,12 @@ Display name fonts are the only files fetched outside Discord: they come from a 
 - C11, one module per `src/<module>.c` + `src/<module>.h`, functions prefixed by module (`con_`, `http_`, `gw_`, `json_`).
 - Assembly: NASM, Win64 ABI (arguments in `rcx`, `rdx`, `r8`, `r9`, result in `rax`), `sc_` prefix, declarations in `src/sc_asm.h`.
 - UTF-8 strings everywhere; conversion to UTF-16 only at Win32 `W` calls.
-- `src/render.cpp` is the only C++ file: the Direct2D and DirectWrite headers are C++ only. It is built without exceptions, RTTI or static constructors, and exposes a C API (`render.h`).
+- `src/render.cpp` is the only C++ file: the DirectWrite headers are C++ only. It is built without exceptions, RTTI or static constructors, and exposes a C API (`render.h`).
+
+## Rendering
+
+`render.cpp` is a small software renderer. DirectWrite draws glyph runs into the bitmap of an `IDWriteBitmapRenderTarget` (color emoji are split into their colored layers with `TranslateColorGlyphRun`); rounded rectangles, circles, gradients and scaled images are rasterized by hand with analytic anti-aliasing.
+
+A frame is drawn in bands of 256 rows through one bitmap as wide as the window: the UI repeats its paint for each band and anything outside it is skipped before any work is done. The bitmap stays around 2 MB instead of a full-window back buffer, and there is no Direct2D device or WARP rasterizer, whose caches used to take 20 to 30 MB.
+
+DirectWrite does not clip to a rectangle, so the pixels a text layout can touch outside the visible area are saved before drawing it and put back after; the same copy gives translucent text. Styled display names are drawn as a coverage mask (white glyphs, grayscale anti-aliasing) and composited with their gradient or effect.

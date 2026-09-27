@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, Direct2D and a few kilobytes.
+A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, DirectWrite and a few kilobytes.
 
 > **Status: early.** Silicord logs in with a QR code, shows your servers, channels and direct messages, reads and sends messages, and opens user profiles with their banner, badges, avatar decoration and display name style. See the [roadmap](docs/ROADMAP.md).
 
@@ -17,7 +17,7 @@ The official client ships a full Chromium: several processes, hundreds of MB of 
 - ~0% CPU when idle (the process sleeps until the next network event)
 - a few MB of RAM
 
-Measured while connected to an account with 20 servers: 185 KB executable, 0% CPU when idle, about 14 MB of memory at startup (Task Manager) and 20 to 35 MB after browsing several servers. Silicord's own data stays under 3 MB; the rest belongs to Direct2D and DirectWrite, which draw the text and color emoji.
+Measured while connected to an account with 20 servers: 195 KB executable, 0% CPU over 30 idle seconds, about 8 MB of memory at startup (Task Manager) and 9 MB after browsing eight servers. Silicord's own data, images included, stays around 3 MB.
 - a codebase small enough to read end to end
 
 ## ⚠️ Disclaimer

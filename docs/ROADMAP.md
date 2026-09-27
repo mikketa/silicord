@@ -41,7 +41,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Login screen with the QR code
 - [x] Server rail with round icons, channel list with collapsible categories, user panel
 - [x] Message view (grouping, dates, replies, mentions) and composer
-- [x] Direct2D + DirectWrite rendering (software rasterizer), color emoji everywhere
+- [x] Software renderer on DirectWrite (no Direct2D, no GPU), color emoji everywhere, drawn in bands
 - [x] Discord markdown: bold, italic, underline, strike, code, code blocks, quotes, headings, lists, spoilers, links
 - [ ] Mentions, replies, edit and delete
 - [x] Unread markers, mention badges, read sync with other devices
