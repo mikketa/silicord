@@ -22,7 +22,8 @@
 
 /* Palette (GDI COLORREF and GDI+ ARGB). */
 #define RGBX(r, g, b) RGB(r, g, b), (0xFF000000u | ((r) << 16) | ((g) << 8) | (b))
-enum { C_RAIL, C_SIDE, C_MAIN, C_PANEL, C_ITEM, C_HOVER, C_SELECT, C_LINE, C_INK, C_MUTED, C_FAINT, C_AMBER, C_GREEN, C_TIP, C_COUNT };
+enum { C_RAIL, C_SIDE, C_MAIN, C_PANEL, C_ITEM, C_HOVER, C_SELECT, C_LINE, C_INK, C_MUTED, C_FAINT, C_AMBER, C_GREEN, C_TIP,
+       C_MENTION, C_MENTION_HOVER, C_NEW, C_COUNT };
 static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
     {RGBX(0x0A, 0x0A, 0x0A)}, /* rail */
     {RGBX(0x11, 0x11, 0x11)}, /* channel column */
@@ -38,6 +39,9 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
     {RGBX(0xFF, 0xB0, 0x00)}, /* accent */
     {RGBX(0x3B, 0xA5, 0x5D)}, /* online */
     {RGBX(0x05, 0x05, 0x05)}, /* tooltip */
+    {RGBX(0x26, 0x21, 0x14)}, /* message that mentions us */
+    {RGBX(0x2C, 0x26, 0x17)}, /* same, hovered */
+    {RGBX(0xF2, 0x3F, 0x43)}, /* NEW line */
 };
 #define GDI(c) (k_color[c].gdi)
 #define ARGB(c) (k_color[c].argb)
@@ -172,6 +176,7 @@ typedef struct {
     char msgs_channel[24];
     int msgs_loading, msgs_older_loading, msgs_has_more, msgs_status;
     int msg_scroll;            /* distance from the bottom, in pixels */
+    char new_after[24];        /* messages after this one were unread when the channel opened */
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
     sb_t send_error;
@@ -1168,6 +1173,9 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static int divider_h(const msg_t *m);
+static const char *find_str(const char *hay, const char *needle);
+static void paint_new_line(int x0, int y, int w);
 static void place_friend_input(void);
 static void paint_friends(RECT rc, int x0, int w);
 static int friends_hit(int x, int y, int *act);
@@ -1300,13 +1308,53 @@ static int text_height(const sb_t *s, int width)
 }
 
 /* grouped: 0 = starts a group, 1 = continues it, 2 = starts a group after a date divider. */
+/* Whether a message pings us: a user mention, @everyone, or one of our roles. */
+static int pings_me(const msg_t *m)
+{
+    char tag[32];
+    const char *s = m->content.data;
+
+    if (!g_ui.model || !s || m->system)
+        return 0;
+    if (m->mention_everyone)
+        return 1;
+    wsprintfA(tag, "<@%s>", g_ui.model->user_id);
+    if (find_str(s, tag))
+        return 1;
+    wsprintfA(tag, "<@!%s>", g_ui.model->user_id);
+    if (find_str(s, tag))
+        return 1;
+    if (g_ui.guild >= 0)
+        for (const char *p = s; (p = find_str(p, "<@&")) != NULL; p += 3) {
+            char id[24];
+            int k = 0;
+            while (p[3 + k] >= '0' && p[3 + k] <= '9' && k < 23) {
+                id[k] = p[3 + k];
+                k++;
+            }
+            id[k] = 0;
+            if (model_has_role(g_ui.model, g_ui.guild, id))
+                return 1;
+        }
+    return 0;
+}
+
 static void update_grouping(void)
 {
+    int seen_new = 0;
+
     for (int i = 0; i < g_ui.nmsgs; i++) {
         msg_t *m = &g_ui.msgs[i], *p = i ? &g_ui.msgs[i - 1] : NULL;
         SYSTEMTIME a, b;
 
         m->height_w = 0;
+        m->mentions_me = pings_me(m);
+        m->first_new = 0;
+        if (!seen_new && g_ui.new_after[0] && model_id_cmp(m->id, g_ui.new_after) > 0 &&
+            !(g_ui.model && lstrcmpA(m->author_id, g_ui.model->user_id) == 0)) {
+            m->first_new = 1;
+            seen_new = 1;
+        }
         if (!p) {
             m->grouped = 0;
             continue;
@@ -1927,8 +1975,7 @@ static int msg_height(msg_t *m)
             h = S(2) + (h ? h : S(20)) + S(2);
         else
             h = S(16) + (m->reply.len ? S(22) : 0) + S(22) + h + S(2);
-        if (m->grouped == 2)
-            h += S(44);
+        h += divider_h(m);
         m->height = h;
         m->height_w = w;
     }
@@ -2221,6 +2268,31 @@ static void paint_welcome(int x0, int y, int w, const char *name, int voice)
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+/* Space above a message for the date and "NEW" lines. */
+static int divider_h(const msg_t *m)
+{
+    return (m->grouped == 2 ? S(44) : m->first_new ? S(20) : 0) + (m->first_new && m->grouped == 1 ? S(8) : 0);
+}
+
+/* Plain substring search (no shlwapi). */
+static const char *find_str(const char *hay, const char *needle)
+{
+    size_t n = (size_t)lstrlenA(needle);
+
+    for (; *hay; hay++)
+        if (CompareStringA(LOCALE_INVARIANT, 0, hay, (int)n, needle, (int)n) == CSTR_EQUAL)
+            return hay;
+    return NULL;
+}
+
+/* The red "NEW" line above the first unread message. */
+static void paint_new_line(int x0, int y, int w)
+{
+    fill(x0 + S(16), y, w - S(32), 1, C_NEW);
+    r_round(x0 + w - S(16) - S(36), y - S(8), S(36), S(16), S(4), ARGB(C_NEW));
+    text(g_ui.f_cat, C_INK, rect(x0 + w - S(16) - S(36), y - S(8), S(36), S(16)), "NEW", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
 static void paint_divider(int x0, int y, int w, const char *id)
 {
     SYSTEMTIME st = local_time(id);
@@ -2244,10 +2316,25 @@ static void paint_message(int i, int x0, int y, int w)
 
     if (m->grouped == 2) {
         paint_divider(x0, y, w, m->id);
+        if (m->first_new)
+            paint_new_line(x0, y + S(22), w);
         y += S(44);
         h -= S(44);
+    } else if (m->first_new) {
+        paint_new_line(x0, y + S(10), w);
+        y += S(20);
+        h -= S(20);
     }
-    if (g_ui.hover_msg == i)
+    if (m->first_new && m->grouped == 1) {
+        y += S(8);
+        h -= S(8);
+    }
+    if (m->mentions_me) {
+        /* Messages that ping us, like Discord: tinted with a bar on the left. */
+        int top = y + (m->grouped == 1 ? 0 : S(12));
+        fill(x0, top, w, h - (top - y), g_ui.hover_msg == i ? C_MENTION_HOVER : C_MENTION);
+        fill(x0, top, S(2), h - (top - y), C_AMBER);
+    } else if (g_ui.hover_msg == i)
         fill(x0, y + (m->grouped == 1 ? 0 : S(12)), w, h - (m->grouped == 1 ? 0 : S(12)), C_HOVER);
 
     if (m->system) {
@@ -2781,6 +2868,7 @@ static void open_channel(int index)
     }
     place_friend_input();
     c = chan(index);
+    lstrcpynA(g_ui.new_after, model_unread(g_ui.model, (unsigned)index) ? c->read : "", sizeof g_ui.new_after);
     mark_read(index);
     lstrcpynA(g_ui.msgs_channel, c->id, sizeof g_ui.msgs_channel);
     if (g_ui.guild >= 0)
@@ -3252,8 +3340,7 @@ static int rich_hit(int x, int y, int *msg, int *link)
     m = &g_ui.msgs[i];
     if (m->system || !(m->text.len || m->edited) || !m->ui)
         return 0;
-    if (m->grouped == 2)
-        top += S(44);
+    top += divider_h(m);
     top += m->grouped == 1 ? S(2) : S(16) + (m->reply.len ? S(22) : 0) + S(22);
     if (!r_rich_hit(((msg_view_t *)m->ui)->rich, x - tx, y - top, &flags, &l))
         return 0;
@@ -3292,8 +3379,7 @@ static int part_hit(int x, int y, int *msg, part_t *part)
     m = &g_ui.msgs[i];
     if (m->system)
         return 0;
-    if (m->grouped == 2)
-        top += S(44);
+    top += divider_h(m);
     top += m->grouped == 1 ? S(2) : S(16) + (m->reply.len ? S(22) : 0) + S(22);
     if (m->text.len || m->edited)
         top += r_rich_height(msg_rich(m, w));
@@ -4159,8 +4245,7 @@ static int author_hit(int x, int y, int *msg, int *ax, int *ay)
     if (m->system || m->grouped == 1 || !m->author_id[0])
         return 0;
     x0 = message_area().left;
-    if (m->grouped == 2)
-        top += S(44);
+    top += divider_h(m);
     ny = top + S(16) + (m->reply.len ? S(22) : 0);
     nw = text_width(g_ui.f_h, m->author.data ? m->author.data : "");
     if (y < ny || y >= ny + S(40))
@@ -4220,8 +4305,7 @@ static int msg_top(int i)
 
     for (int k = g_ui.nmsgs; k-- > i;)
         y -= msg_height(&g_ui.msgs[k]);
-    if (g_ui.msgs[i].grouped == 2)
-        y += S(44);
+    y += divider_h(&g_ui.msgs[i]);
     return y;
 }
 
