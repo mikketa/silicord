@@ -42,5 +42,7 @@ int ml_apply(ml_t *l, json_t d);
 void ml_free(ml_t *l);
 /* Status of a presence object's "status" string. */
 int ml_status(json_t status);
+/* Text shown under a name for a presence object: custom status, else "Playing ..." and the like. */
+void ml_activity(json_t presence, sb_t *out);
 /* Members in group `id`, 0 if unknown. */
 int ml_group_count(const ml_t *l, const char *id);

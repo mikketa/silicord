@@ -58,7 +58,7 @@ static int get_str(json_t obj, const char *key, sb_t *out)
 }
 
 /* Text shown under a member's name: custom status, else the first activity. */
-static void activity_text(json_t presence, sb_t *out)
+void ml_activity(json_t presence, sb_t *out)
 {
     json_t acts, a, v;
     json_iter_t it;
@@ -127,7 +127,7 @@ static void parse_item(json_t obj, ml_item_t *out)
     }
     if (json_get(m, "presence", &presence)) {
         out->status = json_get(presence, "status", &v) ? ml_status(v) : ML_UNKNOWN;
-        activity_text(presence, &out->activity);
+        ml_activity(presence, &out->activity);
     } else {
         out->status = ML_OFFLINE;
     }
