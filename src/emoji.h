@@ -22,7 +22,7 @@ extern const emoji_category_t k_emoji_categories[EMOJI_CATEGORIES];
 
 /* The emoji called `name` (without colons), NULL if there is none. */
 const char *emoji_by_name(const char *name, size_t n);
-/* Whether one of emoji i's names contains `query` (case-insensitive ASCII). */
+/* 2 when one of emoji i's names starts with `query`, 1 when one contains it, else 0 (ASCII, any case). */
 int emoji_matches(int i, const char *query);
 /* Copies emoji i's main name into out. */
 void emoji_main_name(int i, char *out, size_t size);

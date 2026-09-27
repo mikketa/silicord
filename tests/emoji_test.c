@@ -37,7 +37,8 @@ void entry(void)
           "categories cover the table");
     emoji_main_name(0, name, sizeof name);
     check(lstrcmpA(name, "grinning") == 0, "main name");
-    check(emoji_matches(0, "GRIN") && !emoji_matches(0, "zzz") && emoji_matches(0, ""), "search");
+    check(emoji_matches(0, "GRIN") == 2 && emoji_matches(0, "nning") == 1 && !emoji_matches(0, "zzz") && emoji_matches(0, ""),
+          "search: prefix, substring, none");
 
     check(expands_to("hi :smile: :pog: :nope:", "hi \xF0\x9F\x98\x84 <:pog:70> :nope:"), "unicode and custom names");
     check(expands_to("`:smile:` ```\n:smile:\n``` :smile:", "`:smile:` ```\n:smile:\n``` \xF0\x9F\x98\x84"),

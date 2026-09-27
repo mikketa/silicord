@@ -34,17 +34,21 @@ const char *emoji_by_name(const char *name, size_t n)
 int emoji_matches(int i, const char *query)
 {
     const char *p = k_emoji[i].names;
+    int found = 0;
 
     if (!*query)
         return 1;
-    for (; *p; p++) {
+    for (const char *start = p; *p; p++) {
         size_t k = 0;
         while (query[k] && lower(p[k]) == lower(query[k]))
             k++;
-        if (!query[k])
-            return 1;
+        if (!query[k]) {
+            if (p == start || p[-1] == ' ')
+                return 2; /* a name starts with it */
+            found = 1;
+        }
     }
-    return 0;
+    return found;
 }
 
 void emoji_main_name(int i, char *out, size_t size)
