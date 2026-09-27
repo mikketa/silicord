@@ -73,6 +73,10 @@ void app_send_message(const char *channel_id, const char *text);
 void app_ack(const char *channel_id, const char *message_id);
 /* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
 void app_fetch_channel(const char *channel_id);
+/* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
+void app_request_members(const char *guild_id, const char *const *user_ids, int n);
+/* Adds or removes our reaction; the gateway echoes it back as MESSAGE_REACTION_ADD / _REMOVE. */
+void app_react(const char *channel_id, const char *message_id, const msg_reaction_t *r, int add);
 /* Loads a profile popout; `guild_id` (may be empty) adds the server profile and mutual servers. */
 void app_fetch_profile(const char *user_id, const char *guild_id);
 /*

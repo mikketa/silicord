@@ -162,6 +162,29 @@ static void cache_init(void)
 
 /* ---- Workers ---- */
 
+/* Downloads a CDN path ("/avatars/...") or a full https URL (media proxy). */
+static int fetch(const char *path, http_resp_t *resp)
+{
+    const char *p = path + 8, *slash;
+    wchar_t host[128];
+    int n;
+
+    if (CompareStringA(LOCALE_INVARIANT, 0, path, 8, "https://", 8) != CSTR_EQUAL)
+        return http_cdn_get(path, resp);
+    for (slash = p; *slash && *slash != '/'; slash++)
+        ;
+    n = (int)(slash - p);
+    if (!*slash || n <= 0 || n >= 127)
+        return 0;
+    /* Only Discord's own media hosts: *.discordapp.net (media and external image proxies) and the CDN. */
+    if (!(n > 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, slash - 15, 15, ".discordapp.net", 15) == CSTR_EQUAL) &&
+        !(n == 18 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "cdn.discordapp.com", 18) == CSTR_EQUAL))
+        return 0;
+    MultiByteToWideChar(CP_UTF8, 0, p, n, host, 127);
+    host[n] = 0;
+    return http_get(host, slash, resp);
+}
+
 static job_t *pop(LONG *generation)
 {
     job_t *j;
@@ -198,7 +221,7 @@ static DWORD WINAPI worker(LPVOID arg)
             img = r_image_decode(resp.body.data, resp.body.len, j->max_px);
         if (!img) {
             http_resp_free(&resp);
-            if (http_cdn_get(j->path.data, &resp) && resp.status == 200 &&
+            if (fetch(j->path.data, &resp) && resp.status == 200 &&
                 (img = r_image_decode(resp.body.data, resp.body.len, j->max_px)) != NULL)
                 cache_write(j->path.data, &resp.body);
         }

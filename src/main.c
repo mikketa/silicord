@@ -278,6 +278,7 @@ static int is_structure_event(json_t t)
     static const char *const names[] = {
         "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE",
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
+        "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
     };
 
     for (int i = 0; i < (int)ARRAYSIZE(names); i++)
@@ -292,15 +293,10 @@ static void forward_event(session_t *s, json_t t, json_t d)
     json_t user, v;
     sb_t *p;
 
+    (void)user;
+    (void)v;
     if (!current(s))
         return;
-    if (json_str_eq(t, "GUILD_MEMBER_UPDATE")) {
-        char id[24] = {0};
-        if (json_get(d, "user", &user) && json_get(user, "id", &v))
-            json_raw(v, id, sizeof id);
-        if (lstrcmpA(id, s->me) != 0)
-            return; /* only our own roles matter */
-    }
     p = mem_alloc(sizeof *p);
     sb_addn(p, t.p + 1, (size_t)(t.end - t.p - 2));
     sb_addn(p, "", 1);
@@ -330,6 +326,14 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
     }
     if (is_structure_event(t)) {
         forward_event(s, t, d);
+        return;
+    }
+    if (json_str_eq(t, "MESSAGE_REACTION_ADD") || json_str_eq(t, "MESSAGE_REACTION_REMOVE")) {
+        b = msg_batch_reaction(d, json_str_eq(t, "MESSAGE_REACTION_ADD") ? 1 : -1, s->me);
+        if (b->n && current(s) && is_open(b->channel_id))
+            ui_post_batch(b);
+        else
+            msg_batch_free(b);
         return;
     }
     if (json_str_eq(t, "MESSAGE_CREATE"))
@@ -805,6 +809,55 @@ void app_fetch_font(int id, const char *file)
     j->id = id;
     lstrcpynA(j->file, file, sizeof j->file);
     CloseHandle(CreateThread(NULL, 0, font_main, j, 0, NULL));
+}
+
+static DWORD WINAPI react_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+
+    /* j->text holds the whole path, j->before the method. */
+    http_request(j->before, j->text.data, j->token.data, NULL, 0, &resp);
+    if (resp.status != 204 && resp.status != 200)
+        ui_post(UI_SEND_FAILED, ui_text(resp.status == 403 ? "You cannot react here" : "Reaction not saved"));
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_react(const char *channel_id, const char *message_id, const msg_reaction_t *r, int add)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    sb_add(&j->text, "/channels/");
+    sb_add(&j->text, channel_id);
+    sb_add(&j->text, "/messages/");
+    sb_add(&j->text, message_id);
+    sb_add(&j->text, "/reactions/");
+    msg_reaction_path(r, &j->text);
+    sb_add(&j->text, "/@me?location=Message&type=0");
+    lstrcpyA(j->before, add ? "PUT" : "DELETE");
+    CloseHandle(CreateThread(NULL, 0, react_main, j, 0, NULL));
+}
+
+void app_request_members(const char *guild_id, const char *const *user_ids, int n)
+{
+    sb_t msg = {0};
+
+    if (n <= 0)
+        return;
+    /* Op 8, Request Guild Members: answered by GUILD_MEMBERS_CHUNK. */
+    sb_add(&msg, "{\"op\":8,\"d\":{\"guild_id\":\"");
+    sb_add(&msg, guild_id);
+    sb_add(&msg, "\",\"user_ids\":[");
+    for (int i = 0; i < n && i < 100; i++) {
+        sb_add(&msg, i ? ",\"" : "\"");
+        sb_add(&msg, user_ids[i]);
+        sb_add(&msg, "\"");
+    }
+    sb_add(&msg, "],\"presences\":false}}");
+    gw_send(&msg);
+    sb_free(&msg);
 }
 
 void app_fetch_channel(const char *channel_id)

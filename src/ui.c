@@ -136,6 +136,10 @@ typedef struct {
     r_rich_t *pop_rich;
     int pop_rich_w;
     char pending_dm[24];      /* user whose new DM we open once it exists */
+
+    /* Server members seen in messages: nickname and roles, for names in role colors. */
+    struct member *members;
+    int nmembers, cap_members;
     profile_t *profiles[8];
     DWORD profile_time[8];
     /* Display name fonts, downloaded on first use. */
@@ -143,6 +147,16 @@ typedef struct {
     sb_t font_data[9];
     unsigned char font_state[9];
 } ui_t;
+
+typedef struct member {
+    char guild[24];
+    char user[24];
+    int known;          /* 0 asked, 1 answered */
+    sb_t nick;
+    sb_t roles;         /* comma-separated ids */
+    unsigned color;     /* cached for `color_model` */
+    const model_t *color_model;
+} member_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1};
 
@@ -1117,10 +1131,462 @@ static void update_grouping(void)
     }
 }
 
+/* ---- Server members ---- */
+
+static member_t *member_find(const char *guild, const char *user)
+{
+    for (int i = 0; i < g_ui.nmembers; i++)
+        if (lstrcmpA(g_ui.members[i].user, user) == 0 && lstrcmpA(g_ui.members[i].guild, guild) == 0)
+            return &g_ui.members[i];
+    return NULL;
+}
+
+static member_t *member_add(const char *guild, const char *user)
+{
+    member_t *mb = member_find(guild, user);
+
+    if (mb)
+        return mb;
+    if (g_ui.nmembers == g_ui.cap_members) {
+        g_ui.cap_members = g_ui.cap_members ? g_ui.cap_members * 2 : 64;
+        g_ui.members = mem_realloc(g_ui.members, (size_t)g_ui.cap_members * sizeof *g_ui.members);
+    }
+    mb = &g_ui.members[g_ui.nmembers++];
+    *mb = (member_t){0};
+    lstrcpynA(mb->guild, guild, sizeof mb->guild);
+    lstrcpynA(mb->user, user, sizeof mb->user);
+    return mb;
+}
+
+static void members_clear(void)
+{
+    for (int i = 0; i < g_ui.nmembers; i++) {
+        sb_free(&g_ui.members[i].nick);
+        sb_free(&g_ui.members[i].roles);
+    }
+    g_ui.nmembers = 0;
+}
+
+/* Stores a member object ({user, nick, roles}) of guild `guild`. */
+static void member_store(const char *guild, json_t obj)
+{
+    json_t user, v, roles, role;
+    json_iter_t it;
+    char id[24] = "";
+    member_t *mb;
+
+    if (!json_get(obj, "user", &user) || !json_get(user, "id", &v))
+        return;
+    json_raw(v, id, sizeof id);
+    mb = member_add(guild, id);
+    mb->known = 1;
+    mb->color_model = NULL;
+    sb_clear(&mb->nick);
+    if (json_get(obj, "nick", &v) && json_type(v) == JSON_STRING)
+        json_str(v, &mb->nick);
+    sb_clear(&mb->roles);
+    if (json_get(obj, "roles", &roles)) {
+        json_iter(roles, &it);
+        while (json_next(&it, NULL, &role)) {
+            json_raw(role, id, sizeof id);
+            if (mb->roles.len)
+                sb_add(&mb->roles, ",");
+            sb_add(&mb->roles, id);
+        }
+    }
+}
+
+static const char *open_guild_id(void)
+{
+    return g_ui.model && g_ui.guild >= 0 ? g_ui.model->guilds[g_ui.guild].id : NULL;
+}
+
+/* Role color of a message author in the open server, 0 for the default. */
+static unsigned author_color(const msg_t *m)
+{
+    const char *guild = open_guild_id();
+    member_t *mb;
+
+    if (!guild || !m->author_id[0] || !(mb = member_find(guild, m->author_id)) || !mb->known)
+        return 0;
+    if (mb->color_model != g_ui.model) {
+        mb->color = model_role_color(g_ui.model, g_ui.guild, mb->roles.data ? mb->roles.data : "");
+        mb->color_model = g_ui.model;
+    }
+    return mb->color;
+}
+
+/* Name to show for an author: the server nickname once we know it. */
+static const char *author_name(const msg_t *m)
+{
+    const char *guild = open_guild_id();
+    member_t *mb;
+
+    if (guild && m->author_id[0] && (mb = member_find(guild, m->author_id)) && mb->known && mb->nick.len)
+        return mb->nick.data;
+    return m->author.data ? m->author.data : "";
+}
+
+/* Asks the gateway for the authors of the loaded messages we know nothing about. */
+static void request_authors(void)
+{
+    const char *guild = open_guild_id(), *ids[100];
+    static char buf[100][24]; /* copies: adding members may move the cache */
+    int n = 0;
+
+    if (!guild)
+        return;
+    for (int i = 0; i < g_ui.nmsgs && n < 100; i++) {
+        msg_t *m = &g_ui.msgs[i];
+        member_t *mb;
+        if (!m->author_id[0] || m->system || member_find(guild, m->author_id))
+            continue;
+        mb = member_add(guild, m->author_id);
+        if (m->has_member) { /* the gateway gave us the roles already */
+            mb->known = 1;
+            sb_add(&mb->roles, m->member_roles.data ? m->member_roles.data : "");
+            if (m->author.len)
+                sb_add(&mb->nick, m->author.data);
+            continue;
+        }
+        lstrcpynA(buf[n], m->author_id, sizeof buf[n]);
+        ids[n] = buf[n];
+        n++;
+    }
+    app_request_members(guild, ids, n);
+}
+
+/* ---- Attachments, embeds, stickers, reactions ---- */
+
+#define MEDIA_MAX_W 550
+#define MEDIA_MAX_H 350
+#define EMBED_MAX_W 516
+#define FILE_W 432
+#define REACTION_H 28
+
+enum { PART_NONE, PART_FILE, PART_MEDIA, PART_EMBED_TITLE, PART_REACTION, PART_SPOILER };
+
+typedef struct {
+    int kind, index;
+} part_t;
+
+/* Parsed markdown of embed descriptions and field values, kept with the message view. */
 typedef struct {
     md_doc_t doc;
     r_rich_t *rich;
     int width;
+} emb_text_t;
+
+static emb_text_t *emb_text(msg_t *m, int slot, const sb_t *src, int width);
+
+/* Custom emoji images for the rich text renderer. */
+static r_image_t *emoji_image(const char *id, int px)
+{
+    char key[48], path[96];
+    const char *num = id[0] == 'a' ? id + 1 : id;
+
+    wsprintfA(key, "e:%.30s", num);
+    wsprintfA(path, "/emojis/%.30s.png?size=64", num);
+    return image_get(key, path, px);
+}
+
+/* Whether a URL is on one of Discord's resizing image proxies (*.discordapp.net). */
+static int proxied(const char *url)
+{
+    const char *host = url + 8, *end = host;
+
+    if (lstrlenA(url) < 9 || CompareStringA(LOCALE_INVARIANT, 0, url, 8, "https://", 8) != CSTR_EQUAL)
+        return 0;
+    while (*end && *end != '/')
+        end++;
+    return end - host > 15 &&
+           CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, end - 15, 15, ".discordapp.net", 15) == CSTR_EQUAL;
+}
+
+/* Image of a message part; keyed by message, kind and index since URLs are long and signed. */
+static r_image_t *part_image(const msg_t *m, char kind, int index, const sb_t *url, int w, int h)
+{
+    char key[96];
+    sb_t full = {0};
+    r_image_t *img;
+
+    if (!url->len)
+        return NULL;
+    wsprintfA(key, "%c:%s:%d:%d", kind, m->id, index, w);
+    /* The media proxy resizes on its side: ask for the size we show. */
+    sb_addn(&full, url->data, url->len);
+    if (proxied(url->data)) {
+        char q[48];
+        int query = 0;
+        for (size_t k = 0; k < url->len; k++)
+            query |= url->data[k] == '?';
+        wsprintfA(q, "%cwidth=%d&height=%d", query ? '&' : '?', w, h);
+        sb_add(&full, q);
+    }
+    img = image_get(key, full.data, w > h ? w : h);
+    sb_free(&full);
+    return img;
+}
+
+/* Fits (w, h) into (max_w, max_h) without enlarging. */
+static void fit(int w, int h, int max_w, int max_h, int *ow, int *oh)
+{
+    if (w <= 0 || h <= 0) {
+        *ow = max_w;
+        *oh = max_h / 2;
+        return;
+    }
+    if (w > max_w) {
+        h = (int)((long long)h * max_w / w);
+        w = max_w;
+    }
+    if (h > max_h) {
+        w = (int)((long long)w * max_h / h);
+        h = max_h;
+    }
+    *ow = w > 1 ? w : 1;
+    *oh = h > 1 ? h : 1;
+}
+
+static void format_size(long long n, char *out)
+{
+    if (n >= 1024 * 1024)
+        wsprintfA(out, "%d.%d MB", (int)(n / (1024 * 1024)), (int)(n % (1024 * 1024) * 10 / (1024 * 1024)));
+    else if (n >= 1024)
+        wsprintfA(out, "%d.%d KB", (int)(n / 1024), (int)(n % 1024 * 10 / 1024));
+    else
+        wsprintfA(out, "%d bytes", (int)n);
+}
+
+static int hit(int hx, int hy, int x, int y, int w, int h)
+{
+    return hx >= x && hx < x + w && hy >= y && hy < y + h;
+}
+
+static void draw_media(r_image_t *img, int x, int y, int w, int h, int spoiler)
+{
+    if (img)
+        r_image(img, x, y, w, h, S(8));
+    else
+        r_round(x, y, w, h, S(8), 0xFF1E1E1E);
+    if (spoiler) {
+        r_round(x, y, w, h, S(8), 0xF2141414u);
+        r_round(x + (w - S(76)) / 2, y + (h - S(28)) / 2, S(76), S(28), S(14), 0xFF000000u);
+        text(g_ui.f_cat, C_INK, rect(x, y + (h - S(28)) / 2, w, S(28)), "SPOILER", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/*
+ * Walks what follows the text of message m, laid out at (x, y) in width w:
+ * files, embeds, the sticker and reactions. Paints when `draw`, and reports
+ * the part under (hx, hy) in `hit_part` when it is not NULL. Returns the height.
+ */
+static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, part_t *hit_part)
+{
+    int y0 = y, gap = S(4);
+
+    /* Attachments: images inline, other files as a card. */
+    for (int i = 0; i < m->nfiles; i++) {
+        msg_file_t *f = &m->files[i];
+        y += gap;
+        if (f->image) {
+            int iw, ih;
+            fit(f->width, f->height, w < S(MEDIA_MAX_W) ? w : S(MEDIA_MAX_W), S(MEDIA_MAX_H), &iw, &ih);
+            if (draw && r_visible(y, ih))
+                draw_media(part_image(m, 'f', i, &f->url, iw, ih), x, y, iw, ih, f->spoiler && !m->revealed);
+            if (hit_part && hit(hx, hy, x, y, iw, ih))
+                *hit_part = (part_t){f->spoiler && !m->revealed ? PART_SPOILER : PART_MEDIA, i};
+            y += ih;
+        } else {
+            int cw = w < S(FILE_W) ? w : S(FILE_W), ch = S(64);
+            if (draw && r_visible(y, ch)) {
+                char size[32];
+                r_round(x, y, cw, ch, S(8), 0xFF1B1B1B);
+                r_round_outline(x, y, cw, ch, S(8), 1, 0xFF2A2A2A);
+                text_w(g_ui.f_icon_big, C_MUTED, rect(x + S(12), y + S(12), S(40), S(40)), L"\xE8A5", -1,
+                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                text(g_ui.f_body, C_INK, rect(x + S(60), y + S(12), cw - S(72), S(20)), f->name.data,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                format_size(f->size, size);
+                text(g_ui.f_small, C_FAINT, rect(x + S(60), y + S(34), cw - S(72), S(18)), size, DT_LEFT | DT_SINGLELINE);
+            }
+            if (hit_part && hit(hx, hy, x, y, cw, ch))
+                *hit_part = (part_t){PART_FILE, i};
+            y += ch;
+        }
+    }
+
+    /* Embeds. */
+    for (int i = 0; i < m->nembeds; i++) {
+        msg_embed_t *e = &m->embeds[i];
+        y += gap;
+        if (e->media_only) {
+            int iw, ih;
+            fit(e->image_w, e->image_h, w < S(MEDIA_MAX_W) ? w : S(MEDIA_MAX_W), S(MEDIA_MAX_H), &iw, &ih);
+            if (draw && r_visible(y, ih))
+                draw_media(part_image(m, 'm', i, &e->image, iw, ih), x, y, iw, ih, 0);
+            if (hit_part && hit(hx, hy, x, y, iw, ih))
+                *hit_part = (part_t){PART_EMBED_TITLE, i};
+            y += ih;
+            continue;
+        }
+        {
+            int ew = w < S(EMBED_MAX_W) ? w : S(EMBED_MAX_W), top = y, pad = S(12), ix = x + S(4) + pad;
+            int thumb = e->thumbnail.len ? S(80) : 0, iw = ew - S(4) - 2 * pad, tw = iw - (thumb ? thumb + S(16) : 0);
+            int ey = y + pad, slot = i * 32;
+
+            /* When painting, a first pass measures so the card can be drawn under the content. */
+            for (int pass = draw ? 0 : 1; pass < 2; pass++) {
+                ey = y + pad;
+                if (e->provider.len) {
+                    if (pass && draw)
+                        text(g_ui.f_small, C_MUTED, rect(ix, ey, tw, S(16)), e->provider.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    ey += S(16) + S(6);
+                }
+                if (e->author.len) {
+                    if (pass && draw)
+                        text(g_ui.f_h, C_INK, rect(ix, ey, tw, S(20)), e->author.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    ey += S(20) + S(6);
+                }
+                if (e->title.len) {
+                    wchar_t *wt = utf8_to_wide(e->title.data, e->title.len);
+                    int th = r_text_height(g_ui.f_h, wt, -1, tw);
+                    if (pass && draw)
+                        r_text(g_ui.f_h, e->url.len ? 0xFF6CB6FFu : ARGB(C_INK), ix, ey, tw, th, wt, -1, R_WRAP);
+                    if (pass && hit_part && e->url.len && hit(hx, hy, ix, ey, tw, th))
+                        *hit_part = (part_t){PART_EMBED_TITLE, i};
+                    mem_free(wt);
+                    ey += th + S(6);
+                }
+                if (e->description.len) {
+                    emb_text_t *d = emb_text(m, slot, &e->description, tw);
+                    if (pass && draw)
+                        r_rich_draw(d->rich, ix, ey, 1);
+                    ey += r_rich_height(d->rich) + S(6);
+                }
+                /* Fields: up to three inline ones share a row. */
+                for (int f = 0; f < e->nfields;) {
+                    int n = 1, rowh = 0;
+                    if (e->fields[f].inline_)
+                        while (n < 3 && f + n < e->nfields && e->fields[f + n].inline_)
+                            n++;
+                    for (int k = 0; k < n; k++) {
+                        msg_field_t *fd = &e->fields[f + k];
+                        int cw = (iw - S(8) * (n - 1)) / n, cx = ix + k * (cw + S(8)), h = S(20);
+                        emb_text_t *v = emb_text(m, slot + 1 + f + k, &fd->value, cw);
+                        if (pass && draw) {
+                            text(g_ui.f_h, C_INK, rect(cx, ey, cw, S(20)), fd->name.data ? fd->name.data : "",
+                                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                            r_rich_draw(v->rich, cx, ey + S(20), 1);
+                        }
+                        h += r_rich_height(v->rich);
+                        if (h > rowh)
+                            rowh = h;
+                    }
+                    ey += rowh + S(8);
+                    f += n;
+                }
+                if (thumb && ey < y + pad + thumb + S(6))
+                    ey = y + pad + thumb + S(6);
+                if (e->image.len) {
+                    int mw, mh;
+                    fit(e->image_w, e->image_h, iw, S(300), &mw, &mh);
+                    if (pass && draw && r_visible(ey, mh))
+                        draw_media(part_image(m, 'i', i, &e->image, mw, mh), ix, ey, mw, mh, 0);
+                    if (pass && hit_part && hit(hx, hy, ix, ey, mw, mh))
+                        *hit_part = (part_t){PART_EMBED_TITLE, i};
+                    ey += mh + S(8);
+                }
+                if (e->footer.len) {
+                    if (pass && draw)
+                        text(g_ui.f_small, C_MUTED, rect(ix, ey, iw, S(16)), e->footer.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    ey += S(16) + S(6);
+                }
+                ey += pad - S(6);
+                if (!pass && draw) {
+                    r_round(x, top, ew, ey - top, S(4), 0xFF1B1B1B);
+                    r_round(x, top, S(4), ey - top, S(2), e->has_color ? 0xFF000000u | e->color : 0xFF3A3A3Au);
+                    if (thumb) {
+                        int mw, mh;
+                        fit(e->thumb_w, e->thumb_h, thumb, thumb, &mw, &mh);
+                        draw_media(part_image(m, 't', i, &e->thumbnail, mw, mh), x + ew - pad - mw, y + pad, mw, mh, 0);
+                    }
+                }
+            }
+            y = ey;
+        }
+    }
+
+    /* Sticker. */
+    if (m->sticker_id[0]) {
+        y += gap;
+        if (m->sticker_format == 3) { /* Lottie animation: only the name */
+            if (draw)
+                text(g_ui.f_small, C_MUTED, rect(x, y, w, S(18)), m->sticker_name.data ? m->sticker_name.data : "Sticker",
+                     DT_LEFT | DT_SINGLELINE);
+            y += S(18);
+        } else {
+            if (draw && r_visible(y, S(160))) {
+                char key[48], path[128];
+                r_image_t *img;
+                wsprintfA(key, "st:%s", m->sticker_id);
+                if (m->sticker_format == 4)
+                    wsprintfA(path, "https://media.discordapp.net/stickers/%s.gif?size=160", m->sticker_id);
+                else
+                    wsprintfA(path, "/stickers/%s.png?size=160", m->sticker_id);
+                img = image_get(key, path, S(160));
+                if (img)
+                    r_image(img, x, y, S(160), S(160), 0);
+            }
+            y += S(160);
+        }
+    }
+
+    /* Reactions: pills of emoji and count, ours highlighted. */
+    if (m->nreactions) {
+        int rx = x;
+        y += S(6);
+        for (int i = 0; i < m->nreactions; i++) {
+            msg_reaction_t *r = &m->reactions[i];
+            char count[16];
+            int cw, pw;
+            wsprintfA(count, "%d", r->count);
+            cw = text_width(g_ui.f_small, count);
+            pw = S(8) + S(18) + S(6) + cw + S(8);
+            if (rx + pw > x + w && rx > x) {
+                rx = x;
+                y += S(REACTION_H) + S(4);
+            }
+            if (draw && r_visible(y, S(REACTION_H))) {
+                r_round(rx, y, pw, S(REACTION_H), S(8), r->me ? 0x33FFB000u : 0xFF1E1E1E);
+                if (r->me)
+                    r_round_outline(rx, y, pw, S(REACTION_H), S(8), 1, ARGB(C_AMBER));
+                if (r->emoji_id[0]) {
+                    r_image_t *img = emoji_image(r->emoji_id, S(18));
+                    if (img)
+                        r_image(img, rx + S(8), y + (S(REACTION_H) - S(18)) / 2, S(18), S(18), 0);
+                } else {
+                    text(g_ui.f_body, C_INK, rect(rx + S(6), y, S(24), S(REACTION_H)), r->emoji.data ? r->emoji.data : "",
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+                text(g_ui.f_small, r->me ? C_AMBER : C_MUTED, rect(rx + S(32), y, cw + S(4), S(REACTION_H)), count,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            if (hit_part && hit(hx, hy, rx, y, pw, S(REACTION_H)))
+                *hit_part = (part_t){PART_REACTION, i};
+            rx += pw + S(4);
+        }
+        y += S(REACTION_H);
+    }
+    return y - y0;
+}
+
+typedef struct {
+    md_doc_t doc;
+    r_rich_t *rich;
+    int width;
+    emb_text_t *emb;   /* embed descriptions and field values, 32 slots per embed */
+    int nemb;
 } msg_view_t;
 
 static void drop_view(msg_t *m)
@@ -1131,6 +1597,11 @@ static void drop_view(msg_t *m)
         return;
     r_rich_free(v->rich);
     md_free(&v->doc);
+    for (int i = 0; i < v->nemb; i++) {
+        r_rich_free(v->emb[i].rich);
+        md_free(&v->emb[i].doc);
+    }
+    mem_free(v->emb);
     mem_free(v);
     m->ui = NULL;
     m->height_w = 0;
@@ -1154,8 +1625,13 @@ static r_rich_t *msg_rich(msg_t *m, int width)
     msg_view_t *v = m->ui;
 
     if (!v) {
+        sb_t src = {0};
         v = mem_alloc(sizeof *v);
-        md_parse(m->text.data ? m->text.data : "", m->text.len, &v->doc);
+        sb_addn(&src, m->text.data ? m->text.data : "", m->text.len);
+        if (m->edited)
+            sb_add(&src, m->text.len ? " " MD_EDITED_MARK : MD_EDITED_MARK);
+        md_parse(src.data ? src.data : "", src.len, &v->doc);
+        sb_free(&src);
         m->ui = v;
     }
     if (!v->rich || v->width != width) {
@@ -1166,12 +1642,35 @@ static r_rich_t *msg_rich(msg_t *m, int width)
     return v->rich;
 }
 
+static emb_text_t *emb_text(msg_t *m, int slot, const sb_t *src, int width)
+{
+    msg_view_t *v;
+    emb_text_t *t;
+
+    msg_rich(m, text_w_px()); /* makes sure the view exists */
+    v = m->ui;
+    if (!v->emb) {
+        v->nemb = m->nembeds * 32;
+        v->emb = mem_alloc(((size_t)v->nemb + 1) * sizeof *v->emb);
+    }
+    t = &v->emb[slot < v->nemb ? slot : v->nemb - 1];
+    if (!t->doc.text && src->len)
+        md_parse(src->data, src->len, &t->doc);
+    if (!t->rich || t->width != width) {
+        r_rich_free(t->rich);
+        t->rich = r_rich_build(&t->doc, &g_ui.rich, width);
+        t->width = width;
+    }
+    return t;
+}
+
 static int msg_height(msg_t *m)
 {
     int w = text_w_px();
 
     if (m->height_w != w) {
-        int h = m->text.len ? r_rich_height(msg_rich(m, w)) : 0;
+        int h = m->text.len || m->edited ? r_rich_height(msg_rich(m, w)) : 0;
+        h += msg_extras(m, 0, 0, w, 0, 0, 0, NULL);
         if (m->system)
             h = S(16) + S(22);
         else if (m->grouped == 1)
@@ -1288,6 +1787,42 @@ static void reserve_msgs(int extra)
     g_ui.msgs = mem_realloc(g_ui.msgs, (size_t)g_ui.cap_msgs * sizeof *g_ui.msgs);
 }
 
+static int same_reaction(const msg_reaction_t *a, const msg_reaction_t *b)
+{
+    if (a->emoji_id[0] || b->emoji_id[0])
+        return lstrcmpA(a->emoji_id, b->emoji_id) == 0;
+    return a->emoji.len == b->emoji.len && a->emoji.data && b->emoji.data && lstrcmpA(a->emoji.data, b->emoji.data) == 0;
+}
+
+/* Counts a reaction added (+1) or removed (-1). Our own ones were counted when clicked. */
+static void apply_reaction(msg_t *m, const msg_reaction_t *r, int delta, int mine)
+{
+    int k;
+
+    for (k = 0; k < m->nreactions && !same_reaction(&m->reactions[k], r); k++)
+        ;
+    if (mine && (k < m->nreactions ? m->reactions[k].me : 0) == (delta > 0))
+        return; /* already applied */
+    if (k == m->nreactions) {
+        if (delta < 0)
+            return;
+        m->reactions = mem_realloc(m->reactions, ((size_t)m->nreactions + 1) * sizeof *m->reactions);
+        m->reactions[k] = (msg_reaction_t){0};
+        lstrcpynA(m->reactions[k].emoji_id, r->emoji_id, sizeof r->emoji_id);
+        sb_addn(&m->reactions[k].emoji, r->emoji.data ? r->emoji.data : "", r->emoji.len);
+        m->nreactions++;
+    }
+    m->reactions[k].count += delta;
+    if (mine)
+        m->reactions[k].me = delta > 0;
+    if (m->reactions[k].count <= 0) {
+        sb_free(&m->reactions[k].emoji);
+        memmove(m->reactions + k, m->reactions + k + 1, (size_t)(m->nreactions - k - 1) * sizeof *m->reactions);
+        m->nreactions--;
+    }
+    m->height_w = 0;
+}
+
 static void on_batch(msg_batch_t *b)
 {
     if (lstrcmpA(b->channel_id, g_ui.msgs_channel) != 0) {
@@ -1331,13 +1866,57 @@ static void on_batch(msg_batch_t *b)
         break;
     case BATCH_UPDATE: {
         int i = find_msg(b->msgs[0].id);
+        msg_t *n = &b->msgs[0];
+        if (i < 0)
+            break;
+        drop_view(&g_ui.msgs[i]);
         /* Partial updates (embeds resolving) carry no author: keep the text we have. */
-        if (i >= 0 && b->msgs[0].author_id[0]) {
-            drop_view(&g_ui.msgs[i]);
+        if (n->author_id[0]) {
             sb_free(&g_ui.msgs[i].text);
-            g_ui.msgs[i].text = b->msgs[0].text;
-            b->msgs[0].text = (sb_t){0};
+            g_ui.msgs[i].text = n->text;
+            n->text = (sb_t){0};
+            g_ui.msgs[i].edited = n->edited;
+            msg_free_extras(&g_ui.msgs[i]);
+        } else if (n->nembeds) {
+            for (int k = 0; k < g_ui.msgs[i].nembeds; k++)
+                msg_embed_free(&g_ui.msgs[i].embeds[k]);
+            mem_free(g_ui.msgs[i].embeds);
+            g_ui.msgs[i].embeds = NULL;
+            g_ui.msgs[i].nembeds = 0;
         }
+        if (n->author_id[0] || n->nembeds) {
+            /* Take whatever parts the update carries. */
+            if (n->nfiles) {
+                g_ui.msgs[i].files = n->files;
+                g_ui.msgs[i].nfiles = n->nfiles;
+                n->files = NULL;
+                n->nfiles = 0;
+            }
+            if (n->nembeds) {
+                g_ui.msgs[i].embeds = n->embeds;
+                g_ui.msgs[i].nembeds = n->nembeds;
+                n->embeds = NULL;
+                n->nembeds = 0;
+            }
+            if (n->nreactions) {
+                g_ui.msgs[i].reactions = n->reactions;
+                g_ui.msgs[i].nreactions = n->nreactions;
+                n->reactions = NULL;
+                n->nreactions = 0;
+            }
+            if (n->sticker_id[0]) {
+                lstrcpynA(g_ui.msgs[i].sticker_id, n->sticker_id, sizeof n->sticker_id);
+                g_ui.msgs[i].sticker_format = n->sticker_format;
+                g_ui.msgs[i].sticker_name = n->sticker_name;
+                n->sticker_name = (sb_t){0};
+            }
+        }
+        break;
+    }
+    case BATCH_REACTION: {
+        int i = find_msg(b->msgs[0].id);
+        if (i >= 0)
+            apply_reaction(&g_ui.msgs[i], &b->msgs[0].reactions[0], b->delta, b->mine);
         break;
     }
     case BATCH_DELETE: {
@@ -1351,6 +1930,7 @@ static void on_batch(msg_batch_t *b)
     }
     }
     msg_batch_free(b);
+    request_authors();
     update_grouping();
     clamp_msg_scroll();
     maybe_load_older();
@@ -1444,9 +2024,15 @@ static void paint_message(int i, int x0, int y, int w)
         else
             r_circle(x0 + S(16), ny, S(40), ARGB(C_ITEM));
         nr = rect(tx, ny, tw, S(22));
-        text(g_ui.f_h, C_INK, nr, m->author.data ? m->author.data : "", DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        {
+            unsigned color = author_color(m);
+            wchar_t *wn = utf8_to_wide(author_name(m), lstrlenA(author_name(m)));
+            r_text(g_ui.f_h, color ? 0xFF000000u | color : ARGB(C_INK), nr.left, nr.top, nr.right - nr.left,
+                   nr.bottom - nr.top, wn, -1, R_LEFT | R_SINGLE | R_ELLIPSIS);
+            mem_free(wn);
+        }
         format_time(m->id, when, ARRAYSIZE(when));
-        nr.left += text_width(g_ui.f_h, m->author.data ? m->author.data : "") + S(10);
+        nr.left += text_width(g_ui.f_h, author_name(m)) + S(10);
         text_w(g_ui.f_small, C_FAINT, rect(nr.left, ny + S(3), tw, S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
         y = ny + S(22);
     } else {
@@ -1458,8 +2044,12 @@ static void paint_message(int i, int x0, int y, int w)
         }
         y += S(2);
     }
-    if (m->text.len)
-        r_rich_draw(msg_rich(m, tw), tx, y, m->revealed);
+    if (m->text.len || m->edited) {
+        r_rich_t *r = msg_rich(m, tw);
+        r_rich_draw(r, tx, y, m->revealed);
+        y += r_rich_height(r);
+    }
+    msg_extras(m, tx, y, tw, 1, 0, 0, NULL);
 }
 
 static void paint_messages(RECT rc, const char *name)
@@ -1673,6 +2263,7 @@ static void make_fonts(void)
         .ink = ARGB(C_INK), .muted = ARGB(C_MUTED), .link = 0xFF6CB6FFu, .mention = 0xFFFFC857u,
         .mention_bg = 0x33FFB000u, .code_bg = 0xFF0F0F0Fu, .quote_bar = 0xFF3A3A3Au, .spoiler = 0xFF2E2E2Eu,
         .quote_indent = S(16), .code_pad = S(8), .block_gap = S(4), .radius = S(6),
+        .emoji_px = S(22), .jumbo_px = S(48), .emoji = emoji_image,
     };
 
     /* The composer is a real EDIT control: it keeps a GDI font. */
@@ -1767,9 +2358,22 @@ static void notify(int i, const activity_t *a)
     if (a->preview.len) {
         wchar_t *src = g_ui.tray.szInfo, *dst = g_ui.tray.szInfo;
         utf8_to_buf(a->preview.data, a->preview.len, g_ui.tray.szInfo, ARRAYSIZE(g_ui.tray.szInfo));
-        for (; *src; src++)
+        for (; *src; src++) {
+            if (*src == 0xE002) { /* custom emoji: keep ":name:" */
+                while (src[1] && src[1] != ':' && src[1] != 0xE003)
+                    src++;
+                *dst++ = ':';
+                if (src[1] == ':')
+                    src++;
+                continue;
+            }
+            if (*src == 0xE003) {
+                *dst++ = ':';
+                continue;
+            }
             if (*src != 0xE000 && *src != 0xE001)
                 *dst++ = *src;
+        }
         *dst = 0;
     }
     else
@@ -2067,6 +2671,23 @@ static void on_event(sb_t *p)
 
     if (!g_ui.model || n >= p->len || !json_parse(p->data + n, p->len - n, &d))
         return;
+    if (lstrcmpA(name, "GUILD_MEMBERS_CHUNK") == 0 || lstrcmpA(name, "GUILD_MEMBER_UPDATE") == 0) {
+        json_t v, list, item;
+        json_iter_t it;
+        char guild[24] = "";
+        if (json_get(d, "guild_id", &v))
+            json_raw(v, guild, sizeof guild);
+        if (json_get(d, "members", &list)) {
+            json_iter(list, &it);
+            while (json_next(&it, NULL, &item))
+                member_store(guild, item);
+        } else if (json_get(d, "user", &item) && json_get(item, "id", &v)) {
+            char id[24];
+            json_raw(v, id, sizeof id);
+            if (member_find(guild, id))
+                member_store(guild, d);
+        }
+    }
     m = model_apply(g_ui.model, name, d);
     if (m)
         replace_model(m);
@@ -2096,6 +2717,7 @@ static void clear_session(void)
     }
     pop_close();
     profiles_clear();
+    members_clear();
     images_clear();
     g_ui.guild = -1;
     open_channel(-1);
@@ -2264,7 +2886,7 @@ static int rich_hit(int x, int y, int *msg, int *link)
     if (i < 0)
         return 0;
     m = &g_ui.msgs[i];
-    if (m->system || !m->text.len || !m->ui)
+    if (m->system || !(m->text.len || m->edited) || !m->ui)
         return 0;
     if (m->grouped == 2)
         top += S(44);
@@ -2295,10 +2917,72 @@ static void open_url(const char *url)
     mem_free(w);
 }
 
+/* Image, file, embed or reaction under (x, y). */
+static int part_hit(int x, int y, int *msg, part_t *part)
+{
+    int top, i = message_at(x, y, &top), w = text_w_px();
+    msg_t *m;
+
+    if (i < 0)
+        return 0;
+    m = &g_ui.msgs[i];
+    if (m->system)
+        return 0;
+    if (m->grouped == 2)
+        top += S(44);
+    top += m->grouped == 1 ? S(2) : S(16) + (m->reply.len ? S(22) : 0) + S(22);
+    if (m->text.len || m->edited)
+        top += r_rich_height(msg_rich(m, w));
+    *part = (part_t){PART_NONE, -1};
+    msg_extras(m, text_x(), top, w, 0, x, y, part);
+    *msg = i;
+    return part->kind != PART_NONE;
+}
+
+static int click_part(int x, int y)
+{
+    int i;
+    part_t p;
+    msg_t *m;
+
+    if (!part_hit(x, y, &i, &p))
+        return 0;
+    m = &g_ui.msgs[i];
+    switch (p.kind) {
+    case PART_SPOILER:
+        m->revealed = 1;
+        break;
+    case PART_FILE:
+    case PART_MEDIA:
+        open_url(m->files[p.index].url.data);
+        break;
+    case PART_EMBED_TITLE: {
+        msg_embed_t *e = &m->embeds[p.index];
+        open_url(e->url.len ? e->url.data : e->image.data ? e->image.data : "");
+        break;
+    }
+    case PART_REACTION: {
+        msg_reaction_t r = m->reactions[p.index];
+        int add = !r.me;
+        sb_t copy = {0};
+        sb_addn(&copy, r.emoji.data ? r.emoji.data : "", r.emoji.len);
+        r.emoji = copy;
+        app_react(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, &r, add);
+        apply_reaction(m, &r, add ? 1 : -1, 1);
+        sb_free(&copy);
+        break;
+    }
+    }
+    redraw();
+    return 1;
+}
+
 static int click_message(int x, int y)
 {
     int i, link;
 
+    if (click_part(x, y))
+        return 1;
     if (!rich_hit(x, y, &i, &link))
         return 0;
     if (link < 0) {
@@ -3164,8 +3848,9 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 static void update_hover(int x, int y)
 {
     int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL), i, ax, ay;
+    part_t part;
 
-    link = link || author_hit(x, y, &i, &ax, &ay);
+    link = link || author_hit(x, y, &i, &ax, &ay) || part_hit(x, y, &i, &part);
 
     hit_test(x, y, &kind, &index);
     if (m != g_ui.hover_msg || link != g_ui.hover_link) {
