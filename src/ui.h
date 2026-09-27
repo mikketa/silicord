@@ -29,6 +29,7 @@ enum {
     UI_PROFILE,         /* profile_t* (username empty when it could not be loaded) */
     UI_DM_OPENED,       /* text = channel id of a direct message we asked to open */
     UI_FONT,            /* wParam = display name font id, payload = the font file (NULL on failure) */
+    UI_TYPING,          /* text = channel id, NUL, user id, NUL, display name (empty in DMs) */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -69,10 +70,18 @@ void app_open_channel(const char *channel_id);
 /* Loads the latest 50 messages, or the 50 before `before` if it is not NULL. */
 void app_fetch_messages(const char *channel_id, const char *before);
 void app_send_message(const char *channel_id, const char *text);
+/* Sends `text` as a reply to reply_id; `mention` pings its author. */
+void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention);
+void app_edit_message(const char *channel_id, const char *message_id, const char *text);
+void app_delete_message(const char *channel_id, const char *message_id);
+/* Shows "typing..." to the others for about ten seconds. */
+void app_typing(const char *channel_id);
 /* Tells Discord (and your other devices) the channel was read up to message_id. */
 void app_ack(const char *channel_id, const char *message_id);
 /* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
 void app_fetch_channel(const char *channel_id);
+/* Subscribes to a server channel's live typing and member list (op 14), as Discord does when opening it. */
+void app_subscribe(const char *guild_id, const char *channel_id);
 /* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
 void app_request_members(const char *guild_id, const char *const *user_ids, int n);
 /* Adds or removes our reaction; the gateway echoes it back as MESSAGE_REACTION_ADD / _REMOVE. */

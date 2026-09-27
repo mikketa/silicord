@@ -328,6 +328,31 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
         forward_event(s, t, d);
         return;
     }
+    if (json_str_eq(t, "TYPING_START")) {
+        json_t v, member, user;
+        char channel[24] = "", user_id[24] = "";
+        sb_t *p;
+        if (json_get(d, "channel_id", &v))
+            json_raw(v, channel, sizeof channel);
+        if (json_get(d, "user_id", &v))
+            json_raw(v, user_id, sizeof user_id);
+        if (!current(s) || !is_open(channel) || lstrcmpA(user_id, s->me) == 0)
+            return;
+        p = mem_alloc(sizeof *p);
+        sb_add(p, channel);
+        sb_addn(p, "", 1);
+        sb_add(p, user_id);
+        sb_addn(p, "", 1);
+        if (json_get(d, "member", &member)) {
+            if (!(json_get(member, "nick", &v) && json_type(v) == JSON_STRING && json_str(v, p)) &&
+                json_get(member, "user", &user) &&
+                !((json_get(user, "global_name", &v) && json_type(v) == JSON_STRING && json_str(v, p))))
+                if (json_get(user, "username", &v))
+                    json_str(v, p);
+        }
+        ui_post(UI_TYPING, p);
+        return;
+    }
     if (json_str_eq(t, "MESSAGE_REACTION_ADD") || json_str_eq(t, "MESSAGE_REACTION_REMOVE")) {
         b = msg_batch_reaction(d, json_str_eq(t, "MESSAGE_REACTION_ADD") ? 1 : -1, s->me);
         if (b->n && current(s) && is_open(b->channel_id))
@@ -499,7 +524,8 @@ typedef struct {
     sb_t token;
     sb_t text;
     char channel[24];
-    char before[24];
+    char before[24];   /* also: the message replied to, edited or deleted */
+    int flag;          /* reply: mention the author */
 } rest_job_t;
 
 static rest_job_t *new_job(const char *channel_id)
@@ -569,7 +595,14 @@ static DWORD WINAPI send_main(LPVOID arg)
     sb_json_str(&body, j->text.data, j->text.len);
     sb_add(&body, ",\"nonce\":\"");
     sb_u64(&body, nonce);
-    sb_add(&body, "\",\"tts\":false}");
+    sb_add(&body, "\",\"tts\":false");
+    if (j->before[0]) {
+        sb_add(&body, ",\"message_reference\":{\"message_id\":\"");
+        sb_add(&body, j->before);
+        sb_add(&body, "\"},\"allowed_mentions\":{\"parse\":[\"users\",\"roles\",\"everyone\"],\"replied_user\":");
+        sb_add(&body, j->flag ? "true}" : "false}");
+    }
+    sb_add(&body, "}");
 
     if (!http_request("POST", path, j->token.data, body.data, body.len, &resp)) {
         ui_post(UI_SEND_FAILED, ui_text("Could not reach discord.com"));
@@ -840,6 +873,19 @@ void app_react(const char *channel_id, const char *message_id, const msg_reactio
     CloseHandle(CreateThread(NULL, 0, react_main, j, 0, NULL));
 }
 
+void app_subscribe(const char *guild_id, const char *channel_id)
+{
+    sb_t msg = {0};
+
+    sb_add(&msg, "{\"op\":14,\"d\":{\"guild_id\":\"");
+    sb_add(&msg, guild_id);
+    sb_add(&msg, "\",\"typing\":true,\"threads\":true,\"activities\":true,\"members\":[],\"channels\":{\"");
+    sb_add(&msg, channel_id);
+    sb_add(&msg, "\":[[0,99]]}}}");
+    gw_send(&msg);
+    sb_free(&msg);
+}
+
 void app_request_members(const char *guild_id, const char *const *user_ids, int n)
 {
     sb_t msg = {0};
@@ -900,6 +946,78 @@ void app_send_message(const char *channel_id, const char *text)
 void app_log(const char *text)
 {
     log_line("", text);
+}
+
+void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    sb_add(&j->text, text);
+    lstrcpynA(j->before, reply_id, sizeof j->before);
+    j->flag = mention;
+    CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
+}
+
+static DWORD WINAPI edit_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t body = {0};
+    char path[96];
+
+    wsprintfA(path, "/channels/%s/messages/%s", j->channel, j->before);
+    if (j->flag) {
+        http_request("DELETE", path, j->token.data, NULL, 0, &resp);
+        if (resp.status != 204)
+            ui_post(UI_SEND_FAILED, ui_text(resp.status == 403 ? "You cannot delete this message" : "Message not deleted"));
+    } else {
+        sb_add(&body, "{\"content\":");
+        sb_json_str(&body, j->text.data, j->text.len);
+        sb_add(&body, "}");
+        http_request("PATCH", path, j->token.data, body.data, body.len, &resp);
+        if (resp.status != 200)
+            ui_post(UI_SEND_FAILED, ui_text("Edit not saved"));
+    }
+    sb_free(&body);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_edit_message(const char *channel_id, const char *message_id, const char *text)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    sb_add(&j->text, text);
+    lstrcpynA(j->before, message_id, sizeof j->before);
+    CloseHandle(CreateThread(NULL, 0, edit_main, j, 0, NULL));
+}
+
+void app_delete_message(const char *channel_id, const char *message_id)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->before, message_id, sizeof j->before);
+    j->flag = 1;
+    CloseHandle(CreateThread(NULL, 0, edit_main, j, 0, NULL));
+}
+
+static DWORD WINAPI typing_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[96];
+
+    wsprintfA(path, "/channels/%s/typing", j->channel);
+    http_request("POST", path, j->token.data, "", 0, &resp);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_typing(const char *channel_id)
+{
+    CloseHandle(CreateThread(NULL, 0, typing_main, new_job(channel_id), 0, NULL));
 }
 
 void app_quit(void)
