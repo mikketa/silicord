@@ -101,6 +101,26 @@ typedef struct {
     r_image_t *thumb;
 } upload_t;
 
+#define AC_MAX 10
+#define AC_ROW 40
+
+enum { AC_NONE, AC_USER, AC_CHANNEL, AC_EMOJI };
+
+typedef struct {
+    char label[80];      /* shown */
+    char insert[96];     /* put in the composer */
+    char id[24];         /* user or channel id, for the mention on send */
+    int emoji;           /* unicode emoji index, -1 otherwise */
+    char custom[24];     /* custom emoji id */
+    char avatar[48];
+} ac_item_t;
+
+/* A mention picked from the suggestions: its text in the composer and what is sent. */
+typedef struct {
+    char text[96];
+    char markup[32];
+} mention_t;
+
 enum { BAR_NONE, BAR_REPLY, BAR_EDIT };
 #define BAR_H 36
 
@@ -182,6 +202,13 @@ typedef struct {
     struct presence *presences;
     int npresences, cap_presences;
     int my_status;             /* ML_*, what we set */
+
+    /* Composer suggestions. */
+    ac_item_t ac[AC_MAX];
+    int ac_n, ac_sel, ac_kind, ac_start, ac_end, ac_ate;
+    char ac_query[64];
+    mention_t mention[32];
+    int nmention;
 
     /* Files to send with the next message. */
     upload_t uploads[10];
@@ -1107,6 +1134,8 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static void paint_autocomplete(void);
+static void ac_update(void);
 static int tray_h(void);
 static void paint_tray(int x0, int w, int bottom);
 static void uploads_clear(void);
@@ -2303,6 +2332,7 @@ static void paint_main(RECT rc)
         }
         paint_messages(rc, name);
         paint_toolbar();
+        paint_autocomplete();
         if (g_ui.guild >= 0)
             text_w(g_ui.f_icon, g_ui.show_members ? C_INK : C_MUTED, rect(x0 + w - S(48), 0, S(32), S(HEADER_H)), L"\xE716",
                    -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2683,6 +2713,8 @@ static void open_channel(int index)
     g_ui.channel = index;
     picker_close();
     uploads_clear();
+    g_ui.ac_kind = AC_NONE;
+    g_ui.nmention = 0;
     typing_clear();
     g_ui.bar = BAR_NONE;
     g_ui.confirm = 0;
@@ -4462,8 +4494,15 @@ static void composer_changed(void)
 {
     DWORD now = GetTickCount();
 
-    if (g_ui.bar == BAR_EDIT || !open_is_text() || GetWindowTextLengthW(g_ui.composer) <= 0)
+    if (!open_is_text())
         return;
+    if (g_ui.bar == BAR_EDIT || GetWindowTextLengthW(g_ui.composer) <= 0) {
+        ac_update();
+        redraw();
+        return;
+    }
+    ac_update();
+    redraw();
     if (now - g_ui.typing_sent > 8000) {
         g_ui.typing_sent = now;
         app_typing(g_ui.msgs_channel);
@@ -5231,6 +5270,276 @@ static void on_drop(HDROP drop)
     redraw();
 }
 
+/* ---- Autocomplete: @members, #channels, :emoji: ---- */
+
+
+static int ci_contains(const char *hay, const char *needle)
+{
+    if (!*needle)
+        return 1;
+    for (; *hay; hay++) {
+        int k = 0;
+        while (needle[k] && hay[k] && (hay[k] | 32) == (needle[k] | 32))
+            k++;
+        if (!needle[k])
+            return 1;
+    }
+    return 0;
+}
+
+static int ac_has(const char *id)
+{
+    for (int i = 0; i < g_ui.ac_n; i++)
+        if (lstrcmpA(g_ui.ac[i].id, id) == 0)
+            return 1;
+    return 0;
+}
+
+static void ac_add_user(const char *id, const char *name, const char *avatar)
+{
+    ac_item_t *it;
+
+    if (g_ui.ac_n == AC_MAX || !id[0] || !name || !name[0] || ac_has(id) || !ci_contains(name, g_ui.ac_query))
+        return;
+    it = &g_ui.ac[g_ui.ac_n++];
+    *it = (ac_item_t){0};
+    it->emoji = -1;
+    lstrcpynA(it->id, id, sizeof it->id);
+    lstrcpynA(it->label, name, sizeof it->label);
+    wsprintfA(it->insert, "@%.80s ", name);
+    lstrcpynA(it->avatar, avatar ? avatar : "", sizeof it->avatar);
+}
+
+/* Finds the word being typed before the caret; returns its kind and fills g_ui.ac. */
+static void ac_update(void)
+{
+    int len = GetWindowTextLengthW(g_ui.composer);
+    DWORD start = 0, end = 0;
+    wchar_t *w;
+    int k;
+
+    g_ui.ac_kind = AC_NONE;
+    g_ui.ac_n = 0;
+    if (len <= 0 || len > 4000)
+        return;
+    w = mem_alloc(((size_t)len + 1) * sizeof(wchar_t));
+    GetWindowTextW(g_ui.composer, w, len + 1);
+    SendMessageW(g_ui.composer, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
+    if ((int)end > len)
+        end = (DWORD)len;
+    for (k = (int)end - 1; k >= 0 && w[k] != ' ' && w[k] != '\n' && w[k] != '@' && w[k] != '#' && w[k] != ':'; k--)
+        ;
+    if (k >= 0 && (w[k] == '@' || w[k] == '#' || w[k] == ':') && (k == 0 || w[k - 1] == ' ' || w[k - 1] == '\n')) {
+        int qn = (int)end - k - 1;
+        WideCharToMultiByte(CP_UTF8, 0, w + k + 1, qn, g_ui.ac_query, sizeof g_ui.ac_query - 1, NULL, NULL);
+        g_ui.ac_query[qn < (int)sizeof g_ui.ac_query - 1 ? qn : (int)sizeof g_ui.ac_query - 1] = 0;
+        g_ui.ac_start = k;
+        g_ui.ac_end = (int)end;
+        g_ui.ac_kind = w[k] == '@' ? AC_USER : w[k] == '#' ? AC_CHANNEL : AC_EMOJI;
+        if (g_ui.ac_kind == AC_EMOJI && qn < 2)
+            g_ui.ac_kind = AC_NONE; /* ":" alone is punctuation, Discord waits for two letters */
+    }
+    mem_free(w);
+
+    if (g_ui.ac_kind == AC_USER) {
+        /* Recent authors first, then the member list. */
+        for (int i = g_ui.nmsgs; i-- > 0 && g_ui.ac_n < AC_MAX;)
+            if (!g_ui.msgs[i].system)
+                ac_add_user(g_ui.msgs[i].author_id, author_name(&g_ui.msgs[i]), g_ui.msgs[i].avatar);
+        for (int i = 0; i < g_ui.ml.n && g_ui.ac_n < AC_MAX; i++)
+            if (g_ui.ml.items[i].valid && !g_ui.ml.items[i].group)
+                ac_add_user(g_ui.ml.items[i].id, g_ui.ml.items[i].name.data, g_ui.ml.items[i].avatar);
+        if (g_ui.channel >= 0 && chan(g_ui.channel)->type == CH_DM)
+            ac_add_user(chan(g_ui.channel)->user_id, model_str(g_ui.model, chan(g_ui.channel)->name),
+                        chan(g_ui.channel)->avatar);
+    } else if (g_ui.ac_kind == AC_CHANNEL && g_ui.guild >= 0) {
+        const guild_t *gd = &g_ui.model->guilds[g_ui.guild];
+        for (unsigned c = gd->first; c < gd->first + gd->count && g_ui.ac_n < AC_MAX; c++) {
+            const channel_t *ch = chan((int)c);
+            const char *name = model_str(g_ui.model, ch->name);
+            ac_item_t *it;
+            if (ch->type == CH_CATEGORY || !ci_contains(name, g_ui.ac_query))
+                continue;
+            it = &g_ui.ac[g_ui.ac_n++];
+            *it = (ac_item_t){0};
+            it->emoji = -1;
+            lstrcpynA(it->id, ch->id, sizeof it->id);
+            lstrcpynA(it->label, name, sizeof it->label);
+            wsprintfA(it->insert, "#%.80s ", name);
+        }
+    } else if (g_ui.ac_kind == AC_EMOJI) {
+        model_emoji_t e;
+        unsigned cursor = 0;
+        while (g_ui.guild >= 0 && g_ui.ac_n < AC_MAX && model_emoji_next(g_ui.model, g_ui.guild, &cursor, &e)) {
+            char name[48];
+            ac_item_t *it;
+            lstrcpynA(name, e.name, e.name_len + 1 < (int)sizeof name ? e.name_len + 1 : (int)sizeof name);
+            if (!ci_contains(name, g_ui.ac_query))
+                continue;
+            it = &g_ui.ac[g_ui.ac_n++];
+            *it = (ac_item_t){0};
+            it->emoji = -1;
+            lstrcpynA(it->custom, e.id, sizeof it->custom);
+            wsprintfA(it->label, ":%s:", name);
+            wsprintfA(it->insert, ":%s: ", name);
+        }
+        for (int pass = 2; pass >= 1; pass--) /* names starting with the query first */
+        for (int i = 0; i < k_nemoji && g_ui.ac_n < AC_MAX; i++) {
+            ac_item_t *it;
+            char name[48];
+            if (emoji_matches(i, g_ui.ac_query) != pass)
+                continue;
+            it = &g_ui.ac[g_ui.ac_n++];
+            *it = (ac_item_t){0};
+            it->emoji = i;
+            emoji_main_name(i, name, sizeof name);
+            wsprintfA(it->label, ":%s:", name);
+            wsprintfA(it->insert, "%s ", k_emoji[i].emoji);
+        }
+    }
+    if (!g_ui.ac_n)
+        g_ui.ac_kind = AC_NONE;
+    if (g_ui.ac_sel >= g_ui.ac_n)
+        g_ui.ac_sel = 0;
+}
+
+static RECT ac_rect(void)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0, h = g_ui.ac_n * S(AC_ROW) + S(40);
+    int bottom;
+
+    GetClientRect(g_ui.wnd, &rc);
+    bottom = rc.bottom - S(24) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - tray_h() - S(8);
+    return rect(x0 + S(16), bottom - h, w - S(32), h);
+}
+
+static void paint_autocomplete(void)
+{
+    RECT r;
+    const char *title;
+
+    if (g_ui.ac_kind == AC_NONE)
+        return;
+    r = ac_rect();
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF151515);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    title = g_ui.ac_kind == AC_USER ? "MEMBERS" : g_ui.ac_kind == AC_CHANNEL ? "TEXT CHANNELS" : "EMOJI MATCHING";
+    text(g_ui.f_cat, C_MUTED, rect(r.left + S(16), r.top + S(8), S(300), S(24)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (int i = 0; i < g_ui.ac_n; i++) {
+        const ac_item_t *it = &g_ui.ac[i];
+        int y = r.top + S(36) + i * S(AC_ROW), x = r.left + S(8);
+        if (i == g_ui.ac_sel)
+            r_round(x, y, r.right - r.left - S(16), S(AC_ROW) - S(2), S(6), ARGB(C_SELECT));
+        if (g_ui.ac_kind == AC_USER) {
+            r_image_t *img = user_avatar(it->id, it->avatar);
+            if (img)
+                r_image(img, x + S(8), y + S(7), S(24), S(24), S(12));
+            else
+                r_circle(x + S(8), y + S(7), S(24), ARGB(C_ITEM));
+        } else if (g_ui.ac_kind == AC_CHANNEL) {
+            text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(24), S(AC_ROW)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else if (it->custom[0]) {
+            r_image_t *img = emoji_image(it->custom, S(24));
+            if (img)
+                r_image(img, x + S(8), y + S(7), S(24), S(24), 0);
+        } else {
+            wchar_t *we = utf8_to_wide(k_emoji[it->emoji].emoji, lstrlenA(k_emoji[it->emoji].emoji));
+            r_text(g_ui.f_body, ARGB(C_INK), x + S(4), y, S(32), S(AC_ROW), we, -1, R_CENTER | R_VCENTER | R_SINGLE);
+            mem_free(we);
+        }
+        text(g_ui.f_body, C_INK, rect(x + S(44), y, r.right - x - S(60), S(AC_ROW)), it->label,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+}
+
+/* Replaces the word being typed with suggestion i and remembers what a mention stands for. */
+static void ac_accept(int i)
+{
+    const ac_item_t *it = &g_ui.ac[i];
+    wchar_t *w = utf8_to_wide(it->insert, lstrlenA(it->insert));
+
+    SendMessageW(g_ui.composer, EM_SETSEL, (WPARAM)g_ui.ac_start, (LPARAM)g_ui.ac_end);
+    SendMessageW(g_ui.composer, EM_REPLACESEL, TRUE, (LPARAM)w);
+    mem_free(w);
+    if ((g_ui.ac_kind == AC_USER || g_ui.ac_kind == AC_CHANNEL) && g_ui.nmention < (int)ARRAYSIZE(g_ui.mention)) {
+        mention_t *mn = &g_ui.mention[g_ui.nmention++];
+        lstrcpynA(mn->text, it->insert, sizeof mn->text);
+        mn->text[lstrlenA(mn->text) - 1] = 0; /* without the space */
+        wsprintfA(mn->markup, g_ui.ac_kind == AC_USER ? "<@%s>" : "<#%s>", it->id);
+    }
+    g_ui.ac_kind = AC_NONE;
+    g_ui.ac_n = 0;
+    redraw();
+}
+
+/* "@name" and "#channel" picked from the suggestions become real mentions. */
+static void apply_mentions(const sb_t *in, sb_t *out)
+{
+    size_t i = 0;
+
+    while (i < in->len) {
+        int best = -1;
+        size_t best_len = 0;
+        for (int k = 0; k < g_ui.nmention; k++) {
+            size_t n = (size_t)lstrlenA(g_ui.mention[k].text);
+            if (n > best_len && i + n <= in->len &&
+                CompareStringA(LOCALE_INVARIANT, 0, in->data + i, (int)n, g_ui.mention[k].text, (int)n) == CSTR_EQUAL) {
+                best = k;
+                best_len = n;
+            }
+        }
+        if (best >= 0) {
+            sb_add(out, g_ui.mention[best].markup);
+            i += best_len;
+        } else {
+            sb_addn(out, in->data + i, 1);
+            i++;
+        }
+    }
+}
+
+/* Keys for the suggestion list while it is open; returns 1 when used. */
+static int ac_key(WPARAM key)
+{
+    if (g_ui.ac_kind == AC_NONE)
+        return 0;
+    switch (key) {
+    case VK_UP:
+        g_ui.ac_sel = (g_ui.ac_sel + g_ui.ac_n - 1) % g_ui.ac_n;
+        break;
+    case VK_DOWN:
+        g_ui.ac_sel = (g_ui.ac_sel + 1) % g_ui.ac_n;
+        break;
+    case VK_TAB:
+    case VK_RETURN:
+        ac_accept(g_ui.ac_sel);
+        return 1;
+    case VK_ESCAPE:
+        g_ui.ac_kind = AC_NONE;
+        break;
+    default:
+        return 0;
+    }
+    redraw();
+    return 1;
+}
+
+static int ac_hit(int x, int y)
+{
+    RECT r;
+
+    if (g_ui.ac_kind == AC_NONE)
+        return -1;
+    r = ac_rect();
+    if (x < r.left || x >= r.right || y < r.top + S(36))
+        return -1;
+    for (int i = 0; i < g_ui.ac_n; i++)
+        if (y >= r.top + S(36) + i * S(AC_ROW) && y < r.top + S(36) + (i + 1) * S(AC_ROW))
+            return i;
+    return -1;
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -5255,7 +5564,15 @@ static void send_composer(void)
         sb_t out = {0};
         text.data[b] = 0;
         /* :smile: and :server_emoji: become the real thing, as in Discord. */
-        emoji_expand(text.data + a, b - a, &out, custom_emoji_markup, NULL);
+        {
+            sb_t trimmed = {0}, mentioned = {0};
+            sb_addn(&trimmed, text.data + a, b - a);
+            apply_mentions(&trimmed, &mentioned);
+            emoji_expand(mentioned.data ? mentioned.data : "", mentioned.len, &out, custom_emoji_markup, NULL);
+            sb_free(&trimmed);
+            sb_free(&mentioned);
+        }
+        g_ui.nmention = 0;
         sb_clear(&g_ui.send_error);
         if (g_ui.nuploads && g_ui.bar != BAR_EDIT) {
             sb_t paths = {0};
@@ -5285,6 +5602,14 @@ static void send_composer(void)
 
 static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_KEYDOWN && ac_key(wp)) {
+        g_ui.ac_ate = wp == VK_RETURN || wp == VK_TAB || wp == VK_ESCAPE;
+        return 0;
+    }
+    if (msg == WM_CHAR && g_ui.ac_ate && (wp == VK_RETURN || wp == VK_TAB || wp == VK_ESCAPE)) {
+        g_ui.ac_ate = 0;
+        return 0;
+    }
     if (msg == WM_CHAR && wp == VK_RETURN) {
         if (g_ui.confirm)
             confirm_close(1);
@@ -5472,6 +5797,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_ui.picker) {
                 picker_close(); /* a click outside only closes the picker */
                 return 0;
+            }
+            {
+                int ai = ac_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (ai >= 0) {
+                    ac_accept(ai);
+                    SetFocus(g_ui.composer);
+                    return 0;
+                }
             }
             if (click_bar(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
