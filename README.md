@@ -7,7 +7,7 @@
 
 A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP and a few kilobytes.
 
-> **Status: very early.** The executable prints its banner and exits. See the [roadmap](docs/ROADMAP.md).
+> **Status: early.** Silicord logs in and holds a gateway session, but does not show messages yet. See the [roadmap](docs/ROADMAP.md).
 
 ## Why
 
@@ -26,6 +26,14 @@ Your token grants full access to your account. Silicord stores it in the Windows
 
 Silicord is not affiliated with or endorsed by Discord Inc.
 
+## Usage
+
+```bat
+silicord login    :: paste your token, it is checked then saved
+silicord          :: connect to the gateway (Ctrl+C to quit)
+silicord logout   :: remove the saved token
+```
+
 ## Building
 
 Requirements:
@@ -39,16 +47,19 @@ From an "x64 Native Tools Command Prompt":
 ```bat
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-build\silicord.exe
+ctest --test-dir build
 ```
 
-CI builds every push and publishes `silicord.exe` as an artifact.
+CI builds every push, runs the tests and publishes `silicord.exe` as an artifact.
+
+If Smart App Control is enabled, Windows blocks unsigned executables you build yourself. Use the CI artifact instead.
 
 ## Layout
 
 ```
 src/     C sources (Win32, no CRT)
 asm/     x64 assembly routines (NASM, Win64 ABI)
+tests/   unit tests (same no-CRT setup)
 assets/  logo and banners
 docs/    roadmap and architecture
 ```
