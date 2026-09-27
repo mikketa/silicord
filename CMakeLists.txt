@@ -57,3 +57,10 @@ add_test(NAME json COMMAND json_test)
 
 silicord_test(crypto_test bcrypt crypt32)
 add_test(NAME crypto COMMAND crypto_test)
+
+# The QR test needs an independent decoder: pip install numpy zxing-cpp
+silicord_test(qr_test)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  add_test(NAME qr COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/qr_check.py $<TARGET_FILE:qr_test>)
+endif()
