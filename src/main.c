@@ -11,6 +11,7 @@
 #include "ra.h"
 #include "sb.h"
 #include "ui.h"
+#include "utf.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -540,6 +541,8 @@ typedef struct {
     char channel[24];
     char before[24];   /* also: the message replied to, edited or deleted */
     int flag;          /* reply: mention the author */
+    sb_t files;        /* files to upload: UTF-8 paths, each followed by a NUL */
+    int nfiles;
 } rest_job_t;
 
 static rest_job_t *new_job(const char *channel_id)
@@ -555,6 +558,7 @@ static void free_job(rest_job_t *j)
 {
     sb_free(&j->token);
     sb_free(&j->text);
+    sb_free(&j->files);
     mem_free(j);
 }
 
@@ -587,6 +591,58 @@ static DWORD WINAPI fetch_main(LPVOID arg)
     return 0;
 }
 
+#define BOUNDARY "----SilicordFormBoundary7MA4YWxk"
+
+/* Wraps the JSON payload and the files of job j into a multipart body, replacing *body. */
+static int multipart(rest_job_t *j, sb_t *body)
+{
+    sb_t out = {0};
+    const char *p = j->files.data;
+    int ok = 1;
+
+    sb_add(&out, "--" BOUNDARY "\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+                 "Content-Type: application/json\r\n\r\n");
+    sb_addn(&out, body->data, body->len);
+    sb_add(&out, "\r\n");
+    for (int i = 0; i < j->nfiles && ok; i++, p += lstrlenA(p) + 1) {
+        wchar_t *wpath = utf8_to_wide(p, (size_t)lstrlenA(p));
+        HANDLE f = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        const char *name = p;
+        char head[64];
+        DWORD size, got = 0;
+
+        mem_free(wpath);
+        for (const char *q = p; *q; q++)
+            if (*q == '\\' || *q == '/')
+                name = q + 1;
+        if (f == INVALID_HANDLE_VALUE) {
+            ok = 0;
+            break;
+        }
+        size = GetFileSize(f, NULL);
+        wsprintfA(head, "--" BOUNDARY "\r\nContent-Disposition: form-data; name=\"files[%d]\"; filename=", i);
+        sb_add(&out, head);
+        sb_json_str(&out, name, (size_t)lstrlenA(name)); /* a quoted, escaped string */
+        sb_add(&out, "\r\nContent-Type: application/octet-stream\r\n\r\n");
+        if (size == INVALID_FILE_SIZE || size > (100u << 20)) {
+            ok = 0;
+        } else {
+            sb_reserve(&out, size);
+            ok = ReadFile(f, out.data + out.len, size, &got, NULL) && got == size;
+            if (ok) {
+                out.len += got;
+                out.data[out.len] = 0;
+            }
+        }
+        CloseHandle(f);
+        sb_add(&out, "\r\n");
+    }
+    sb_add(&out, "--" BOUNDARY "--\r\n");
+    sb_free(body);
+    *body = out;
+    return ok;
+}
+
 static DWORD WINAPI send_main(LPVOID arg)
 {
     rest_job_t *j = arg;
@@ -616,9 +672,34 @@ static DWORD WINAPI send_main(LPVOID arg)
         sb_add(&body, "\"},\"allowed_mentions\":{\"parse\":[\"users\",\"roles\",\"everyone\"],\"replied_user\":");
         sb_add(&body, j->flag ? "true}" : "false}");
     }
+    if (j->nfiles) {
+        const char *p = j->files.data;
+        sb_add(&body, ",\"attachments\":[");
+        for (int i = 0; i < j->nfiles; i++, p += lstrlenA(p) + 1) {
+            const char *name = p;
+            for (const char *q = p; *q; q++)
+                if (*q == '\\' || *q == '/')
+                    name = q + 1;
+            if (i)
+                sb_add(&body, ",");
+            sb_add(&body, "{\"id\":");
+            sb_i64(&body, i);
+            sb_add(&body, ",\"filename\":");
+            sb_json_str(&body, name, (size_t)lstrlenA(name));
+            sb_add(&body, "}");
+        }
+        sb_add(&body, "]");
+    }
     sb_add(&body, "}");
+    if (j->nfiles && !multipart(j, &body)) {
+        ui_post(UI_SEND_FAILED, ui_text("Could not read a file to upload"));
+        sb_free(&body);
+        free_job(j);
+        return 0;
+    }
 
-    if (!http_request("POST", path, j->token.data, body.data, body.len, &resp)) {
+    if (!http_request_type("POST", path, j->token.data,
+                           j->nfiles ? "multipart/form-data; boundary=" BOUNDARY : NULL, body.data, body.len, &resp)) {
         ui_post(UI_SEND_FAILED, ui_text("Could not reach discord.com"));
     } else if (resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root)) {
         msg_batch_t *b = msg_batch_one(root, BATCH_NEW);
@@ -629,6 +710,8 @@ static DWORD WINAPI send_main(LPVOID arg)
             lstrcpyA(text, "You are sending messages too fast");
         else if (resp.status == 403)
             lstrcpyA(text, "You cannot send messages in this channel");
+        else if (resp.status == 413)
+            lstrcpyA(text, "Your files are too big");
         else
             wsprintfA(text, "Message not sent (HTTP %u)", resp.status);
         ui_post(UI_SEND_FAILED, ui_text(text));
@@ -983,6 +1066,20 @@ void app_send_message(const char *channel_id, const char *text)
 void app_log(const char *text)
 {
     log_line("", text);
+}
+
+void app_send_files(const char *channel_id, const char *text, const char *reply_id, int mention, const char *paths, int n)
+{
+    rest_job_t *j = new_job(channel_id);
+    const char *p = paths;
+
+    sb_add(&j->text, text ? text : "");
+    lstrcpynA(j->before, reply_id ? reply_id : "", sizeof j->before);
+    j->flag = mention;
+    for (int i = 0; i < n; i++, p += lstrlenA(p) + 1)
+        sb_addn(&j->files, p, (size_t)lstrlenA(p) + 1);
+    j->nfiles = n;
+    CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
 }
 
 void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention)

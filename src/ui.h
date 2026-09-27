@@ -73,6 +73,8 @@ void app_send_message(const char *channel_id, const char *text);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */
 void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention);
 void app_edit_message(const char *channel_id, const char *message_id, const char *text);
+/* Sends text with files (`paths`: n UTF-8 paths, each followed by a NUL); reply_id may be NULL. */
+void app_send_files(const char *channel_id, const char *text, const char *reply_id, int mention, const char *paths, int n);
 void app_delete_message(const char *channel_id, const char *message_id);
 /* Shows "typing..." to the others for about ten seconds. */
 void app_typing(const char *channel_id);
