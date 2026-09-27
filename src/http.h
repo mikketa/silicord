@@ -5,6 +5,7 @@
 
 #define API_HOST L"discord.com"
 #define API_BASE "/api/v10"
+#define CDN_HOST L"cdn.discordapp.com"
 
 typedef struct {
     DWORD status;
@@ -21,4 +22,6 @@ HINTERNET http_session(void);
  */
 int http_request(const char *method, const char *path, const char *token,
                  const char *body, size_t body_len, http_resp_t *resp);
+/* GET on the media CDN, path starting with '/'. */
+int http_cdn_get(const char *path, http_resp_t *resp);
 void http_resp_free(http_resp_t *resp);

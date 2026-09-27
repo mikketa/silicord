@@ -9,6 +9,7 @@
 
 static HINTERNET g_session;
 static HINTERNET g_api;
+static HINTERNET g_cdn;
 
 int http_init(void)
 {
@@ -20,7 +21,8 @@ int http_init(void)
         return 0;
     WinHttpSetOption(g_session, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof decompress);
     g_api = WinHttpConnect(g_session, API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    return g_api != NULL;
+    g_cdn = WinHttpConnect(g_session, CDN_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    return g_api && g_cdn;
 }
 
 HINTERNET http_session(void)
@@ -45,18 +47,16 @@ static int read_body(HINTERNET req, sb_t *out)
     }
 }
 
-int http_request(const char *method, const char *path, const char *token,
-                 const char *body, size_t body_len, http_resp_t *resp)
+static int do_request(HINTERNET conn, const char *method, const sb_t *url, const char *token,
+                      const char *body, size_t body_len, http_resp_t *resp)
 {
-    sb_t url = {0}, hdr = {0};
+    sb_t hdr = {0};
     wchar_t *wmethod, *wurl, *whdr;
     HINTERNET req;
     DWORD size = sizeof resp->status;
     DWORD err;
     int ok = 0;
 
-    sb_add(&url, API_BASE);
-    sb_add(&url, path);
     if (token) {
         sb_add(&hdr, "Authorization: ");
         sb_add(&hdr, token);
@@ -66,11 +66,11 @@ int http_request(const char *method, const char *path, const char *token,
         sb_add(&hdr, "Content-Type: application/json\r\n");
 
     wmethod = utf8_to_wide(method, sc_strlen(method));
-    wurl = utf8_to_wide(url.data, url.len);
+    wurl = utf8_to_wide(url->data, url->len);
     whdr = utf8_to_wide(hdr.data, hdr.len);
 
     resp->status = 0;
-    req = WinHttpOpenRequest(g_api, wmethod, wurl, NULL, WINHTTP_NO_REFERER,
+    req = WinHttpOpenRequest(conn, wmethod, wurl, NULL, WINHTTP_NO_REFERER,
                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (req &&
         (!hdr.len || WinHttpAddRequestHeaders(req, whdr, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD)) &&
@@ -90,8 +90,31 @@ int http_request(const char *method, const char *path, const char *token,
     mem_free(wurl);
     mem_free(wmethod);
     sb_free(&hdr);
-    sb_free(&url);
     SetLastError(err);
+    return ok;
+}
+
+int http_request(const char *method, const char *path, const char *token,
+                 const char *body, size_t body_len, http_resp_t *resp)
+{
+    sb_t url = {0};
+    int ok;
+
+    sb_add(&url, API_BASE);
+    sb_add(&url, path);
+    ok = do_request(g_api, method, &url, token, body, body_len, resp);
+    sb_free(&url);
+    return ok;
+}
+
+int http_cdn_get(const char *path, http_resp_t *resp)
+{
+    sb_t url = {0};
+    int ok;
+
+    sb_add(&url, path);
+    ok = do_request(g_cdn, "GET", &url, NULL, NULL, 0, resp);
+    sb_free(&url);
     return ok;
 }
 
