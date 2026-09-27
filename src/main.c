@@ -213,6 +213,15 @@ static void log_ready_shape(json_t d)
     }
     if (json_get(d, "user", &v))
         log_keys("user:", v);
+    if (json_get(d, "relationships", &v)) {
+        log_keys("relationships:", v);
+        json_iter(v, &it);
+        if (json_next(&it, NULL, &first)) {
+            log_keys("relationships[0]:", first);
+            if (json_get(first, "user", &g))
+                log_keys("relationships[0].user:", g);
+        }
+    }
 }
 
 static int is_open(const char *channel_id)
