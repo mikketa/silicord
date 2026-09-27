@@ -29,6 +29,7 @@ add_library(silicord_core STATIC
   src/json.c
   src/md.c
   src/mem.c
+  src/memberlist.c
   src/model.c
   src/msg.c
   src/profile.c
@@ -83,6 +84,9 @@ add_test(NAME md COMMAND md_test)
 
 silicord_test(profile_test)
 add_test(NAME profile COMMAND profile_test)
+
+silicord_test(memberlist_test)
+add_test(NAME memberlist COMMAND memberlist_test)
 
 silicord_test(render_test ole32 gdi32 user32 dwrite windowscodecs)
 target_sources(render_test PRIVATE src/render.cpp)
