@@ -2,19 +2,25 @@
 
 ## Principles
 
-1. **No C runtime.** The entry point is `entry` (`/ENTRY:entry /NODEFAULTLIB`). Only `kernel32`, `winhttp`, `user32`, `gdi32` and `advapi32` are called. What the compiler itself needs (`memset`, `memcpy`) lives in `src/rt.c`.
+1. **No C runtime.** The entry point is `entry` (`/ENTRY:entry /NODEFAULTLIB`). Only Windows libraries are linked (`kernel32`, `user32`, `winhttp`, `d2d1`, `dwrite`, `windowscodecs`, ...). What the compiler itself needs (`memset`, `memcpy`) lives in `src/rt.c`.
 2. **Windows does the heavy lifting.** TLS, HTTP and WebSocket go through WinHTTP. No OpenSSL, no libcurl. Drawing goes through Direct2D (software rasterizer, so no GPU driver is loaded) and DirectWrite; images are decoded by WIC.
 3. **Event-driven.** No busy loop: the thread blocks (`WaitForMultipleObjects`, `GetMessage`) until the next event.
 4. **Assembly where it measurably helps.** C first, then hot functions (JSON parsing, inflate, text) are rewritten in NASM only when a benchmark shows a gain.
 
-## Planned data flow
+## Data flow
 
 ```
              REST (HTTPS)
   UI  <--->  client  <------------->  discord.com/api/v10
-  Win32      state /    Gateway (WSS, zlib-stream)
+  Win32      state /    Gateway (WSS)
              cache   <------------->  gateway.discord.gg
+                        Images (HTTPS)
+                     <------------->  cdn.discordapp.com
+                        Fonts (HTTPS, once)
+                     <------------->  raw.githubusercontent.com
 ```
+
+Display name fonts are the only files fetched outside Discord: they come from a pinned commit of the Google Fonts repository and are cached in `%LOCALAPPDATA%\Silicord\fonts`.
 
 ## Conventions
 

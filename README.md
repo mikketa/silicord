@@ -7,7 +7,7 @@
 
 A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, Direct2D and a few kilobytes.
 
-> **Status: early.** Silicord logs in with a QR code, shows your servers, channels and direct messages, and reads and sends messages. See the [roadmap](docs/ROADMAP.md).
+> **Status: early.** Silicord logs in with a QR code, shows your servers, channels and direct messages, reads and sends messages, and opens user profiles with their banner, badges, avatar decoration and display name style. See the [roadmap](docs/ROADMAP.md).
 
 ## Why
 
@@ -33,6 +33,8 @@ Silicord is not affiliated with or endorsed by Discord Inc.
 Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings › Scan QR Code), then confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works.
 
 The token Discord sends back is stored in the Windows Credential Manager. The power button next to your name logs out and removes it.
+
+Clicking an avatar or a name opens that user's profile. Display names with a custom font use free fonts (SIL Open Font License) that Silicord downloads once from the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, and keeps in `%LOCALAPPDATA%\Silicord\fonts`.
 
 `silicord --debug` also opens a console with a connection log, mirrored to `%TEMP%\silicord-debug.log`.
 

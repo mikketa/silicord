@@ -44,6 +44,8 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [ ] Mentions, replies, edit and delete
 - [x] Unread markers, mention badges, read sync with other devices
 - [x] Windows notifications for DMs, mentions and role mentions
+- [x] Profile popouts: banner, avatar decoration, display name fonts and effects, server tag, badges, mutual friends and servers, bio, message box
+- [ ] Profile popouts: roles, presence, animated banners and decorations
 - [ ] Executable icon from `assets/logo.svg`
 
 ## 5. Later
