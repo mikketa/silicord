@@ -24,28 +24,11 @@ static int field(json_t obj, const char *key, json_t *out)
     return json_get(obj, key, out) || (json_get(obj, "properties", &props) && json_get(props, key, out));
 }
 
-/* Copies a snowflake or short string (quoted or not) into dst. */
-static void copy_raw(json_t v, char *dst, size_t size)
-{
-    const char *p = v.p, *e = v.end;
-    size_t n = 0;
-
-    if (json_type(v) == JSON_STRING) {
-        p++;
-        e--;
-    } else if (json_type(v) != JSON_NUMBER) {
-        e = p;
-    }
-    while (p < e && n + 1 < size)
-        dst[n++] = *p++;
-    dst[n] = 0;
-}
-
 static int id_eq(json_t v, const char *id)
 {
     char tmp[24];
 
-    copy_raw(v, tmp, sizeof tmp);
+    json_raw(v, tmp, sizeof tmp);
     for (int i = 0;; i++) {
         if (tmp[i] != id[i])
             return 0;
@@ -68,7 +51,7 @@ static unsigned long long to_u64(json_t v)
     char tmp[24];
     unsigned long long n = 0;
 
-    copy_raw(v, tmp, sizeof tmp);
+    json_raw(v, tmp, sizeof tmp);
     for (const char *p = tmp; *p >= '0' && *p <= '9'; p++)
         n = n * 10 + (unsigned long long)(*p - '0');
     return n;
@@ -186,7 +169,7 @@ static int my_roles(json_t d, json_t guild, unsigned index, const char *user_id,
     if (json_get(member, "roles", &roles)) {
         json_iter(roles, &rit);
         while (n < MAX_ROLES && json_next(&rit, NULL, &role))
-            copy_raw(role, out[n++], 24);
+            json_raw(role, out[n++], 24);
     }
     return n;
 }
@@ -270,9 +253,9 @@ static void add_guild_channels(model_t *m, unsigned *cap, json_t d, json_t g, un
         tmp_channel_t *c = &tmp[n++];
         c->json = ch;
         if (json_get(ch, "id", &v))
-            copy_raw(v, c->id, sizeof c->id);
+            json_raw(v, c->id, sizeof c->id);
         if (json_get(ch, "parent_id", &v))
-            copy_raw(v, c->parent, sizeof c->parent);
+            json_raw(v, c->parent, sizeof c->parent);
         c->type = json_get(ch, "type", &v) ? (int)to_i64(v) : 0;
         c->position = json_get(ch, "position", &v) ? to_i64(v) : 0;
         c->visible = !known ||
@@ -358,9 +341,9 @@ model_t *model_from_ready(json_t d)
     sb_addn(&m->strings, "", 1); /* offset 0 is the empty string */
     if (json_get(d, "user", &user)) {
         if (json_get(user, "id", &v))
-            copy_raw(v, m->user_id, sizeof m->user_id);
+            json_raw(v, m->user_id, sizeof m->user_id);
         if (json_get(user, "avatar", &v))
-            copy_raw(v, m->user_avatar, sizeof m->user_avatar);
+            json_raw(v, m->user_avatar, sizeof m->user_avatar);
         if ((json_get(user, "global_name", &v) && json_type(v) == JSON_STRING) || json_get(user, "username", &v))
             m->user_name = add_str(m, v);
     }
@@ -380,9 +363,9 @@ model_t *model_from_ready(json_t d)
             continue; /* unavailable guild */
         }
         if (json_get(g, "id", &v))
-            copy_raw(v, out->id, sizeof out->id);
+            json_raw(v, out->id, sizeof out->id);
         if (field(g, "icon", &v))
-            copy_raw(v, out->icon, sizeof out->icon);
+            json_raw(v, out->icon, sizeof out->icon);
         out->name = add_str(m, name);
         add_guild_channels(m, &cap, d, g, i, out);
         rank[m->nguilds] = guild_rank(d, out->id);

@@ -43,5 +43,7 @@ size_t json_count(json_t v);
 int json_int(json_t v, long long *out);
 /* Decodes a string value (escapes, \u surrogate pairs) and appends it as UTF-8. */
 int json_str(json_t v, sb_t *out);
+/* Copies a short string (without decoding escapes) or number into dst, NUL-terminated. */
+void json_raw(json_t v, char *dst, size_t size);
 /* Compares a string value with `s` without decoding escapes. */
 int json_str_eq(json_t v, const char *s);

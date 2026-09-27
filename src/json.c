@@ -152,6 +152,23 @@ size_t json_count(json_t v)
     return n;
 }
 
+void json_raw(json_t v, char *dst, size_t size)
+{
+    const char *p = v.p, *e = v.end;
+    size_t n = 0;
+
+    if (json_type(v) == JSON_STRING) {
+        p++;
+        e--;
+    } else if (json_type(v) != JSON_NUMBER) {
+        e = p;
+    }
+    while (p < e && n + 1 < size)
+        dst[n++] = *p++;
+    if (size)
+        dst[n] = 0;
+}
+
 int json_str_eq(json_t v, const char *s)
 {
     size_t n = sc_strlen(s);
