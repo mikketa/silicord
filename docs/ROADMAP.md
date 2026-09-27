@@ -14,13 +14,14 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Token storage in the Windows Credential Manager (`CredWriteW` / `CredReadW`)
 - [x] HTTPS REST requests with WinHTTP (`GET /users/@me`)
 - [x] Allocation-free JSON reader (values are slices of the source buffer)
-- [ ] QR code login through the mobile app, passkeys, 2FA and SMS handled on the phone (implemented, waiting for a first real scan)
-- [ ] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready (implemented, waiting for a first real session)
+- [x] QR code login through the mobile app (passkeys, 2FA and SMS are handled on the phone)
+- [x] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready
 - [ ] Automatic resume and reconnect (today the client exits on op 7 / op 9 or a missed heartbeat ack)
 
 ## 2. Text client (console)
 
-- [ ] List guilds, channels and DMs
+- [x] List servers and channels, hiding channels you cannot see
+- [ ] List DMs
 - [ ] Live messages in a channel (`MESSAGE_CREATE`)
 - [ ] Send a message
 - [ ] Load history (`GET /channels/{id}/messages`)
@@ -34,9 +35,10 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 ## 4. Win32 UI 🚧
 
 - [x] Native, custom-drawn window with dark title bar and per-monitor DPI
-- [x] Login screen: QR code and token
-- [x] Account header and server list
-- [ ] Channel list and message view
+- [x] Login screen with the QR code
+- [x] Server rail with round icons, channel list with collapsible categories, user panel
+- [ ] Message view and composer
+- [ ] Color emoji (DirectWrite)
 - [ ] Text rendering with GDI / DirectWrite
 - [ ] Mentions, replies, edit and delete
 - [ ] Windows notifications
