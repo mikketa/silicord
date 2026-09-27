@@ -48,7 +48,7 @@ static int read_body(HINTERNET req, sb_t *out)
 }
 
 static int do_request(HINTERNET conn, const char *method, const sb_t *url, const char *token,
-                      const char *body, size_t body_len, http_resp_t *resp)
+                      const char *body, size_t body_len, http_resp_t *resp, const char *ctype)
 {
     sb_t hdr = {0};
     wchar_t *wmethod, *wurl, *whdr;
@@ -62,8 +62,11 @@ static int do_request(HINTERNET conn, const char *method, const sb_t *url, const
         sb_add(&hdr, token);
         sb_add(&hdr, "\r\n");
     }
-    if (body)
-        sb_add(&hdr, "Content-Type: application/json\r\n");
+    if (body) {
+        sb_add(&hdr, "Content-Type: ");
+        sb_add(&hdr, ctype ? ctype : "application/json");
+        sb_add(&hdr, "\r\n");
+    }
 
     wmethod = utf8_to_wide(method, sc_strlen(method));
     wurl = utf8_to_wide(url->data, url->len);
@@ -94,17 +97,23 @@ static int do_request(HINTERNET conn, const char *method, const sb_t *url, const
     return ok;
 }
 
-int http_request(const char *method, const char *path, const char *token,
-                 const char *body, size_t body_len, http_resp_t *resp)
+int http_request_type(const char *method, const char *path, const char *token, const char *content_type,
+                      const char *body, size_t body_len, http_resp_t *resp)
 {
     sb_t url = {0};
     int ok;
 
     sb_add(&url, API_BASE);
     sb_add(&url, path);
-    ok = do_request(g_api, method, &url, token, body, body_len, resp);
+    ok = do_request(g_api, method, &url, token, body, body_len, resp, content_type);
     sb_free(&url);
     return ok;
+}
+
+int http_request(const char *method, const char *path, const char *token,
+                 const char *body, size_t body_len, http_resp_t *resp)
+{
+    return http_request_type(method, path, token, NULL, body, body_len, resp);
 }
 
 int http_cdn_get(const char *path, http_resp_t *resp)
@@ -113,7 +122,7 @@ int http_cdn_get(const char *path, http_resp_t *resp)
     int ok;
 
     sb_add(&url, path);
-    ok = do_request(g_cdn, "GET", &url, NULL, NULL, 0, resp);
+    ok = do_request(g_cdn, "GET", &url, NULL, NULL, 0, resp, NULL);
     sb_free(&url);
     return ok;
 }
@@ -127,7 +136,7 @@ int http_get(const wchar_t *host, const char *path, http_resp_t *resp)
     if (!conn)
         return 0;
     sb_add(&url, path);
-    ok = do_request(conn, "GET", &url, NULL, NULL, 0, resp);
+    ok = do_request(conn, "GET", &url, NULL, NULL, 0, resp, NULL);
     sb_free(&url);
     WinHttpCloseHandle(conn);
     return ok;

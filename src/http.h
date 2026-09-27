@@ -22,6 +22,9 @@ HINTERNET http_session(void);
  */
 int http_request(const char *method, const char *path, const char *token,
                  const char *body, size_t body_len, http_resp_t *resp);
+/* Same, with another Content-Type than JSON for the body (multipart uploads). */
+int http_request_type(const char *method, const char *path, const char *token, const char *content_type,
+                      const char *body, size_t body_len, http_resp_t *resp);
 /* GET on the media CDN, path starting with '/'. */
 int http_cdn_get(const char *path, http_resp_t *resp);
 /* GET on another HTTPS host, without credentials. */
