@@ -279,7 +279,7 @@ static int is_structure_event(json_t t)
         "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE",
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
-        "GUILD_MEMBER_LIST_UPDATE",
+        "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE",
     };
 
     for (int i = 0; i < (int)ARRAYSIZE(names); i++)
@@ -390,10 +390,23 @@ static void on_ready(void *ctx, json_t d)
     log_line("gateway: ", "ready");
     log_ready_shape(d);
     model = model_from_ready(d);
-    if (current(s))
+    if (current(s)) {
+        json_t presences;
         ui_post_model(model);
-    else
+        /* Friends' statuses, applied once the model is in place. */
+        if (json_get(d, "presences", &presences)) {
+            sb_t *p = mem_alloc(sizeof *p);
+            char line[64];
+            wsprintfA(line, "%d presences", (int)json_count(presences));
+            log_line("ready: ", line);
+            sb_add(p, "PRESENCES");
+            sb_addn(p, "", 1);
+            sb_addn(p, presences.p, (size_t)(presences.end - presences.p));
+            ui_post(UI_EVENT, p);
+        }
+    } else {
         model_free(model);
+    }
 }
 /* GET /users/@me. Returns the HTTP status (0 if unreachable) and the account name. */
 static DWORD check_token(const char *token, sb_t *name)
@@ -872,6 +885,18 @@ void app_react(const char *channel_id, const char *message_id, const msg_reactio
     sb_add(&j->text, "/@me?location=Message&type=0");
     lstrcpyA(j->before, add ? "PUT" : "DELETE");
     CloseHandle(CreateThread(NULL, 0, react_main, j, 0, NULL));
+}
+
+void app_set_status(const char *status)
+{
+    sb_t msg = {0};
+
+    /* Op 3, Presence Update: this session's status. */
+    sb_add(&msg, "{\"op\":3,\"d\":{\"status\":\"");
+    sb_add(&msg, status);
+    sb_add(&msg, "\",\"since\":0,\"activities\":[],\"afk\":false}}");
+    gw_send(&msg);
+    sb_free(&msg);
 }
 
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start)

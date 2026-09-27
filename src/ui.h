@@ -82,6 +82,8 @@ void app_ack(const char *channel_id, const char *message_id);
 void app_fetch_channel(const char *channel_id);
 /* Subscribes to a server channel's live typing and member list (op 14), as Discord does when opening it. */
 void app_subscribe(const char *guild_id, const char *channel_id);
+/* Our status: "online", "idle", "dnd" or "invisible". */
+void app_set_status(const char *status);
 /* Same, also asking for the member list rows [start, start + 99]. */
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start);
 /* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
