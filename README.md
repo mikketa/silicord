@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP and a few kilobytes.
+A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, Direct2D and a few kilobytes.
 
 > **Status: early.** Silicord logs in with a QR code, shows your servers, channels and direct messages, and reads and sends messages. See the [roadmap](docs/ROADMAP.md).
 
