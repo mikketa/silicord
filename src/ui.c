@@ -13,6 +13,7 @@
 #include "img.h"
 #include "md.h"
 #include "memberlist.h"
+#include "emoji.h"
 #include "mem.h"
 #include "qr.h"
 #include "utf.h"
@@ -72,6 +73,26 @@ typedef struct {
 /* Time a paint may spend decoding images from the disk cache before deferring the rest. */
 #define SYNC_DECODE_MS 8
 
+#define PICK_W 420
+#define PICK_H 440
+#define PICK_COLS 9
+#define PICK_CELL 40
+#define PICK_TOP 56
+#define PICK_FOOT 52
+#define PICK_HEAD 28
+
+enum { PICK_COMPOSER, PICK_REACTION };
+enum { PI_HEADER, PI_UNICODE, PI_CUSTOM };
+
+typedef struct {
+    int kind;
+    int index;          /* unicode: into k_emoji; header: category (-1 for the server) */
+    char id[24];        /* custom */
+    char name[40];
+    int animated;
+    int x, y, w, h;     /* in the picker, before scrolling */
+} pick_item_t;
+
 enum { BAR_NONE, BAR_REPLY, BAR_EDIT };
 #define BAR_H 36
 
@@ -84,7 +105,7 @@ typedef struct {
 typedef struct {
     HWND wnd;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
-    r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name;
+    r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -153,6 +174,15 @@ typedef struct {
     struct presence *presences;
     int npresences, cap_presences;
     int my_status;             /* ML_*, what we set */
+
+    /* Emoji picker. */
+    HWND picker, picker_edit;
+    WNDPROC picker_edit_proc;
+    HBRUSH picker_brush;
+    int picker_mode;
+    char picker_msg[24];
+    void *pick_items;
+    int npick, pick_scroll, pick_hover, pick_content;
 
     /* Member list. */
     ml_t ml;
@@ -1065,6 +1095,9 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static void picker_open(int mode, const char *msg_id, int right, int bottom);
+static void picker_close(void);
+static void picker_layout(void);
 static int members_shown(void);
 static int main_right(void);
 static void paint_members(RECT rc);
@@ -2264,6 +2297,9 @@ static void paint_main(RECT rc)
             int cy = rc.bottom - S(24) - S(COMPOSER_H);
             paint_bar(x0, w, cy);
             r_round(x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
+            text_w(g_ui.f_icon_mid, g_ui.picker && g_ui.picker_mode == PICK_COMPOSER ? C_AMBER : C_MUTED,
+                   rect(x0 + w - S(16) - S(44), cy, S(40), S(COMPOSER_H)), L"\xE76E", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             if (g_ui.send_error.len)
                 text(g_ui.f_small, C_AMBER, rect(x0 + S(20), cy - S(20) - (g_ui.bar ? S(BAR_H) : 0), w - S(40), S(18)),
                      g_ui.send_error.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2373,7 +2409,7 @@ static void make_fonts(void)
 {
     r_font_t **f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat, &g_ui.f_icon,
                       &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small, &g_ui.f_mono, &g_ui.f_h1,
-                      &g_ui.f_h2, &g_ui.f_h3, &g_ui.f_name};
+                      &g_ui.f_h2, &g_ui.f_h3, &g_ui.f_name, &g_ui.f_emoji, &g_ui.f_icon_mid};
 
     invalidate_views(); /* message layouts point at the old fonts */
     pop_close();
@@ -2395,6 +2431,8 @@ static void make_fonts(void)
     g_ui.f_h2 = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
     g_ui.f_h3 = r_font(L"Segoe UI", S(17), FW_BOLD, 0);
     g_ui.f_name = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
+    g_ui.f_emoji = r_font(L"Segoe UI Emoji", S(24), FW_NORMAL, 0);
+    g_ui.f_icon_mid = r_font(L"Segoe MDL2 Assets", S(20), FW_NORMAL, 0);
     build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
@@ -2610,7 +2648,7 @@ static void place_composer(void)
     if (show) {
         int cy = rc.bottom - S(24) - S(COMPOSER_H);
         int eh = S(22);
-        MoveWindow(g_ui.composer, x0 + S(32), cy + (S(COMPOSER_H) - eh) / 2, main_right() - x0 - S(64), eh, TRUE);
+        MoveWindow(g_ui.composer, x0 + S(32), cy + (S(COMPOSER_H) - eh) / 2, main_right() - x0 - S(64) - S(40), eh, TRUE);
     }
     ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
 }
@@ -2623,6 +2661,7 @@ static void open_channel(int index)
 
     pop_close();
     g_ui.channel = index;
+    picker_close();
     typing_clear();
     g_ui.bar = BAR_NONE;
     g_ui.confirm = 0;
@@ -4020,7 +4059,7 @@ static void open_self(void)
 #define TYPING_MS 10000
 
 static const wchar_t *const k_quick[] = {L"\xD83D\xDC4D", L"\x2764\xFE0F", L"\xD83D\xDE02"}; /* thumbs up, heart, joy */
-enum { TOOL_REACT0, TOOL_REACT1, TOOL_REACT2, TOOL_REPLY, TOOL_EDIT, TOOL_DELETE, TOOL_COUNT };
+enum { TOOL_REACT0, TOOL_REACT1, TOOL_REACT2, TOOL_ADD, TOOL_REPLY, TOOL_EDIT, TOOL_DELETE, TOOL_COUNT };
 
 static int own_message(const msg_t *m)
 {
@@ -4085,7 +4124,7 @@ static void paint_toolbar(void)
         else
             text_w(g_ui.f_icon, btn[k] == TOOL_DELETE && g_ui.hover_tool == k ? C_AMBER : C_MUTED,
                    rect(x, y, S(TOOL_BTN), S(TOOL_BTN)),
-                   btn[k] == TOOL_REPLY ? L"\xE97A" : btn[k] == TOOL_EDIT ? L"\xE70F" : L"\xE74D", -1,
+                   btn[k] == TOOL_ADD ? L"\xE76E" : btn[k] == TOOL_REPLY ? L"\xE97A" : btn[k] == TOOL_EDIT ? L"\xE70F" : L"\xE74D", -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
@@ -4288,6 +4327,12 @@ static void run_tool(int action)
         app_react(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, &r, add);
         apply_reaction(m, &r, add ? 1 : -1, 1);
         sb_free(&r.emoji);
+        break;
+    }
+    case TOOL_ADD: {
+        int btn[TOOL_COUNT], n = tool_buttons(i, btn);
+        RECT r = toolbar_rect(i, n);
+        picker_open(PICK_REACTION, m->id, r.left - S(8), r.top + S(PICK_H));
         break;
     }
     case TOOL_REPLY:
@@ -4635,6 +4680,370 @@ static void on_member_list(json_t d)
     ml_clamp();
 }
 
+/* ---- Emoji picker ---- */
+
+
+static void picker_rebuild(void)
+{
+    char q[64] = "";
+    int n = 0, cap = 64;
+    model_emoji_t e;
+    unsigned cursor = 0;
+
+    if (g_ui.picker_edit) {
+        wchar_t w[64];
+        GetWindowTextW(g_ui.picker_edit, w, 64);
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, q, sizeof q, NULL, NULL);
+    }
+    mem_free(g_ui.pick_items);
+    g_ui.pick_items = mem_alloc((size_t)cap * sizeof(pick_item_t));
+#define PUSH(it)                                                                       \
+    do {                                                                               \
+        if (n == cap) {                                                                \
+            cap *= 2;                                                                  \
+            g_ui.pick_items = mem_realloc(g_ui.pick_items, (size_t)cap * sizeof(pick_item_t)); \
+        }                                                                              \
+        ((pick_item_t *)g_ui.pick_items)[n++] = (it);                                  \
+    } while (0)
+    /* The server's own emoji first, like Discord. */
+    if (g_ui.model && g_ui.guild >= 0) {
+        int header = 0;
+        while (model_emoji_next(g_ui.model, g_ui.guild, &cursor, &e)) {
+            pick_item_t it = {PI_CUSTOM, 0};
+            int len = e.name_len < 39 ? e.name_len : 39, match = !q[0];
+            lstrcpynA(it.name, e.name, len + 1);
+            for (int k = 0; !match && it.name[k]; k++) {
+                int j = 0;
+                while (q[j] && (it.name[k + j] | 32) == (q[j] | 32))
+                    j++;
+                match = !q[j];
+            }
+            if (!match)
+                continue;
+            if (!header) {
+                pick_item_t h = {PI_HEADER, -1};
+                PUSH(h);
+                header = 1;
+            }
+            lstrcpynA(it.id, e.id, sizeof it.id);
+            it.animated = e.animated;
+            PUSH(it);
+        }
+    }
+    for (int c = 0; c < EMOJI_CATEGORIES; c++) {
+        int header = 0;
+        for (int i = k_emoji_categories[c].first; i < k_emoji_categories[c].end; i++) {
+            pick_item_t it = {PI_UNICODE, i};
+            if (!emoji_matches(i, q))
+                continue;
+            if (!header) {
+                pick_item_t h = {PI_HEADER, c};
+                PUSH(h);
+                header = 1;
+            }
+            emoji_main_name(i, it.name, sizeof it.name);
+            PUSH(it);
+        }
+    }
+#undef PUSH
+    g_ui.npick = n;
+    g_ui.pick_scroll = 0;
+    g_ui.pick_hover = -1;
+    picker_layout();
+}
+
+/* Places the items: headers take a full row, emoji fill rows of PICK_COLS. */
+static void picker_layout(void)
+{
+    int col = 0, y = S(PICK_TOP), x0 = (S(PICK_W) - PICK_COLS * S(PICK_CELL)) / 2;
+
+    for (int i = 0; i < g_ui.npick; i++) {
+        pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
+        if (it->kind == PI_HEADER) {
+            if (col) {
+                y += S(PICK_CELL);
+                col = 0;
+            }
+            it->x = x0;
+            it->y = y;
+            it->w = PICK_COLS * S(PICK_CELL);
+            it->h = S(PICK_HEAD);
+            y += S(PICK_HEAD);
+        } else {
+            it->x = x0 + col * S(PICK_CELL);
+            it->y = y;
+            it->w = it->h = S(PICK_CELL);
+            if (++col == PICK_COLS) {
+                col = 0;
+                y += S(PICK_CELL);
+            }
+        }
+    }
+    g_ui.pick_content = y + (col ? S(PICK_CELL) : 0) - S(PICK_TOP);
+}
+
+static void picker_paint(void)
+{
+    int w = S(PICK_W), h = S(PICK_H), grid_bottom = h - S(PICK_FOOT);
+
+    r_fill(0, 0, w, h, ARGB(C_MAIN));
+    r_round(0, 0, w, h, S(8), 0xFF111111);
+    r_round_outline(0, 0, w, h, S(8), 1, 0xFF2A2A2A);
+    r_round(S(12), S(12), w - S(24), S(32), S(6), 0xFF1E1E1E);
+    r_clip(0, S(PICK_TOP) - S(4), w, grid_bottom - S(PICK_TOP) + S(4));
+    for (int i = 0; i < g_ui.npick; i++) {
+        const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
+        int x_ = it->x, y_ = it->y - g_ui.pick_scroll, w_ = it->w, h_ = it->h;
+        if (y_ + h_ <= S(PICK_TOP) - S(4) || y_ >= grid_bottom || !r_visible(y_, h_))
+            continue;
+        if (it->kind == PI_HEADER) {
+            const char *title = it->index < 0 ? model_str(g_ui.model, g_ui.model->guilds[g_ui.guild].name)
+                                              : k_emoji_categories[it->index].name;
+            text(g_ui.f_cat, C_MUTED, rect(x_ + S(4), y_, w_ - S(8), h_), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            continue;
+        }
+        if (g_ui.pick_hover == i)
+            r_round(x_ + S(2), y_ + S(2), w_ - S(4), h_ - S(4), S(6), ARGB(C_SELECT));
+        if (it->kind == PI_CUSTOM) {
+            char key[48], path[96];
+            r_image_t *img;
+            wsprintfA(key, "e:%s", it->id);
+            wsprintfA(path, "/emojis/%s.png?size=64", it->id);
+            if ((img = image_get(key, path, S(32))) != NULL)
+                r_image(img, x_ + S(4), y_ + S(4), S(32), S(32), 0);
+        } else {
+            wchar_t *we = utf8_to_wide(k_emoji[it->index].emoji, lstrlenA(k_emoji[it->index].emoji));
+            r_text(g_ui.f_emoji, ARGB(C_INK), x_, y_, w_, h_, we, -1, R_CENTER | R_VCENTER | R_SINGLE);
+            mem_free(we);
+        }
+    }
+    r_unclip();
+
+    /* Footer: the hovered emoji and its name. */
+    fill(S(1), grid_bottom, w - S(2), S(1), C_LINE);
+    if (g_ui.pick_hover >= 0 && g_ui.pick_hover < g_ui.npick) {
+        const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[g_ui.pick_hover];
+        char label[64];
+        if (it->kind == PI_UNICODE) {
+            wchar_t *we = utf8_to_wide(k_emoji[it->index].emoji, lstrlenA(k_emoji[it->index].emoji));
+            r_text(g_ui.f_emoji, ARGB(C_INK), S(12), grid_bottom, S(40), S(PICK_FOOT), we, -1, R_CENTER | R_VCENTER | R_SINGLE);
+            mem_free(we);
+        }
+        wsprintfA(label, ":%.40s:", it->name);
+        text(g_ui.f_h, C_INK, rect(S(60), grid_bottom, w - S(72), S(PICK_FOOT)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+        text(g_ui.f_small, C_FAINT, rect(S(16), grid_bottom, w - S(32), S(PICK_FOOT)),
+             g_ui.npick ? "Pick an emoji" : "No emoji match", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+static int picker_hit(int x, int y)
+{
+    if (y < S(PICK_TOP) || y >= S(PICK_H) - S(PICK_FOOT))
+        return -1;
+    for (int i = 0; i < g_ui.npick; i++) {
+        const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
+        int top = it->y - g_ui.pick_scroll;
+        if (it->kind != PI_HEADER && x >= it->x && x < it->x + it->w && y >= top && y < top + it->h)
+            return i;
+    }
+    return -1;
+}
+
+static void picker_close(void)
+{
+    HWND p = g_ui.picker;
+
+    if (!p)
+        return;
+    g_ui.picker = NULL;
+    g_ui.picker_edit = NULL;
+    DestroyWindow(p);
+    SetFocus(g_ui.composer);
+}
+
+/* Custom emoji of the open server by name, as Discord writes them in a message. */
+static const char *custom_emoji_markup(void *ctx, const char *name, size_t n)
+{
+    static char out[96];
+    model_emoji_t e;
+    unsigned cursor = 0;
+
+    (void)ctx;
+    if (!g_ui.model || g_ui.guild < 0)
+        return NULL;
+    while (model_emoji_next(g_ui.model, g_ui.guild, &cursor, &e))
+        if ((size_t)e.name_len == n && CompareStringA(LOCALE_INVARIANT, 0, e.name, (int)n, name, (int)n) == CSTR_EQUAL) {
+            /* names in the model are not NUL-terminated */
+            {
+                char nm[48];
+                lstrcpynA(nm, e.name, e.name_len + 1 < (int)sizeof nm ? e.name_len + 1 : (int)sizeof nm);
+                wsprintfA(out, "<%s:%s:%s>", e.animated ? "a" : "", nm, e.id);
+            }
+            return out;
+        }
+    return NULL;
+}
+
+static void picker_choose(int i)
+{
+    const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
+
+    if (g_ui.picker_mode == PICK_REACTION) {
+        int m = find_msg(g_ui.picker_msg);
+        if (m >= 0) {
+            msg_reaction_t r = {0};
+            int k, add;
+            if (it->kind == PI_CUSTOM) {
+                lstrcpynA(r.emoji_id, it->id, sizeof r.emoji_id);
+                sb_add(&r.emoji, it->name);
+            } else {
+                sb_add(&r.emoji, k_emoji[it->index].emoji);
+            }
+            for (k = 0; k < g_ui.msgs[m].nreactions && !same_reaction(&g_ui.msgs[m].reactions[k], &r); k++)
+                ;
+            add = !(k < g_ui.msgs[m].nreactions && g_ui.msgs[m].reactions[k].me);
+            app_react(g_ui.msgs[m].channel_id[0] ? g_ui.msgs[m].channel_id : g_ui.msgs_channel, g_ui.msgs[m].id, &r, add);
+            apply_reaction(&g_ui.msgs[m], &r, add ? 1 : -1, 1);
+            sb_free(&r.emoji);
+        }
+        picker_close();
+    } else {
+        char ins[64];
+        wchar_t *w;
+        if (it->kind == PI_CUSTOM)
+            wsprintfA(ins, ":%s:", it->name);
+        else
+            lstrcpynA(ins, k_emoji[it->index].emoji, sizeof ins);
+        w = utf8_to_wide(ins, lstrlenA(ins));
+        SendMessageW(g_ui.composer, EM_REPLACESEL, TRUE, (LPARAM)w);
+        mem_free(w);
+        if (GetKeyState(VK_SHIFT) >= 0) /* shift keeps it open to pick several, like Discord */
+            picker_close();
+    }
+    redraw();
+}
+
+static LRESULT CALLBACK picker_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        picker_close();
+        return 0;
+    }
+    if (msg == WM_CHAR && (wp == VK_ESCAPE || wp == VK_RETURN)) {
+        if (wp == VK_RETURN)
+            for (int i = 0; i < g_ui.npick; i++)
+                if (((pick_item_t *)g_ui.pick_items)[i].kind != PI_HEADER) {
+                    picker_choose(i);
+                    return 0;
+                }
+        return 0;
+    }
+    if (msg == WM_MOUSEWHEEL)
+        return SendMessageW(g_ui.picker, msg, wp, lp);
+    return CallWindowProcW(g_ui.picker_edit_proc, h, msg, wp, lp);
+}
+
+static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        RECT rc;
+        HDC dc = BeginPaint(wnd, &ps);
+        GetClientRect(wnd, &rc);
+        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
+            picker_paint();
+            r_end(dc);
+        }
+        EndPaint(wnd, &ps);
+        return 0;
+    }
+    case WM_COMMAND:
+        if ((HWND)lp == g_ui.picker_edit && HIWORD(wp) == EN_CHANGE) {
+            picker_rebuild();
+            InvalidateRect(wnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, GDI(C_INK));
+        SetBkColor((HDC)wp, RGB(0x1E, 0x1E, 0x1E));
+        return (LRESULT)g_ui.picker_brush;
+    case WM_MOUSEMOVE: {
+        int h = picker_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (h != g_ui.pick_hover) {
+            g_ui.pick_hover = h;
+            InvalidateRect(wnd, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.pick_hover >= 0 ? IDC_HAND : IDC_ARROW)));
+            return TRUE;
+        }
+        break;
+    case WM_LBUTTONUP: {
+        int h = picker_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (h >= 0)
+            picker_choose(h);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        int view = S(PICK_H) - S(PICK_FOOT) - S(PICK_TOP), max;
+        g_ui.pick_scroll -= GET_WHEEL_DELTA_WPARAM(wp) * S(PICK_CELL) * 3 / WHEEL_DELTA;
+        max = g_ui.pick_content - view;
+        if (g_ui.pick_scroll > max)
+            g_ui.pick_scroll = max;
+        if (g_ui.pick_scroll < 0)
+            g_ui.pick_scroll = 0;
+        g_ui.pick_hover = -1;
+        InvalidateRect(wnd, NULL, FALSE);
+        return 0;
+    }
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* Opens the picker with its bottom-right corner at (right, bottom), clamped to the window. */
+static void picker_open(int mode, const char *msg_id, int right, int bottom)
+{
+    RECT rc;
+    int w = S(PICK_W), h = S(PICK_H), x, y;
+    HFONT font;
+
+    picker_close();
+    pop_close();
+    GetClientRect(g_ui.wnd, &rc);
+    x = right - w;
+    y = bottom - h;
+    if (x < S(8))
+        x = S(8);
+    if (x + w > rc.right - S(8))
+        x = rc.right - S(8) - w;
+    if (y < S(8))
+        y = S(8);
+    if (y + h > rc.bottom - S(8))
+        y = rc.bottom - S(8) - h;
+    g_ui.picker_mode = mode;
+    lstrcpynA(g_ui.picker_msg, msg_id ? msg_id : "", sizeof g_ui.picker_msg);
+    if (!g_ui.picker_brush)
+        g_ui.picker_brush = CreateSolidBrush(RGB(0x1E, 0x1E, 0x1E));
+    g_ui.picker = CreateWindowExW(0, L"SilicordEmoji", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, x, y, w, h,
+                                  g_ui.wnd, NULL, NULL, NULL);
+    g_ui.picker_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(22), S(18), w - S(44), S(20),
+                                       g_ui.picker, NULL, NULL, NULL);
+    g_ui.picker_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.picker_edit, GWLP_WNDPROC, (LONG_PTR)picker_edit_proc);
+    font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
+    SendMessageW(g_ui.picker_edit, WM_SETFONT, (WPARAM)font, FALSE);
+    SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Find the perfect emoji");
+    picker_rebuild();
+    SetWindowPos(g_ui.picker, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    SetFocus(g_ui.picker_edit);
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -4656,14 +5065,18 @@ static void send_composer(void)
     while (b > a && (text.data[b - 1] == ' ' || text.data[b - 1] == '	'))
         b--;
     if (b > a) {
+        sb_t out = {0};
         text.data[b] = 0;
+        /* :smile: and :server_emoji: become the real thing, as in Discord. */
+        emoji_expand(text.data + a, b - a, &out, custom_emoji_markup, NULL);
         sb_clear(&g_ui.send_error);
         if (g_ui.bar == BAR_EDIT)
-            app_edit_message(g_ui.msgs_channel, g_ui.bar_msg, text.data + a);
+            app_edit_message(g_ui.msgs_channel, g_ui.bar_msg, out.data);
         else if (g_ui.bar == BAR_REPLY)
-            app_send_reply(g_ui.msgs_channel, text.data + a, g_ui.bar_msg, g_ui.bar_mention);
+            app_send_reply(g_ui.msgs_channel, out.data, g_ui.bar_msg, g_ui.bar_mention);
         else
-            app_send_message(g_ui.msgs_channel, text.data + a);
+            app_send_message(g_ui.msgs_channel, out.data);
+        sb_free(&out);
         g_ui.typing_sent = 0;
         SetWindowTextW(g_ui.composer, L"");
         if (g_ui.bar)
@@ -4843,8 +5256,23 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 run_tool(action);
                 return 0;
             }
+            if (g_ui.picker) {
+                picker_close(); /* a click outside only closes the picker */
+                return 0;
+            }
             if (click_bar(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
+            {
+                RECT crc;
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), cx0 = S(RAIL_W + SIDE_W), cw, cy;
+                GetClientRect(wnd, &crc);
+                cw = main_right() - cx0;
+                cy = crc.bottom - S(24) - S(COMPOSER_H);
+                if (open_is_text() && y >= cy && y < cy + S(COMPOSER_H) && x >= cx0 + cw - S(60) && x < cx0 + cw - S(16)) {
+                    picker_open(PICK_COMPOSER, NULL, cx0 + cw - S(16), cy - S(8));
+                    return 0;
+                }
+            }
             {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), top, mi;
                 if (g_ui.guild >= 0 && open_is_text() && y < S(HEADER_H) && x >= main_right() - S(48) &&
@@ -4969,6 +5397,9 @@ HWND ui_create(HINSTANCE inst)
     wc.lpfnWndProc = pop_proc;
     wc.hIcon = wc.hIconSm = NULL;
     wc.lpszClassName = L"SilicordPopout";
+    RegisterClassExW(&wc);
+    wc.lpfnWndProc = picker_proc;
+    wc.lpszClassName = L"SilicordEmoji";
     RegisterClassExW(&wc);
 
     g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
