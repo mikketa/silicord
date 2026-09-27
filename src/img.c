@@ -1,5 +1,5 @@
 #include "img.h"
-#include "gfx.h"
+#include "render.h"
 #include "http.h"
 #include "mem.h"
 
@@ -50,7 +50,7 @@ static DWORD WINAPI worker(LPVOID arg)
         LONG generation;
         job_t *j = pop(&generation);
         http_resp_t resp = {0};
-        gfx_image_t *img = NULL;
+        r_image_t *img = NULL;
         sb_t *key;
 
         if (!j) {
@@ -58,7 +58,7 @@ static DWORD WINAPI worker(LPVOID arg)
             continue;
         }
         if (http_cdn_get(j->path.data, &resp) && resp.status == 200)
-            img = gfx_image_load(resp.body.data, resp.body.len);
+            img = r_image_decode(resp.body.data, resp.body.len);
         http_resp_free(&resp);
 
         if (generation == g_generation) {
@@ -67,12 +67,12 @@ static DWORD WINAPI worker(LPVOID arg)
             j->key.data = NULL;
             j->key.len = j->key.cap = 0;
             if (!PostMessageW(g_wnd, g_msg, (WPARAM)img, (LPARAM)key)) {
-                gfx_image_free(img);
+                r_image_free(img);
                 sb_free(key);
                 mem_free(key);
             }
         } else {
-            gfx_image_free(img);
+            r_image_free(img);
         }
         job_free(j);
     }

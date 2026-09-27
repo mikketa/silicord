@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(silicord VERSION 0.0.1 LANGUAGES C)
+project(silicord VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_ASM_NASM_OBJECT_FORMAT win64)
 enable_language(ASM_NASM)
@@ -8,14 +8,18 @@ if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Silicord builds for Windows x64 with MSVC (cl) or clang-cl.")
 endif()
 
-# No C runtime: /RTC1 needs the CRT, drop it from Debug.
+# No C runtime: /RTC1 needs the CRT, drop it from Debug. C++ goes without exceptions or RTTI.
 string(REPLACE "/RTC1" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+string(REPLACE "/GR" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
 function(silicord_no_crt target)
-  set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
   target_include_directories(${target} PRIVATE src)
   target_compile_definitions(${target} PRIVATE WIN32_LEAN_AND_MEAN SILICORD_VERSION="${PROJECT_VERSION}")
-  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:C>:/W4 /GS- /utf-8>)
+  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:C>:/W4 /GS- /utf-8>
+    $<$<COMPILE_LANGUAGE:CXX>:/W4 /GS- /utf-8 /GR- /EHs-c- /Zc:threadSafeInit->)
 endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
@@ -38,18 +42,18 @@ add_executable(silicord
   src/main.c
   src/console.c
   src/cred.c
-  src/gfx.c
   src/gw.c
   src/http.c
   src/img.c
   src/ra.c
+  src/render.cpp
   src/ui.c
   src/ws.c
   src/silicord.manifest
 )
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 gdiplus shell32 shlwapi dwmapi advapi32 bcrypt winhttp)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 ole32 d2d1 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp)
 
 enable_testing()
 function(silicord_test name)

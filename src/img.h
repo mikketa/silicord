@@ -4,7 +4,7 @@
 
 /*
  * Background image loader for CDN icons and avatars. Each finished request
- * posts `msg` to the window: wParam is a gfx_image_t* (NULL on failure) and
+ * posts `msg` to the window: wParam is a r_image_t* (NULL on failure) and
  * lParam an sb_t* holding the key; the receiver frees both.
  */
 void img_init(HWND wnd, UINT msg);
