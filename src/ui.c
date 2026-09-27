@@ -141,12 +141,18 @@ typedef struct {
     sb_t pop_name;
     int pop_self, pop_failed, pop_hover, pop_h, pop_input_y;
     int pop_ax, pop_ay, pop_above;
+    int pop_status_y[4];
     unsigned pop_frame;
     int pop_badge_x[32], pop_badge_y[32];
     md_doc_t pop_bio;
     r_rich_t *pop_rich;
     int pop_rich_w;
     char pending_dm[24];      /* user whose new DM we open once it exists */
+
+    /* Statuses of friends and people we see (PRESENCE_UPDATE). */
+    struct presence *presences;
+    int npresences, cap_presences;
+    int my_status;             /* ML_*, what we set */
 
     /* Member list. */
     ml_t ml;
@@ -175,6 +181,12 @@ typedef struct {
     unsigned char font_state[9];
 } ui_t;
 
+typedef struct presence {
+    char user[24];
+    int status;
+    sb_t activity;
+} presence_t;
+
 typedef struct member {
     char guild[24];
     char user[24];
@@ -186,7 +198,11 @@ typedef struct member {
 } member_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1,
-                    .show_members = 1, .ml_hover = -1};
+                    .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE};
+
+static void paint_status(int x, int y, int d, int status, unsigned bg);
+static void status_dot(int cx, int cy, int s, int status, unsigned bg);
+static presence_t *presence_find(const char *user);
 
 #define WM_TRAY (WM_APP + 60)
 #define TIMER_ACK 1
@@ -922,6 +938,16 @@ static void paint_channel_row(unsigned i, int y)
         }
         {
             int unread = channel_unread(i), badge = c->mentions ? S(30) : 0;
+            presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
+            if (c->type == CH_DM && c->user_id[0])
+                paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE,
+                             sel ? ARGB(C_SELECT) : hov ? ARGB(C_HOVER) : ARGB(C_SIDE));
+            if (pr && pr->activity.len && pr->status != ML_OFFLINE) {
+                text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
+                     rect(x + S(50), y + S(3), w - S(56) - badge, S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                text(g_ui.f_small, C_FAINT, rect(x + S(50), y + S(22), w - S(56) - badge, S(17)), pr->activity.data,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            } else
             text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
                  rect(x + S(50), y, w - S(56) - badge, S(DM_ROW_H)), name,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -967,8 +993,12 @@ static void paint_user_panel(RECT rc)
     } else {
         r_circle(x0 + S(10), cy, S(32), ARGB(C_ITEM));
     }
-    r_circle(x0 + S(10) + S(21), cy + S(21), S(14), ARGB(C_PANEL));
-    r_circle(x0 + S(10) + S(23), cy + S(23), S(10), ARGB(dot));
+    if (g_ui.model && !g_ui.disconnected && !g_ui.reconnecting) {
+        paint_status(x0 + S(10), cy, S(32), g_ui.my_status, ARGB(C_PANEL));
+    } else {
+        r_circle(x0 + S(10) + S(21), cy + S(21), S(14), ARGB(C_PANEL));
+        r_circle(x0 + S(10) + S(23), cy + S(23), S(10), ARGB(dot));
+    }
 
     text(g_ui.f_h, C_INK, rect(x0 + S(52), cy - S(2), S(120), S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     text(g_ui.f_small, C_MUTED, rect(x0 + S(52), cy + S(17), S(120), S(18)), str_or_empty(&g_ui.status),
@@ -1175,6 +1205,58 @@ static void update_grouping(void)
         else
             m->grouped = 0;
     }
+}
+
+/* ---- Presence ---- */
+
+static presence_t *presence_find(const char *user)
+{
+    for (int i = 0; i < g_ui.npresences; i++)
+        if (lstrcmpA(g_ui.presences[i].user, user) == 0)
+            return &g_ui.presences[i];
+    return NULL;
+}
+
+/* A presence object: {user: {id}, status, activities}. */
+static void presence_store(json_t obj)
+{
+    json_t user, v;
+    char id[24] = "";
+    presence_t *p;
+
+    if (!json_get(obj, "user", &user) || !json_get(user, "id", &v))
+        return;
+    json_raw(v, id, sizeof id);
+    if (!(p = presence_find(id))) {
+        if (g_ui.npresences == g_ui.cap_presences) {
+            g_ui.cap_presences = g_ui.cap_presences ? g_ui.cap_presences * 2 : 64;
+            g_ui.presences = mem_realloc(g_ui.presences, (size_t)g_ui.cap_presences * sizeof *g_ui.presences);
+        }
+        p = &g_ui.presences[g_ui.npresences++];
+        *p = (presence_t){0};
+        lstrcpynA(p->user, id, sizeof p->user);
+    }
+    p->status = json_get(obj, "status", &v) ? ml_status(v) : ML_OFFLINE;
+    sb_clear(&p->activity);
+    ml_activity(obj, &p->activity);
+}
+
+static void presences_clear(void)
+{
+    for (int i = 0; i < g_ui.npresences; i++)
+        sb_free(&g_ui.presences[i].activity);
+    g_ui.npresences = 0;
+}
+
+/* Status of a user, ML_UNKNOWN if we have not seen it (and ours as we set it). */
+static int user_status(const char *user)
+{
+    presence_t *p;
+
+    if (g_ui.model && lstrcmpA(user, g_ui.model->user_id) == 0)
+        return g_ui.my_status;
+    p = presence_find(user);
+    return p ? p->status : ML_UNKNOWN;
 }
 
 /* ---- Server members ---- */
@@ -2744,6 +2826,18 @@ static void on_event(sb_t *p)
         on_member_list(d);
         return;
     }
+    if (lstrcmpA(name, "PRESENCES") == 0 || lstrcmpA(name, "PRESENCE_UPDATE") == 0) {
+        if (json_type(d) == JSON_ARRAY) {
+            json_iter_t it;
+            json_t item;
+            json_iter(d, &it);
+            while (json_next(&it, NULL, &item))
+                presence_store(item);
+        } else {
+            presence_store(d);
+        }
+        return;
+    }
     if (lstrcmpA(name, "GUILD_MEMBERS_CHUNK") == 0 || lstrcmpA(name, "GUILD_MEMBER_UPDATE") == 0) {
         json_t v, list, item;
         json_iter_t it;
@@ -2791,6 +2885,7 @@ static void clear_session(void)
     pop_close();
     profiles_clear();
     members_clear();
+    presences_clear();
     ml_free(&g_ui.ml);
     images_clear();
     g_ui.guild = -1;
@@ -3354,11 +3449,13 @@ static int pop_render(int draw)
             if (deco)
                 r_image(deco, ax - (d - S(POP_AVATAR)) / 2, ay - (d - S(POP_AVATAR)) / 2, d, d, 0);
         }
-        if (g_ui.pop_self) {
-            int dot = g_ui.disconnected ? C_FAINT : g_ui.model && !g_ui.reconnecting ? C_GREEN : C_AMBER;
-            int dx = ax + S(POP_AVATAR) - S(22), dy = ay + S(POP_AVATAR) - S(22);
-            r_circle(dx - S(5), dy - S(5), S(26), body);
-            r_circle(dx, dy, S(16), ARGB(dot));
+        {
+            int st = user_status(g_ui.pop_user);
+            if (g_ui.pop_self && (g_ui.disconnected || g_ui.reconnecting))
+                st = ML_OFFLINE;
+            if (st != ML_UNKNOWN)
+                paint_status(ax, ay, S(POP_AVATAR), st,
+                             p && p->ntheme == 2 ? 0xFF000000u | mix_dark(p->theme[0]) : body);
         }
     }
     y = ay + S(POP_AVATAR) + S(12);
@@ -3478,6 +3575,28 @@ static int pop_render(int draw)
         if (draw)
             r_rich_draw(g_ui.pop_rich, pad, y, 1);
         y += r_rich_height(g_ui.pop_rich);
+    }
+
+    /* Our own status, as in Discord's account popout. */
+    if (g_ui.pop_self) {
+        static const char *const names[] = {"Online", "Idle", "Do Not Disturb", "Invisible"};
+        static const int states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
+        y += S(12);
+        if (draw)
+            r_round(pad, y, inner, S(4 * 34 + 8), S(8), 0xFF0B0B0B);
+        y += S(4);
+        for (int k = 0; k < 4; k++) {
+            g_ui.pop_status_y[k] = y;
+            if (draw) {
+                if (g_ui.pop_hover == -10 - k)
+                    r_round(pad + S(4), y, inner - S(8), S(34), S(4), ARGB(C_HOVER));
+                status_dot(pad + S(14), y + S(11), S(12), states[k], g_ui.pop_hover == -10 - k ? ARGB(C_HOVER) : 0xFF0B0B0B);
+                text(g_ui.f_body, g_ui.my_status == states[k] ? C_INK : C_MUTED, rect(pad + S(36), y, inner - S(44), S(34)),
+                     names[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            y += S(34);
+        }
+        y += S(4);
     }
 
     /* Message box; the EDIT control sits inside it. */
@@ -3679,6 +3798,10 @@ static int pop_hit(int x, int y)
 
     if (x >= bx && x < bx + S(32) && y >= by && y < by + S(32))
         return -2;
+    if (g_ui.pop_self)
+        for (int k = 0; k < 4; k++)
+            if (y >= g_ui.pop_status_y[k] && y < g_ui.pop_status_y[k] + S(34) && x >= S(POP_PAD) && x < S(POP_W) - S(POP_PAD))
+                return -10 - k;
     for (int i = 0; p && i < p->nbadges && i < (int)ARRAYSIZE(g_ui.pop_badge_x); i++)
         if (x >= g_ui.pop_badge_x[i] && x < g_ui.pop_badge_x[i] + S(POP_BADGE) && y >= g_ui.pop_badge_y[i] &&
             y < g_ui.pop_badge_y[i] + S(POP_BADGE))
@@ -3742,8 +3865,15 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP: {
         const profile_t *p = g_ui.pop_profile;
         int h = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-        if (h == -2)
+        if (h == -2) {
             pop_menu();
+        } else if (h <= -10 && h >= -13) {
+            static const char *const codes[] = {"online", "idle", "dnd", "invisible"};
+            static const int states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
+            g_ui.my_status = states[-10 - h];
+            app_set_status(codes[-10 - h]);
+            redraw();
+        }
         else if (p && h >= 0 && h < p->nbadges && p->badges[h].link.len)
             open_url(p->badges[h].link.data);
         return 0;
@@ -4304,24 +4434,25 @@ static unsigned status_color(int status)
     }
 }
 
+/* Status indicator of size s at (cx, cy): dot, crescent, bar or hollow ring like Discord. */
+static void status_dot(int cx, int cy, int s, int status, unsigned bg)
+{
+    r_circle(cx, cy, s, status_color(status));
+    if (status == ML_OFFLINE || status == ML_UNKNOWN)
+        r_circle(cx + s / 4, cy + s / 4, s / 2, bg);
+    else if (status == ML_IDLE)
+        r_circle(cx - s / 6, cy - s / 6, s * 5 / 8, bg);
+    else if (status == ML_DND)
+        r_round(cx + s / 5, cy + s / 2 - S(1), s - 2 * (s / 5), S(2) > 1 ? S(2) : 1, S(1), bg);
+}
+
 /* Status dot on an avatar of size d at (x, y), with a ring of the background color. */
 static void paint_status(int x, int y, int d, int status, unsigned bg)
 {
     int s = d * 10 / 32, ring = s + S(6), cx = x + d - s + S(1), cy = y + d - s + S(1);
 
     r_circle(cx - (ring - s) / 2, cy - (ring - s) / 2, ring, bg);
-    if (status == ML_OFFLINE || status == ML_UNKNOWN) {
-        r_circle(cx, cy, s, status_color(status));
-        r_circle(cx + s / 4, cy + s / 4, s / 2, bg); /* hollow like Discord's offline dot */
-    } else if (status == ML_IDLE) {
-        r_circle(cx, cy, s, status_color(status));
-        r_circle(cx - s / 6, cy - s / 6, s * 5 / 8, bg); /* crescent moon */
-    } else if (status == ML_DND) {
-        r_circle(cx, cy, s, status_color(status));
-        r_round(cx + s / 5, cy + s / 2 - S(1), s - 2 * (s / 5), S(2) > 1 ? S(2) : 1, S(1), bg);
-    } else {
-        r_circle(cx, cy, s, status_color(status));
-    }
+    status_dot(cx, cy, s, status, bg);
 }
 
 static int ml_row_h(const ml_item_t *it)
