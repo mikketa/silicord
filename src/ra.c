@@ -16,7 +16,8 @@ enum { STOP, CONTINUE, DONE };
 
 typedef struct {
     ws_t ws;
-    HANDLE stop;
+    HANDLE cancel;     /* set by ra_cancel() until ra_reset() */
+    HANDLE done;       /* set when one ra_login() run ends */
     HANDLE heartbeat;
     const ra_events_t *ev;
     rsa_key_t *key;
@@ -57,8 +58,9 @@ static int send_op(ra_t *r, const char *op, const char *key, const char *value, 
 static DWORD WINAPI heartbeat_main(LPVOID arg)
 {
     ra_t *r = arg;
+    HANDLE events[2] = {r->done, r->cancel};
 
-    while (WaitForSingleObject(r->stop, r->interval) == WAIT_TIMEOUT) {
+    while (WaitForMultipleObjects(2, events, FALSE, r->interval) == WAIT_TIMEOUT) {
         if (!InterlockedExchange(&r->acked, 0) || !send_op(r, "heartbeat", NULL, NULL, 0)) {
             ra_cancel();
             break;
@@ -160,15 +162,15 @@ static int exchange_ticket(ra_t *r, json_t root)
     sb_add(&body, "}");
 
     if (!http_request("POST", "/users/@me/remote-auth/login", NULL, body.data, body.len, &resp)) {
-        status(r, "could not reach discord.com");
+        status(r, "Could not reach discord.com");
     } else if (resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root2) &&
                decrypt_field(r, root2, "encrypted_token", r->token)) {
         ok = 1;
     } else if (json_parse(resp.body.data, resp.body.len, &root2) && json_get(root2, "captcha_key", &v)) {
-        status(r, "Discord asked for a captcha: log in with a token instead");
+        status(r, "Discord asked for a captcha. Log in with a token instead.");
     } else {
         sb_t text = {0};
-        sb_add(&text, "login failed (HTTP ");
+        sb_add(&text, "Login failed (HTTP ");
         sb_u64(&text, resp.status);
         sb_add(&text, ")");
         status(r, text.data);
@@ -212,10 +214,26 @@ static int handle(ra_t *r, const sb_t *msg)
     if (json_str_eq(op, "pending_login"))
         return exchange_ticket(r, root) ? DONE : STOP;
     if (json_str_eq(op, "cancel")) {
-        status(r, "login cancelled on the phone");
+        status(r, "Login cancelled on the phone");
         return STOP;
     }
     return CONTINUE;
+}
+
+/* Lazily creates the lock and events; ra_login() and ra_reset() run on one thread. */
+static void ra_reset_once(ra_t *r)
+{
+    if (r->ready)
+        return;
+    ws_init(&r->ws);
+    r->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    r->done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    InterlockedExchange(&r->ready, 1);
+}
+
+static int cancelled(ra_t *r)
+{
+    return WaitForSingleObject(r->cancel, 0) == WAIT_OBJECT_0;
 }
 
 int ra_login(const ra_events_t *ev, sb_t *token)
@@ -224,31 +242,29 @@ int ra_login(const ra_events_t *ev, sb_t *token)
     sb_t msg = {0};
     int result = STOP;
 
-    if (!r->ready) {
-        ws_init(&r->ws);
-        r->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
-        InterlockedExchange(&r->ready, 1);
-    }
-    ResetEvent(r->stop);
+    ra_reset_once(r);
+    if (cancelled(r))
+        return 0;
+    ResetEvent(r->done);
     r->ev = ev;
     r->token = token;
     r->heartbeat = NULL;
     r->key = rsa_generate();
     if (!r->key) {
-        status(r, "could not generate a key pair");
+        status(r, "Could not generate a key pair");
         return 0;
     }
 
     if (!ws_connect(&r->ws, RA_HOST, RA_PATH, RA_HEADERS)) {
-        status(r, "could not reach the login server");
-    } else {
+        status(r, "Could not reach the login server");
+    } else if (!cancelled(r)) {
         while (ws_recv(&r->ws, &msg) && (result = handle(r, &msg)) == CONTINUE)
             ;
-        if (result == CONTINUE && WaitForSingleObject(r->stop, 0) == WAIT_TIMEOUT)
-            status(r, "the QR code expired");
+        if (result == CONTINUE && !cancelled(r))
+            status(r, "The QR code expired");
     }
 
-    SetEvent(r->stop);
+    SetEvent(r->done);
     if (r->heartbeat) {
         WaitForSingleObject(r->heartbeat, INFINITE);
         CloseHandle(r->heartbeat);
@@ -267,6 +283,12 @@ void ra_cancel(void)
 
     if (!r->ready)
         return;
-    SetEvent(r->stop);
+    SetEvent(r->cancel);
     ws_shutdown(&r->ws);
+}
+
+void ra_reset(void)
+{
+    ra_reset_once(&g_ra);
+    ResetEvent(g_ra.cancel);
 }

@@ -13,5 +13,6 @@ typedef struct {
 
 /* Blocks until the connection closes or gw_stop() is called. */
 int gw_run(const char *token, const gw_events_t *ev);
-/* Safe from any thread. */
+/* Safe from any thread. Stays in effect, so later gw_run() calls return at once, until gw_reset(). */
 void gw_stop(void);
+void gw_reset(void);

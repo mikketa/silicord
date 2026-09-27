@@ -18,5 +18,6 @@ typedef struct {
  * cancels, or the code expires after about two minutes (returns 0).
  */
 int ra_login(const ra_events_t *ev, sb_t *token);
-/* Safe from any thread. */
+/* Safe from any thread. Stays in effect, so later ra_login() calls return at once, until ra_reset(). */
 void ra_cancel(void);
+void ra_reset(void);

@@ -19,14 +19,15 @@ enum {
 
 typedef struct {
     ws_t ws;
-    HANDLE stop;
+    HANDLE cancel;     /* set by gw_stop() until gw_reset() */
+    HANDLE done;       /* set when one gw_run() ends */
     HANDLE heartbeat;
     const gw_events_t *ev;
     const char *token;
     DWORD interval;
     volatile LONG64 seq;   /* -1 until the first dispatch */
     volatile LONG acked;
-    volatile LONG ready;   /* ws_init() done; gw_run() is only called from one thread */
+    volatile LONG ready;   /* events created; gw_run() and gw_reset() run on one thread */
 } gw_t;
 
 static gw_t g_gw;
@@ -70,12 +71,13 @@ static int send_identify(gw_t *g)
 static DWORD WINAPI heartbeat_main(LPVOID arg)
 {
     gw_t *g = arg;
+    HANDLE events[2] = {g->done, g->cancel};
     /* The first beat is jittered, as the gateway docs ask. */
     DWORD wait = (DWORD)((unsigned long long)g->interval * (GetTickCount() % 1000) / 1000);
 
-    while (WaitForSingleObject(g->stop, wait) == WAIT_TIMEOUT) {
+    while (WaitForMultipleObjects(2, events, FALSE, wait) == WAIT_TIMEOUT) {
         if (!InterlockedExchange(&g->acked, 0)) {
-            status(g, "no heartbeat ack, closing");
+            status(g, "Connection lost");
             gw_stop();
             break;
         }
@@ -121,14 +123,29 @@ static int handle(gw_t *g, const sb_t *msg)
             g->ev->ready(g->ev->ctx, d);
         return 1;
     case OP_RECONNECT:
-        status(g, "server asked to reconnect");
+        status(g, "Discord asked to reconnect");
         return 0;
     case OP_INVALID_SESSION:
-        status(g, "invalid session");
+        status(g, "Session invalidated");
         return 0;
     default:
         return 1;
     }
+}
+
+static void init_once(gw_t *g)
+{
+    if (g->ready)
+        return;
+    ws_init(&g->ws);
+    g->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g->done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    InterlockedExchange(&g->ready, 1);
+}
+
+static int cancelled(gw_t *g)
+{
+    return WaitForSingleObject(g->cancel, 0) == WAIT_OBJECT_0;
 }
 
 int gw_run(const char *token, const gw_events_t *ev)
@@ -137,34 +154,33 @@ int gw_run(const char *token, const gw_events_t *ev)
     sb_t msg = {0};
     unsigned code = 0;
 
-    if (!g->ready) {
-        ws_init(&g->ws);
-        g->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
-        InterlockedExchange(&g->ready, 1);
-    }
-    ResetEvent(g->stop);
+    init_once(g);
+    if (cancelled(g))
+        return 0;
+    ResetEvent(g->done);
     g->ev = ev;
     g->token = token;
     g->seq = -1;
     g->heartbeat = NULL;
 
     if (!ws_connect(&g->ws, GW_HOST, GW_PATH, NULL)) {
-        status(g, "connection failed");
+        status(g, "Could not connect to the gateway");
         return 0;
     }
-    status(g, "connected");
-    while (ws_recv(&g->ws, &msg) && handle(g, &msg))
+    status(g, "Connected");
+    while (!cancelled(g) && ws_recv(&g->ws, &msg) && handle(g, &msg))
         ;
 
     code = ws_close_status(&g->ws, NULL);
     if (code) {
         sb_t text = {0};
-        sb_add(&text, "closed with code ");
+        sb_add(&text, "Disconnected (code ");
         sb_u64(&text, code);
+        sb_add(&text, ")");
         status(g, text.data);
         sb_free(&text);
     }
-    SetEvent(g->stop);
+    SetEvent(g->done);
     if (g->heartbeat) {
         WaitForSingleObject(g->heartbeat, INFINITE);
         CloseHandle(g->heartbeat);
@@ -180,6 +196,12 @@ void gw_stop(void)
 
     if (!g->ready)
         return;
-    SetEvent(g->stop);
+    SetEvent(g->cancel);
     ws_shutdown(&g->ws);
+}
+
+void gw_reset(void)
+{
+    init_once(&g_gw);
+    ResetEvent(g_gw.cancel);
 }
