@@ -11,22 +11,24 @@ endif()
 # No C runtime: /RTC1 needs the CRT, drop it from Debug.
 string(REPLACE "/RTC1" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
 
-add_executable(silicord
-  src/main.c
-  src/console.c
+function(silicord_no_crt target)
+  set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_include_directories(${target} PRIVATE src)
+  target_compile_definitions(${target} PRIVATE WIN32_LEAN_AND_MEAN SILICORD_VERSION="${PROJECT_VERSION}")
+  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:C>:/W4 /GS- /utf-8>)
+endfunction()
+
+# Platform-independent pieces, shared by the client and the tests.
+add_library(silicord_core STATIC
   src/rt.c
   asm/str.asm
 )
+silicord_no_crt(silicord_core)
 
-target_include_directories(silicord PRIVATE src)
-target_compile_definitions(silicord PRIVATE WIN32_LEAN_AND_MEAN SILICORD_VERSION="${PROJECT_VERSION}")
-target_compile_options(silicord PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:/W4 /GS- /utf-8>
+add_executable(silicord
+  src/main.c
+  src/console.c
 )
-target_link_options(silicord PRIVATE
-  /NODEFAULTLIB
-  /ENTRY:entry
-  /SUBSYSTEM:CONSOLE
-  /MANIFEST:NO
-)
-target_link_libraries(silicord PRIVATE kernel32)
+silicord_no_crt(silicord)
+target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
+target_link_libraries(silicord PRIVATE silicord_core kernel32)
