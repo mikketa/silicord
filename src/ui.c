@@ -61,7 +61,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS };
 
 typedef struct {
     char key[96];
@@ -94,6 +94,13 @@ typedef struct {
     int animated;
     int x, y, w, h;     /* in the picker, before scrolling */
 } pick_item_t;
+
+typedef struct {
+    char id[24];        /* user id */
+    int type;           /* 1 friend, 2 blocked, 3 incoming request, 4 outgoing request */
+    sb_t name, username;
+    char avatar[48];
+} relation_t;
 
 typedef struct {
     sb_t path;          /* UTF-8 */
@@ -203,6 +210,14 @@ typedef struct {
     int npresences, cap_presences;
     int my_status;             /* ML_*, what we set */
 
+    /* Friends. */
+    relation_t *rels;
+    int nrels, cap_rels;
+    int friend_tab, friend_scroll, friend_hover, friend_act;
+    int tab_x[5], tab_w[5];
+    HWND friend_edit;
+    sb_t friend_result;
+
     /* Composer suggestions. */
     ac_item_t ac[AC_MAX];
     int ac_n, ac_sel, ac_kind, ac_start, ac_end, ac_ate;
@@ -267,11 +282,16 @@ typedef struct member {
 } member_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1,
-                    .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE, .upload_hover = -1};
+                    .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE, .upload_hover = -1,
+                    .friend_hover = -1};
 
 static void paint_status(int x, int y, int d, int status, unsigned bg);
 static void status_dot(int cx, int cy, int s, int status, unsigned bg);
 static presence_t *presence_find(const char *user);
+static int friends_view(void);
+static void rel_store(json_t obj);
+static relation_t *rel_find(const char *id);
+static void rel_remove(const char *id);
 
 #define WM_TRAY (WM_APP + 60)
 #define TIMER_ACK 1
@@ -791,6 +811,10 @@ static void hit_test(int x, int y, int *kind, int *index)
             return;
         }
         unsigned first, count;
+        if (y < S(HEADER_H) && g_ui.guild < 0 && g_ui.model) {
+            *kind = HIT_FRIENDS;
+            return;
+        }
         if (y >= S(HEADER_H) && side_range(&first, &count)) {
             int ry = S(HEADER_H) + S(8) - g_ui.side_scroll;
             for (unsigned i = first; i < first + count; i++) {
@@ -1109,8 +1133,18 @@ static void paint_side(RECT rc)
         paint_scrollbar(x0 + S(SIDE_W) - S(6), S(HEADER_H) + S(4), view - S(8), side_content(), g_ui.side_scroll);
         r_unclip();
 
-        text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), title,
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (g_ui.guild < 0) {
+            int sel = friends_view(), hov = g_ui.hover_kind == HIT_FRIENDS;
+            if (sel || hov)
+                r_round(x0 + S(8), S(6), S(SIDE_W) - S(16), S(HEADER_H) - S(12), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+            text_w(g_ui.f_icon_mid, sel ? C_INK : C_MUTED, rect(x0 + S(16), 0, S(32), S(HEADER_H)), L"\xE716", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            text(g_ui.f_h, sel ? C_INK : C_MUTED, rect(x0 + S(56), 0, S(SIDE_W) - S(72), S(HEADER_H)), "Friends",
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), title,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
         if (!count)
             text(g_ui.f_body, C_MUTED, rect(x0 + S(16), S(HEADER_H) + S(12), S(SIDE_W) - S(32), S(24)),
                  g_ui.guild >= 0 ? "No channels you can see" : "No conversations yet", DT_LEFT | DT_SINGLELINE);
@@ -1134,6 +1168,11 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static void place_friend_input(void);
+static void paint_friends(RECT rc, int x0, int w);
+static int friends_hit(int x, int y, int *act);
+static void friends_click(int x, int y);
+static void rels_clear(void);
 static void paint_autocomplete(void);
 static void ac_update(void);
 static int tray_h(void);
@@ -1301,9 +1340,13 @@ static void presence_store(json_t obj)
     char id[24] = "";
     presence_t *p;
 
-    if (!json_get(obj, "user", &user) || !json_get(user, "id", &v))
+    /* READY and PRESENCE_UPDATE carry {user: {id}}; merged presences only a user_id. */
+    if (json_get(obj, "user", &user) && json_get(user, "id", &v))
+        json_raw(v, id, sizeof id);
+    else if (json_get(obj, "user_id", &v))
+        json_raw(v, id, sizeof id);
+    else
         return;
-    json_raw(v, id, sizeof id);
     if (!(p = presence_find(id))) {
         if (g_ui.npresences == g_ui.cap_presences) {
             g_ui.cap_presences = g_ui.cap_presences ? g_ui.cap_presences * 2 : 64;
@@ -2355,6 +2398,9 @@ static void paint_main(RECT rc)
                      g_ui.send_error.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             paint_typing(x0, w, rc.bottom - S(22));
         }
+    } else if (friends_view()) {
+        fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
+        paint_friends(rc, x0, w);
     } else {
         int unit = S(4);
         int y = rc.bottom / 2 - S(60);
@@ -2711,6 +2757,7 @@ static void open_channel(int index)
 
     pop_close();
     g_ui.channel = index;
+    g_ui.friend_hover = -1;
     picker_close();
     uploads_clear();
     g_ui.ac_kind = AC_NONE;
@@ -2729,8 +2776,10 @@ static void open_channel(int index)
         g_ui.msgs_loading = 0;
         app_open_channel("");
         place_composer();
+        place_friend_input();
         return;
     }
+    place_friend_input();
     c = chan(index);
     mark_read(index);
     lstrcpynA(g_ui.msgs_channel, c->id, sizeof g_ui.msgs_channel);
@@ -2802,6 +2851,11 @@ static void on_click(int kind, int index)
         break;
     case HIT_SELF:
         open_self();
+        break;
+    case HIT_FRIENDS:
+        g_ui.last_dm = -1;
+        open_channel(-1);
+        redraw();
         break;
     case HIT_RETRY:
         g_ui.disconnected = 0;
@@ -2918,6 +2972,27 @@ static void on_event(sb_t *p)
         on_member_list(d);
         return;
     }
+    if (lstrcmpA(name, "RELATIONSHIPS") == 0) {
+        json_iter_t it;
+        json_t item;
+        rels_clear();
+        json_iter(d, &it);
+        while (json_next(&it, NULL, &item))
+            rel_store(item);
+        return;
+    }
+    if (lstrcmpA(name, "RELATIONSHIP_ADD") == 0 || lstrcmpA(name, "RELATIONSHIP_UPDATE") == 0) {
+        rel_store(d);
+        return;
+    }
+    if (lstrcmpA(name, "RELATIONSHIP_REMOVE") == 0) {
+        json_t v;
+        char id[24] = "";
+        if (json_get(d, "id", &v))
+            json_raw(v, id, sizeof id);
+        rel_remove(id);
+        return;
+    }
     if (lstrcmpA(name, "PRESENCES") == 0 || lstrcmpA(name, "PRESENCE_UPDATE") == 0) {
         if (json_type(d) == JSON_ARRAY) {
             json_iter_t it;
@@ -2927,6 +3002,18 @@ static void on_event(sb_t *p)
                 presence_store(item);
         } else {
             presence_store(d);
+        }
+        if (lstrcmpA(name, "PRESENCES") == 0) {
+            char line[128];
+            int online = 0, friends = 0;
+            for (int i = 0; i < g_ui.npresences; i++) {
+                relation_t *r = rel_find(g_ui.presences[i].user);
+                online += g_ui.presences[i].status != ML_OFFLINE;
+                friends += r && r->type == 1 && g_ui.presences[i].status != ML_OFFLINE;
+            }
+            wsprintfA(line, "[presence] %d known, %d not offline, %d of them friends (%d relationships)", g_ui.npresences,
+                      online, friends, g_ui.nrels);
+            app_log(line);
         }
         return;
     }
@@ -2978,6 +3065,7 @@ static void clear_session(void)
     profiles_clear();
     members_clear();
     presences_clear();
+    rels_clear();
     ml_free(&g_ui.ml);
     images_clear();
     g_ui.guild = -1;
@@ -3092,6 +3180,11 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         break;
     case UI_SEND_FAILED:
         set_text(&g_ui.send_error, s);
+        break;
+    case UI_FRIEND_RESULT:
+        set_text(&g_ui.friend_result, s);
+        if (g_ui.friend_edit && s[0] == 'S')
+            SetWindowTextW(g_ui.friend_edit, L"");
         break;
     case UI_DM_OPENED:
         /* The DM exists in the model by now (CHANNEL_CREATE came first). */
@@ -5540,6 +5633,361 @@ static int ac_hit(int x, int y)
     return -1;
 }
 
+/* ---- Friends (home screen) ---- */
+
+#define FR_ROW 62
+#define FR_TABS_H 48
+
+enum { REL_FRIEND = 1, REL_BLOCKED = 2, REL_INCOMING = 3, REL_OUTGOING = 4 };
+enum { TAB_ONLINE, TAB_ALL, TAB_PENDING, TAB_BLOCKED, TAB_ADD, TAB_COUNT };
+
+static relation_t *rel_find(const char *id)
+{
+    for (int i = 0; i < g_ui.nrels; i++)
+        if (lstrcmpA(g_ui.rels[i].id, id) == 0)
+            return &g_ui.rels[i];
+    return NULL;
+}
+
+/* {type, user} or RELATIONSHIP_ADD's {id, type, user}. */
+static void rel_store(json_t obj)
+{
+    json_t user, v;
+    char id[24] = "";
+    long long type = 0;
+    relation_t *r;
+
+    if (!json_get(obj, "user", &user) || !json_get(user, "id", &v))
+        return;
+    json_raw(v, id, sizeof id);
+    if (json_get(obj, "type", &v))
+        json_int(v, &type);
+    if (!(r = rel_find(id))) {
+        if (g_ui.nrels == g_ui.cap_rels) {
+            g_ui.cap_rels = g_ui.cap_rels ? g_ui.cap_rels * 2 : 64;
+            g_ui.rels = mem_realloc(g_ui.rels, (size_t)g_ui.cap_rels * sizeof *g_ui.rels);
+        }
+        r = &g_ui.rels[g_ui.nrels++];
+        *r = (relation_t){0};
+        lstrcpynA(r->id, id, sizeof r->id);
+    }
+    r->type = (int)type;
+    sb_clear(&r->name);
+    sb_clear(&r->username);
+    if (!(json_get(user, "global_name", &v) && json_type(v) == JSON_STRING && json_str(v, &r->name)))
+        if (json_get(user, "username", &v))
+            json_str(v, &r->name);
+    if (json_get(user, "username", &v))
+        json_str(v, &r->username);
+    r->avatar[0] = 0;
+    if (json_get(user, "avatar", &v) && json_type(v) == JSON_STRING)
+        json_raw(v, r->avatar, sizeof r->avatar);
+}
+
+static void rel_remove(const char *id)
+{
+    for (int i = 0; i < g_ui.nrels; i++)
+        if (lstrcmpA(g_ui.rels[i].id, id) == 0) {
+            sb_free(&g_ui.rels[i].name);
+            sb_free(&g_ui.rels[i].username);
+            g_ui.rels[i] = g_ui.rels[--g_ui.nrels];
+            return;
+        }
+}
+
+static void rels_clear(void)
+{
+    for (int i = 0; i < g_ui.nrels; i++) {
+        sb_free(&g_ui.rels[i].name);
+        sb_free(&g_ui.rels[i].username);
+    }
+    g_ui.nrels = 0;
+}
+
+static int friends_view(void)
+{
+    return g_ui.view == VIEW_APP && g_ui.model && g_ui.guild < 0 && g_ui.channel < 0;
+}
+
+static int in_tab(const relation_t *r, int tab)
+{
+    int st = user_status(r->id);
+
+    switch (tab) {
+    case TAB_ONLINE: return r->type == REL_FRIEND && st != ML_OFFLINE && st != ML_UNKNOWN;
+    case TAB_ALL: return r->type == REL_FRIEND;
+    case TAB_PENDING: return r->type == REL_INCOMING || r->type == REL_OUTGOING;
+    case TAB_BLOCKED: return r->type == REL_BLOCKED;
+    }
+    return 0;
+}
+
+/* Rows of the open tab, sorted by name. */
+static int friend_rows(int *out, int max)
+{
+    int n = 0;
+
+    for (int i = 0; i < g_ui.nrels && n < max; i++)
+        if (in_tab(&g_ui.rels[i], g_ui.friend_tab))
+            out[n++] = i;
+    for (int a = 1; a < n; a++) {
+        int x = out[a], b = a;
+        while (b > 0 && CompareStringA(LOCALE_USER_DEFAULT, NORM_IGNORECASE, g_ui.rels[out[b - 1]].name.data, -1,
+                                       g_ui.rels[x].name.data, -1) == CSTR_GREATER_THAN) {
+            out[b] = out[b - 1];
+            b--;
+        }
+        out[b] = x;
+    }
+    return n;
+}
+
+/* Action buttons of a row, right to left: returns how many and their kinds. */
+enum { ACT_MESSAGE, ACT_ACCEPT, ACT_IGNORE, ACT_UNBLOCK, ACT_REMOVE };
+
+static int row_actions(const relation_t *r, int *acts)
+{
+    if (r->type == REL_INCOMING) {
+        acts[0] = ACT_IGNORE;
+        acts[1] = ACT_ACCEPT;
+        return 2;
+    }
+    if (r->type == REL_OUTGOING || r->type == REL_BLOCKED) {
+        acts[0] = r->type == REL_BLOCKED ? ACT_UNBLOCK : ACT_IGNORE;
+        return 1;
+    }
+    acts[0] = ACT_REMOVE;
+    acts[1] = ACT_MESSAGE;
+    return 2;
+}
+
+static void paint_friends(RECT rc, int x0, int w)
+{
+    static const char *const tabs[TAB_COUNT] = {"Online", "All", "Pending", "Blocked", "Add Friend"};
+    int x = x0 + S(16), rows[512], n, y;
+
+    /* Header: title and tabs. */
+    text_w(g_ui.f_icon, C_MUTED, rect(x, 0, S(24), S(HEADER_H)), L"\xE716", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_h, C_INK, rect(x + S(32), 0, S(80), S(HEADER_H)), "Friends", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    x += S(112);
+    fill(x, S(14), 1, S(20), C_LINE);
+    x += S(16);
+    for (int t = 0; t < TAB_COUNT; t++) {
+        int tw = text_width(g_ui.f_h, tabs[t]) + S(16), sel = g_ui.friend_tab == t;
+        int pending = 0;
+        if (t == TAB_PENDING)
+            for (int i = 0; i < g_ui.nrels; i++)
+                pending += g_ui.rels[i].type == REL_INCOMING;
+        if (pending)
+            tw += S(24);
+        g_ui.tab_x[t] = x;
+        g_ui.tab_w[t] = tw;
+        if (t == TAB_ADD)
+            r_round(x, S(10), tw, S(28), S(6), sel ? 0x2623A55Au : 0xFF23A55Au);
+        else if (sel || g_ui.friend_hover == -10 - t)
+            r_round(x, S(10), tw, S(28), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        text(g_ui.f_h, t == TAB_ADD ? (sel ? C_GREEN : C_INK) : sel ? C_INK : C_MUTED, rect(x + S(8), 0, tw - S(16), S(HEADER_H)),
+             tabs[t], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (pending)
+            paint_badge(x + tw - S(6), S(HEADER_H) / 2, pending);
+        x += tw + S(8);
+    }
+
+    y = S(HEADER_H) + S(16);
+    if (g_ui.friend_tab == TAB_ADD) {
+        text(g_ui.f_h, C_INK, rect(x0 + S(30), y, w - S(60), S(24)), "ADD FRIEND", DT_LEFT | DT_SINGLELINE);
+        text(g_ui.f_body, C_MUTED, rect(x0 + S(30), y + S(28), w - S(60), S(22)),
+             "You can add friends with their Discord username.", DT_LEFT | DT_SINGLELINE);
+        r_round(x0 + S(30), y + S(64), w - S(60), S(52), S(8), 0xFF0B0B0B);
+        r_round(x0 + w - S(30) - S(170), y + S(74), S(160), S(32), S(4), 0xFF5865F2u);
+        text(g_ui.f_small, C_INK, rect(x0 + w - S(30) - S(170), y + S(74), S(160), S(32)), "Send Friend Request",
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (g_ui.friend_result.len)
+            text(g_ui.f_small, lstrcmpA(g_ui.friend_result.data, "Success") > 0 ? C_GREEN : C_AMBER,
+                 rect(x0 + S(30), y + S(124), w - S(60), S(20)), g_ui.friend_result.data, DT_LEFT | DT_SINGLELINE);
+        return;
+    }
+
+    n = friend_rows(rows, 512);
+    {
+        char title[64];
+        static const char *const names[] = {"ONLINE", "ALL FRIENDS", "PENDING", "BLOCKED"};
+        wsprintfA(title, "%s \xE2\x80\x94 %d", names[g_ui.friend_tab], n);
+        text(g_ui.f_cat, C_MUTED, rect(x0 + S(30), y, w - S(60), S(20)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    y += S(28);
+    if (!n) {
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, w, S(24)),
+             g_ui.friend_tab == TAB_ONLINE    ? "No one's around to play with Wumpus."
+             : g_ui.friend_tab == TAB_PENDING ? "There are no pending friend requests."
+             : g_ui.friend_tab == TAB_BLOCKED ? "You can't unblock the Wumpus."
+                                              : "Wumpus is waiting on friends.",
+             DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    r_clip(x0, y, w, rc.bottom - y);
+    y -= g_ui.friend_scroll;
+    for (int k = 0; k < n; k++, y += S(FR_ROW)) {
+        const relation_t *r = &g_ui.rels[rows[k]];
+        r_image_t *img;
+        int acts[2], na, st = user_status(r->id);
+        const presence_t *pr = presence_find(r->id);
+        char sub[160];
+        if (!r_visible(y, S(FR_ROW)))
+            continue;
+        fill(x0 + S(30), y, w - S(60), 1, C_LINE);
+        if (g_ui.friend_hover == k)
+            r_round(x0 + S(20), y + S(1), w - S(40), S(FR_ROW) - S(2), S(8), ARGB(C_HOVER));
+        img = user_avatar(r->id, r->avatar);
+        if (img)
+            r_image(img, x0 + S(30), y + S(15), S(32), S(32), S(16));
+        else
+            r_circle(x0 + S(30), y + S(15), S(32), ARGB(C_ITEM));
+        if (r->type == REL_FRIEND)
+            paint_status(x0 + S(30), y + S(15), S(32), st == ML_UNKNOWN ? ML_OFFLINE : st,
+                         g_ui.friend_hover == k ? ARGB(C_HOVER) : ARGB(C_MAIN));
+        text(g_ui.f_h, C_INK, rect(x0 + S(74), y + S(10), w - S(260), S(22)), r->name.data ? r->name.data : "",
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (r->type == REL_INCOMING)
+            lstrcpyA(sub, "Incoming Friend Request");
+        else if (r->type == REL_OUTGOING)
+            lstrcpyA(sub, "Outgoing Friend Request");
+        else if (r->type == REL_BLOCKED)
+            lstrcpyA(sub, "Blocked");
+        else if (pr && pr->activity.len && st != ML_OFFLINE)
+            lstrcpynA(sub, pr->activity.data, sizeof sub);
+        else
+            lstrcpyA(sub, st == ML_ONLINE ? "Online" : st == ML_IDLE ? "Idle" : st == ML_DND ? "Do Not Disturb" : "Offline");
+        text(g_ui.f_small, C_MUTED, rect(x0 + S(74), y + S(32), w - S(260), S(18)), sub, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        na = row_actions(r, acts);
+        for (int a = 0; a < na; a++) {
+            int bx = x0 + w - S(30) - S(36) - a * S(44), by = y + S(13);
+            static const wchar_t *const icons[] = {L"\xE8BD", L"\xE73E", L"\xE711", L"\xE711", L"\xE711"};
+            int hot = g_ui.friend_hover == k && g_ui.friend_act == a;
+            r_circle(bx, by, S(36), hot ? 0xFF2A2A2A : 0xFF1B1B1B);
+            text_w(g_ui.f_icon, acts[a] == ACT_ACCEPT && hot ? C_GREEN : (acts[a] != ACT_MESSAGE && hot) ? C_AMBER : C_MUTED,
+                   rect(bx, by, S(36), S(36)), icons[acts[a]], -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+    r_unclip();
+}
+
+/* Row and action under (x, y) in the friends view; tabs report -10 - tab. */
+static int friends_hit(int x, int y, int *act)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0, rows[512], n, top;
+
+    *act = -1;
+    if (!friends_view())
+        return -1;
+    if (y < S(HEADER_H)) {
+        for (int t = 0; t < TAB_COUNT; t++)
+            if (x >= g_ui.tab_x[t] && x < g_ui.tab_x[t] + g_ui.tab_w[t] && y >= S(10) && y < S(38))
+                return -10 - t;
+        return -1;
+    }
+    if (g_ui.friend_tab == TAB_ADD) {
+        int by = S(HEADER_H) + S(16) + S(74);
+        if (x >= x0 + w - S(30) - S(170) && x < x0 + w - S(40) && y >= by && y < by + S(32))
+            return -20;
+        return -1;
+    }
+    GetClientRect(g_ui.wnd, &rc);
+    n = friend_rows(rows, 512);
+    top = S(HEADER_H) + S(44) - g_ui.friend_scroll;
+    if (y < S(HEADER_H) + S(44))
+        return -1;
+    for (int k = 0; k < n; k++) {
+        int ry = top + k * S(FR_ROW), acts[2], na;
+        if (y < ry || y >= ry + S(FR_ROW) || x < x0 + S(20) || x >= x0 + w - S(20))
+            continue;
+        na = row_actions(&g_ui.rels[rows[k]], acts);
+        for (int a = 0; a < na; a++) {
+            int bx = x0 + w - S(30) - S(36) - a * S(44);
+            if (x >= bx && x < bx + S(36) && y >= ry + S(13) && y < ry + S(49))
+                *act = a;
+        }
+        return k;
+    }
+    return -1;
+}
+
+static void friends_click(int x, int y)
+{
+    int act, k = friends_hit(x, y, &act), rows[512];
+
+    if (k <= -10 && k >= -10 - TAB_ADD) {
+        g_ui.friend_tab = -10 - k;
+        g_ui.friend_scroll = 0;
+        place_friend_input();
+        redraw();
+        return;
+    }
+    if (k == -20) {
+        wchar_t w[64];
+        sb_t name = {0};
+        GetWindowTextW(g_ui.friend_edit, w, 64);
+        wide_to_utf8(w, (size_t)lstrlenW(w), &name);
+        if (name.len)
+            app_add_friend(name.data);
+        sb_free(&name);
+        return;
+    }
+    if (k < 0 || act < 0)
+        return;
+    friend_rows(rows, 512);
+    {
+        relation_t *r = &g_ui.rels[rows[k]];
+        int acts[2];
+        row_actions(r, acts);
+        switch (acts[act]) {
+        case ACT_MESSAGE: {
+            int dm = dm_with(r->id);
+            if (dm >= 0) {
+                go_to_channel(dm);
+            } else {
+                lstrcpynA(g_ui.pending_dm, r->id, sizeof g_ui.pending_dm);
+                app_open_dm(r->id, "");
+            }
+            break;
+        }
+        case ACT_ACCEPT:
+            app_relationship(r->id, "PUT");
+            break;
+        case ACT_IGNORE:
+        case ACT_UNBLOCK:
+        case ACT_REMOVE:
+            if (acts[act] == ACT_REMOVE &&
+                MessageBoxW(g_ui.wnd, L"Remove this friend?", L"Remove Friend", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+                break;
+            app_relationship(r->id, "DELETE");
+            break;
+        }
+    }
+}
+
+/* The username box of the Add Friend tab is a real EDIT control. */
+static void place_friend_input(void)
+{
+    int show = friends_view() && g_ui.friend_tab == TAB_ADD;
+    int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0, y = S(HEADER_H) + S(16) + S(64);
+
+    if (show && !g_ui.friend_edit) {
+        HFONT font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
+        g_ui.friend_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.wnd,
+                                           NULL, NULL, NULL);
+        SendMessageW(g_ui.friend_edit, WM_SETFONT, (WPARAM)font, FALSE);
+        SendMessageW(g_ui.friend_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"You can add friends with their Discord username.");
+        SendMessageW(g_ui.friend_edit, EM_LIMITTEXT, 32, 0);
+    }
+    if (g_ui.friend_edit) {
+        if (show)
+            MoveWindow(g_ui.friend_edit, x0 + S(46), y + S(16), w - S(46) - S(30) - S(190), S(22), TRUE);
+        ShowWindow(g_ui.friend_edit, show ? SW_SHOWNA : SW_HIDE);
+    }
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -5664,6 +6112,15 @@ static void update_hover(int x, int y)
         }
         link = link || th >= 0 || att;
     }
+    if (friends_view()) {
+        int act, fh = friends_hit(x, y, &act);
+        if (fh != g_ui.friend_hover || act != g_ui.friend_act) {
+            g_ui.friend_hover = fh;
+            g_ui.friend_act = act;
+            redraw();
+        }
+        link = link || act >= 0 || fh <= -10;
+    }
     if (g_ui.confirm) {
         int h = confirm_hit(x, y);
         if (h != g_ui.confirm_hover) {
@@ -5726,6 +6183,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         clamp_scroll();
         clamp_msg_scroll();
         place_composer();
+        place_friend_input();
         pop_place();
         redraw();
         return 0;
@@ -5808,6 +6266,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (click_bar(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
+            if (friends_view() && GET_X_LPARAM(lp) >= S(RAIL_W + SIDE_W)) {
+                friends_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                return 0;
+            }
             {
                 int ti = tray_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 if (ti >= 0) {
@@ -5864,7 +6326,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.view != VIEW_APP)
             return 0;
         pop_close();
-        if (members_shown() && pt.x >= main_right()) {
+        if (friends_view() && pt.x >= S(RAIL_W + SIDE_W)) {
+            g_ui.friend_scroll += delta;
+            if (g_ui.friend_scroll < 0)
+                g_ui.friend_scroll = 0;
+        } else if (members_shown() && pt.x >= main_right()) {
             g_ui.ml_scroll += delta;
             ml_clamp();
             ml_request_visible();
@@ -5927,7 +6393,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_TYPING) {
+        if (msg >= UI_QR && msg <= UI_FRIEND_RESULT) {
             on_worker(msg, wp, lp);
             return 0;
         }
