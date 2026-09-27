@@ -49,6 +49,7 @@ typedef struct {
     sb_t text;
     sb_t content;    /* raw content as sent, for editing */
     sb_t reply;      /* "name: first line" of the message replied to, or empty */
+    char reply_id[24];
     int system;      /* join notices and other non-user messages */
     int deleted;
     int edited;

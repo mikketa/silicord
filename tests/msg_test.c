@@ -50,7 +50,8 @@ static void test_author_and_reply(void)
     msg_free(&m);
 
     check(parse("{\"id\":\"2\",\"type\":19,\"content\":\"yes\",\"referenced_message\":"
-                "{\"author\":{\"username\":\"ann\"},\"content\":\"first line\\nsecond\"}}", &m) &&
+                "{\"author\":{\"username\":\"ann\"},\"content\":\"first line\\nsecond\"},"
+                "\"message_reference\":{\"message_id\":\"1\"}}", &m) && lstrcmpA(m.reply_id, "1") == 0 &&
           str_eq(&m.reply, "ann: first line") && str_eq(&m.text, "yes"),
           "reply keeps the first line of the original");
     msg_free(&m);

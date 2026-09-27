@@ -419,6 +419,8 @@ int msg_parse(json_t obj, msg_t *out)
         sb_add(&out->text, "sent a system message.");
     }
     parse_reply(obj, &out->reply);
+    if (json_get(obj, "message_reference", &v) && json_get(v, "message_id", &name))
+        json_raw(name, out->reply_id, sizeof out->reply_id);
     return 1;
 }
 
