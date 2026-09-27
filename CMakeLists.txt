@@ -36,6 +36,7 @@ add_executable(silicord
   src/main.c
   src/console.c
   src/cred.c
+  src/gfx.c
   src/gw.c
   src/http.c
   src/ra.c
@@ -44,7 +45,7 @@ add_executable(silicord
 )
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS /MANIFEST:NO)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 dwmapi advapi32 bcrypt winhttp)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 gdiplus shlwapi dwmapi advapi32 bcrypt winhttp)
 
 enable_testing()
 function(silicord_test name)

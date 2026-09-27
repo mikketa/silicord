@@ -4,6 +4,9 @@
 
 #pragma function(memset, memcpy, memmove)
 
+/* Tells the linker floating point is used; normally defined by the CRT. */
+int _fltused = 0;
+
 void *memset(void *dst, int c, size_t n)
 {
     __stosb((unsigned char *)dst, (unsigned char)c, n);
