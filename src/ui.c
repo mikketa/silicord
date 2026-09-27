@@ -177,6 +177,8 @@ typedef struct {
     int msgs_loading, msgs_older_loading, msgs_has_more, msgs_status;
     int msg_scroll;            /* distance from the bottom, in pixels */
     char new_after[24];        /* messages after this one were unread when the channel opened */
+    msg_batch_t *pins;         /* pinned messages panel, NULL when closed */
+    int pins_open, pins_scroll, pins_content;
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
     sb_t send_error;
@@ -1054,6 +1056,17 @@ static void paint_channel_row(unsigned i, int y)
         }
         return;
     }
+    if (model_is_thread(c->type)) {
+        /* Threads hang under their channel with a curved line, like Discord. */
+        int unread = channel_unread(i);
+        fill(x + S(18), y - S(6), S(1) > 1 ? S(1) : 1, S(ROW_H) / 2 + S(6), C_LINE);
+        fill(x + S(18), y + S(ROW_H) / 2, S(12), S(1) > 1 ? S(1) : 1, C_LINE);
+        if (sel || hov)
+            r_round(x + S(34), y + S(1), w - S(34), S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED, rect(x + S(42), y, w - S(48), S(ROW_H)),
+             name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
     if (sel || hov)
         r_round(x, y + S(1), w, S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
     if (c->type == CH_VOICE || c->type == CH_STAGE)
@@ -1173,6 +1186,9 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static int pins_button_x(void);
+static void paint_pins(void);
+static void pins_close(void);
 static int divider_h(const msg_t *m);
 static const char *find_str(const char *hay, const char *needle);
 static void paint_new_line(int x0, int y, int w);
@@ -1214,7 +1230,8 @@ static int is_voice_type(int type)
 
 static int open_is_text(void)
 {
-    return g_ui.model && g_ui.channel >= 0 && !is_voice_type(chan(g_ui.channel)->type);
+    return g_ui.model && g_ui.channel >= 0 && !is_voice_type(chan(g_ui.channel)->type) &&
+           chan(g_ui.channel)->type != CH_FORUM && chan(g_ui.channel)->type != CH_MEDIA;
 }
 
 /* Local SYSTEMTIME of a snowflake. */
@@ -2122,6 +2139,14 @@ static void apply_reaction(msg_t *m, const msg_reaction_t *r, int delta, int min
 
 static void on_batch(msg_batch_t *b)
 {
+    if (b->kind == BATCH_PINS) {
+        if (g_ui.pins_open && lstrcmpA(b->channel_id, g_ui.msgs_channel) == 0 && !g_ui.pins) {
+            g_ui.pins = b;
+            return;
+        }
+        msg_batch_free(b);
+        return;
+    }
     if (lstrcmpA(b->channel_id, g_ui.msgs_channel) != 0) {
         msg_batch_free(b);
         return;
@@ -2453,8 +2478,19 @@ static void paint_main(RECT rc)
         else
             text(g_ui.f_title, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), is_dm_type(c->type) ? "@" : "#",
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, w - S(62), S(HEADER_H)), name,
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        {
+            int nw = text_width(g_ui.f_h, name), right = x0 + w - S(96), tx = x0 + S(46) + nw + S(16);
+            text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, right - x0 - S(46), S(HEADER_H)), name,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (c->topic && tx + S(40) < right) {
+                fill(tx - S(8), S(16), 1, S(16), C_LINE);
+                text(g_ui.f_small, C_MUTED, rect(tx + S(8), 0, right - tx - S(8), S(HEADER_H)), model_str(g_ui.model, c->topic),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            if (!voice)
+                text_w(g_ui.f_icon, g_ui.pins_open ? C_INK : C_MUTED, rect(pins_button_x(), 0, S(32), S(HEADER_H)),
+                       L"\xE718", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
 
         if (voice) {
             paint_welcome(x0 + S(8), rc.bottom - S(24) - S(WELCOME_H), w, name, 1);
@@ -2463,6 +2499,7 @@ static void paint_main(RECT rc)
         paint_messages(rc, name);
         paint_toolbar();
         paint_autocomplete();
+        paint_pins();
         if (g_ui.guild >= 0)
             text_w(g_ui.f_icon, g_ui.show_members ? C_INK : C_MUTED, rect(x0 + w - S(48), 0, S(32), S(HEADER_H)), L"\xE716",
                    -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2845,6 +2882,7 @@ static void open_channel(int index)
     pop_close();
     g_ui.channel = index;
     g_ui.friend_hover = -1;
+    pins_close();
     picker_close();
     uploads_clear();
     g_ui.ac_kind = AC_NONE;
@@ -6072,6 +6110,84 @@ static void place_friend_input(void)
     }
 }
 
+/* ---- Pinned messages ---- */
+
+#define PINS_W 440
+
+static int pins_button_x(void)
+{
+    return main_right() - (g_ui.guild >= 0 ? S(88) : S(48));
+}
+
+static void pins_close(void)
+{
+    msg_batch_free(g_ui.pins);
+    g_ui.pins = NULL;
+    g_ui.pins_open = 0;
+    g_ui.pins_scroll = 0;
+}
+
+static RECT pins_rect(void)
+{
+    RECT rc;
+    int h;
+
+    GetClientRect(g_ui.wnd, &rc);
+    h = rc.bottom * 7 / 10;
+    return rect(main_right() - S(PINS_W) - S(16), S(HEADER_H) + S(4), S(PINS_W), h);
+}
+
+static void paint_pins(void)
+{
+    RECT r;
+    int y;
+
+    if (!g_ui.pins_open)
+        return;
+    r = pins_rect();
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    text(g_ui.f_h, C_INK, rect(r.left + S(16), r.top, S(300), S(48)), "Pinned Messages", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    fill(r.left + S(1), r.top + S(48), r.right - r.left - S(2), 1, C_LINE);
+    if (!g_ui.pins) {
+        text(g_ui.f_body, C_MUTED, rect(r.left, r.top + S(60), r.right - r.left, S(24)), "Loading\xE2\x80\xA6", DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    if (!g_ui.pins->n) {
+        text(g_ui.f_body, C_MUTED, rect(r.left, r.top + S(80), r.right - r.left, S(24)),
+             g_ui.pins->status ? "Could not load the pins." : "This channel doesn't have any pinned messages... yet.",
+             DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    r_clip(r.left, r.top + S(49), r.right - r.left, r.bottom - r.top - S(50));
+    y = r.top + S(56) - g_ui.pins_scroll;
+    for (int k = g_ui.pins->n; k-- > 0;) { /* newest first */
+        msg_t *m = &g_ui.pins->msgs[k];
+        int tw = r.right - r.left - S(76), th;
+        wchar_t *body = utf8_to_wide(m->text.data ? m->text.data : "", m->text.len), when[64];
+        r_image_t *img = user_avatar(m->author_id, m->avatar);
+        th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
+        if (th > S(88))
+            th = S(88);
+        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + S(12), S(6), 0xFF181818);
+        if (img)
+            r_image(img, r.left + S(16), y + S(10), S(32), S(32), S(16));
+        text(g_ui.f_h, C_INK, rect(r.left + S(60), y + S(8), tw, S(20)), m->author.data ? m->author.data : "",
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        format_time(m->id, when, ARRAYSIZE(when));
+        text_w(g_ui.f_small, C_FAINT, rect(r.left + S(60) + text_width(g_ui.f_h, m->author.data ? m->author.data : "") + S(8),
+                                          y + S(10), S(200), S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
+        if (th)
+            r_text(g_ui.f_body, ARGB(C_INK), r.left + S(60), y + S(30), tw, th, body, -1, R_LEFT | R_WRAP | R_ELLIPSIS);
+        else if (m->nfiles || m->nembeds)
+            text(g_ui.f_small, C_MUTED, rect(r.left + S(60), y + S(30), tw, S(18)), "Attachment", DT_LEFT | DT_SINGLELINE);
+        mem_free(body);
+        y += S(40) + (th ? th : S(18)) + S(20);
+    }
+    g_ui.pins_content = y + g_ui.pins_scroll - (r.top + S(56));
+    r_unclip();
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -6341,6 +6457,27 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
             {
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                if (open_is_text() && y < S(HEADER_H) && x >= pins_button_x() && x < pins_button_x() + S(32)) {
+                    if (g_ui.pins_open) {
+                        pins_close();
+                    } else {
+                        g_ui.pins_open = 1;
+                        app_fetch_pins(g_ui.msgs_channel);
+                    }
+                    redraw();
+                    return 0;
+                }
+                if (g_ui.pins_open) {
+                    RECT pr = pins_rect();
+                    if (!(x >= pr.left && x < pr.right && y >= pr.top && y < pr.bottom)) {
+                        pins_close();
+                        redraw();
+                    }
+                    return 0;
+                }
+            }
+            {
                 int ai = ac_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 if (ai >= 0) {
                     ac_accept(ai);
@@ -6410,6 +6547,19 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.view != VIEW_APP)
             return 0;
         pop_close();
+        if (g_ui.pins_open) {
+            RECT pr = pins_rect();
+            if (pt.x >= pr.left && pt.x < pr.right && pt.y >= pr.top && pt.y < pr.bottom) {
+                int max = g_ui.pins_content - (pr.bottom - pr.top - S(56));
+                g_ui.pins_scroll += delta;
+                if (g_ui.pins_scroll > max)
+                    g_ui.pins_scroll = max;
+                if (g_ui.pins_scroll < 0)
+                    g_ui.pins_scroll = 0;
+                redraw();
+                return 0;
+            }
+        }
         if (friends_view() && pt.x >= S(RAIL_W + SIDE_W)) {
             g_ui.friend_scroll += delta;
             if (g_ui.friend_scroll < 0)
