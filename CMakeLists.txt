@@ -26,6 +26,8 @@ endfunction()
 add_library(silicord_core STATIC
   src/b64.c
   src/crypto.c
+  src/emoji.c
+  src/emoji_data.c
   src/json.c
   src/md.c
   src/mem.c
@@ -84,6 +86,9 @@ add_test(NAME md COMMAND md_test)
 
 silicord_test(profile_test)
 add_test(NAME profile COMMAND profile_test)
+
+silicord_test(emoji_test)
+add_test(NAME emoji COMMAND emoji_test)
 
 silicord_test(memberlist_test)
 add_test(NAME memberlist COMMAND memberlist_test)
