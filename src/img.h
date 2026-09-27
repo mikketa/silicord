@@ -11,6 +11,8 @@
 void img_init(HWND wnd, UINT msg);
 /* Queues a download; the image is decoded to at most max_px on its longest side. */
 void img_request(const char *key, const char *cdn_path, int max_px);
+/* Same, ahead of everything queued: for what the user is looking at (message images). */
+void img_request_first(const char *key, const char *cdn_path, int max_px);
 /*
  * Decodes an image from the disk cache right away (NULL if it is not there).
  * Used on the UI thread so images seen before appear in the same frame.

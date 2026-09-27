@@ -266,7 +266,7 @@ r_image_t *img_cached(const char *cdn_path, int max_px)
     return img;
 }
 
-void img_request(const char *key, const char *cdn_path, int max_px)
+static void queue(const char *key, const char *cdn_path, int max_px, int first)
 {
     job_t *j = mem_alloc(sizeof *j);
 
@@ -274,13 +274,30 @@ void img_request(const char *key, const char *cdn_path, int max_px)
     sb_add(&j->path, cdn_path);
     j->max_px = max_px;
     EnterCriticalSection(&g_lock);
-    if (g_tail)
-        g_tail->next = j;
-    else
+    if (first) {
+        j->next = g_head;
         g_head = j;
-    g_tail = j;
+        if (!g_tail)
+            g_tail = j;
+    } else {
+        if (g_tail)
+            g_tail->next = j;
+        else
+            g_head = j;
+        g_tail = j;
+    }
     SetEvent(g_wake);
     LeaveCriticalSection(&g_lock);
+}
+
+void img_request(const char *key, const char *cdn_path, int max_px)
+{
+    queue(key, cdn_path, max_px, 0);
+}
+
+void img_request_first(const char *key, const char *cdn_path, int max_px)
+{
+    queue(key, cdn_path, max_px, 1);
 }
 
 void img_clear(void)
