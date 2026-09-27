@@ -14,7 +14,8 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Token storage in the Windows Credential Manager (`CredWriteW` / `CredReadW`)
 - [x] HTTPS REST requests with WinHTTP (`GET /users/@me`)
 - [x] Allocation-free JSON reader (values are slices of the source buffer)
-- [ ] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready
+- [ ] QR code login through the mobile app, passkeys, 2FA and SMS handled on the phone (implemented, waiting for a first real scan)
+- [ ] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready (implemented, waiting for a first real session)
 - [ ] Automatic resume and reconnect (today the client exits on op 7 / op 9 or a missed heartbeat ack)
 
 ## 2. Text client (console)
@@ -30,9 +31,12 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [ ] Local cache for channels and users
 - [ ] Metrics: binary size, RAM, idle CPU, bytes received per hour
 
-## 4. Win32 UI
+## 4. Win32 UI 🚧
 
-- [ ] Native window: guild list, channel list, message view
+- [x] Native, custom-drawn window with dark title bar and per-monitor DPI
+- [x] Login screen: QR code and token
+- [x] Account header and server list
+- [ ] Channel list and message view
 - [ ] Text rendering with GDI / DirectWrite
 - [ ] Mentions, replies, edit and delete
 - [ ] Windows notifications

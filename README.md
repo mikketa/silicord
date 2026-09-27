@@ -7,7 +7,7 @@
 
 A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP and a few kilobytes.
 
-> **Status: early.** Silicord logs in and holds a gateway session, but does not show messages yet. See the [roadmap](docs/ROADMAP.md).
+> **Status: early.** Silicord logs in (QR code or token) and lists your servers. Messages come next. See the [roadmap](docs/ROADMAP.md).
 
 ## Why
 
@@ -16,6 +16,8 @@ The official client ships a full Chromium: several processes, hundreds of MB of 
 - a single `.exe` of a few dozen KB, nothing to install
 - ~0% CPU when idle (the process sleeps until the next network event)
 - a few MB of RAM
+
+Measured on the login screen: 54 KB executable, 0.01% CPU and 3.3 MB of private memory at idle.
 - a codebase small enough to read end to end
 
 ## ⚠️ Disclaimer
@@ -28,11 +30,14 @@ Silicord is not affiliated with or endorsed by Discord Inc.
 
 ## Usage
 
-```bat
-silicord login    :: paste your token, it is checked then saved
-silicord          :: connect to the gateway (Ctrl+C to quit)
-silicord logout   :: remove the saved token
-```
+Run `silicord.exe`, then either:
+
+- **scan the QR code** with the Discord mobile app (Settings › Scan QR Code) and confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works;
+- or choose **Use a token instead** and paste a token.
+
+The token is checked with Discord, then stored in the Windows Credential Manager. **Log out** removes it.
+
+`silicord --debug` also opens a console with a connection log.
 
 ## Building
 
