@@ -41,8 +41,13 @@ target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSO
 target_link_libraries(silicord PRIVATE silicord_core kernel32 advapi32 winhttp)
 
 enable_testing()
-add_executable(json_test tests/json_test.c)
-silicord_no_crt(json_test)
-target_link_options(json_test PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
-target_link_libraries(json_test PRIVATE silicord_core kernel32)
+function(silicord_test name)
+  add_executable(${name} tests/${name}.c)
+  silicord_no_crt(${name})
+  target_include_directories(${name} PRIVATE tests)
+  target_link_options(${name} PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
+  target_link_libraries(${name} PRIVATE silicord_core kernel32 ${ARGN})
+endfunction()
+
+silicord_test(json_test)
 add_test(NAME json COMMAND json_test)

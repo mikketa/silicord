@@ -1,41 +1,11 @@
 /* JSON reader tests. Same no-CRT setup as the client; exit code = number of failures. */
 #include <windows.h>
+#include "test.h"
 #include "json.h"
-#include "sb.h"
-#include "sc_asm.h"
-
-static int g_failed;
-
-static void out(const char *s)
-{
-    DWORD w;
-    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), s, (DWORD)sc_strlen(s), &w, NULL);
-}
-
-static void check(int cond, const char *name)
-{
-    out(cond ? "ok   " : "FAIL ");
-    out(name);
-    out("\r\n");
-    if (!cond)
-        g_failed++;
-}
 
 static int parse(const char *s, json_t *v)
 {
     return json_parse(s, sc_strlen(s), v);
-}
-
-static int bytes_eq(const sb_t *sb, const char *s)
-{
-    size_t n = sc_strlen(s);
-
-    if (sb->len != n)
-        return 0;
-    for (size_t i = 0; i < n; i++)
-        if (sb->data[i] != s[i])
-            return 0;
-    return 1;
 }
 
 static void test_parse(void)
@@ -97,23 +67,23 @@ static void test_str(void)
     sb_t s = {0};
 
     parse("\"line\\nbreak \\\"quoted\\\" \\\\ \\/\"", &v);
-    check(json_str(v, &s) && bytes_eq(&s, "line\nbreak \"quoted\" \\ /"), "simple escapes");
+    check(json_str(v, &s) && str_eq(&s, "line\nbreak \"quoted\" \\ /"), "simple escapes");
     sb_clear(&s);
 
     parse("\"caf\\u00e9\"", &v);
-    check(json_str(v, &s) && bytes_eq(&s, "caf\xC3\xA9"), "\\u escape to utf-8");
+    check(json_str(v, &s) && str_eq(&s, "caf\xC3\xA9"), "\\u escape to utf-8");
     sb_clear(&s);
 
     parse("\"\\ud83d\\ude00\"", &v);
-    check(json_str(v, &s) && bytes_eq(&s, "\xF0\x9F\x98\x80"), "surrogate pair to utf-8");
+    check(json_str(v, &s) && str_eq(&s, "\xF0\x9F\x98\x80"), "surrogate pair to utf-8");
     sb_clear(&s);
 
     parse("\"d\xC3\xA9j\xC3\xA0\"", &v);
-    check(json_str(v, &s) && bytes_eq(&s, "d\xC3\xA9j\xC3\xA0"), "raw utf-8 passthrough");
+    check(json_str(v, &s) && str_eq(&s, "d\xC3\xA9j\xC3\xA0"), "raw utf-8 passthrough");
     sb_free(&s);
 
     sb_json_str(&s, "a\"b\\c\n\x01", 7);
-    check(bytes_eq(&s, "\"a\\\"b\\\\c\\n\\u0001\""), "encode string");
+    check(str_eq(&s, "\"a\\\"b\\\\c\\n\\u0001\""), "encode string");
     sb_free(&s);
 }
 
@@ -123,6 +93,5 @@ void entry(void)
     test_get();
     test_iter();
     test_str();
-    out(g_failed ? "\r\nsome tests failed\r\n" : "\r\nall tests passed\r\n");
-    ExitProcess((UINT)g_failed);
+    finish();
 }
