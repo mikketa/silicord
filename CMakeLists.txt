@@ -33,10 +33,11 @@ add_executable(silicord
   src/main.c
   src/console.c
   src/cred.c
+  src/http.c
 )
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 advapi32)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 advapi32 winhttp)
 
 enable_testing()
 add_executable(json_test tests/json_test.c)

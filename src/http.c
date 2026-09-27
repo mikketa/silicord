@@ -1,0 +1,99 @@
+#include "http.h"
+#include "mem.h"
+#include "utf.h"
+#include "sc_asm.h"
+
+#define WIDEN2(x) L##x
+#define WIDEN(x) WIDEN2(x)
+#define USER_AGENT L"Silicord/" WIDEN(SILICORD_VERSION) L" (+https://github.com/mikketa/silicord)"
+
+static HINTERNET g_session;
+static HINTERNET g_api;
+
+int http_init(void)
+{
+    DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_ALL;
+
+    g_session = WinHttpOpen(USER_AGENT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!g_session)
+        return 0;
+    WinHttpSetOption(g_session, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof decompress);
+    g_api = WinHttpConnect(g_session, API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    return g_api != NULL;
+}
+
+HINTERNET http_session(void)
+{
+    return g_session;
+}
+
+static int read_body(HINTERNET req, sb_t *out)
+{
+    for (;;) {
+        DWORD avail = 0, got = 0;
+
+        if (!WinHttpQueryDataAvailable(req, &avail))
+            return 0;
+        if (!avail)
+            return 1;
+        sb_reserve(out, avail);
+        if (!WinHttpReadData(req, out->data + out->len, avail, &got))
+            return 0;
+        out->len += got;
+        out->data[out->len] = 0;
+    }
+}
+
+int http_request(const char *method, const char *path, const char *token,
+                 const char *body, size_t body_len, http_resp_t *resp)
+{
+    sb_t url = {0}, hdr = {0};
+    wchar_t *wmethod, *wurl, *whdr;
+    HINTERNET req;
+    DWORD size = sizeof resp->status;
+    DWORD err;
+    int ok = 0;
+
+    sb_add(&url, API_BASE);
+    sb_add(&url, path);
+    sb_add(&hdr, "Authorization: ");
+    sb_add(&hdr, token);
+    if (body)
+        sb_add(&hdr, "\r\nContent-Type: application/json");
+
+    wmethod = utf8_to_wide(method, sc_strlen(method));
+    wurl = utf8_to_wide(url.data, url.len);
+    whdr = utf8_to_wide(hdr.data, hdr.len);
+
+    resp->status = 0;
+    req = WinHttpOpenRequest(g_api, wmethod, wurl, NULL, WINHTTP_NO_REFERER,
+                             WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (req &&
+        WinHttpAddRequestHeaders(req, whdr, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD) &&
+        WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)body,
+                           (DWORD)body_len, (DWORD)body_len, 0) &&
+        WinHttpReceiveResponse(req, NULL) &&
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &resp->status, &size,
+                            WINHTTP_NO_HEADER_INDEX))
+        ok = read_body(req, &resp->body);
+    err = GetLastError();
+
+    if (req)
+        WinHttpCloseHandle(req);
+    SecureZeroMemory(whdr, (hdr.len + 1) * sizeof(wchar_t));
+    mem_free(whdr);
+    mem_free(wurl);
+    mem_free(wmethod);
+    sb_free(&hdr);
+    sb_free(&url);
+    SetLastError(err);
+    return ok;
+}
+
+void http_resp_free(http_resp_t *resp)
+{
+    sb_free(&resp->body);
+    resp->status = 0;
+}
