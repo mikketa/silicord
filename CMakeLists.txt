@@ -27,6 +27,7 @@ add_library(silicord_core STATIC
   src/b64.c
   src/crypto.c
   src/json.c
+  src/md.c
   src/mem.c
   src/model.c
   src/msg.c
