@@ -58,7 +58,7 @@ add_executable(silicord
 )
 silicord_no_crt(silicord)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp)
 
 enable_testing()
 function(silicord_test name)

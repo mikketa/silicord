@@ -7,6 +7,8 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <commdlg.h>
+#include <objbase.h>
 #include <psapi.h>
 #include "ui.h"
 #include "render.h"
@@ -93,6 +95,12 @@ typedef struct {
     int x, y, w, h;     /* in the picker, before scrolling */
 } pick_item_t;
 
+typedef struct {
+    sb_t path;          /* UTF-8 */
+    long long size;
+    r_image_t *thumb;
+} upload_t;
+
 enum { BAR_NONE, BAR_REPLY, BAR_EDIT };
 #define BAR_H 36
 
@@ -175,6 +183,10 @@ typedef struct {
     int npresences, cap_presences;
     int my_status;             /* ML_*, what we set */
 
+    /* Files to send with the next message. */
+    upload_t uploads[10];
+    int nuploads, upload_hover, hover_attach;
+
     /* Emoji picker. */
     HWND picker, picker_edit;
     WNDPROC picker_edit_proc;
@@ -228,7 +240,7 @@ typedef struct member {
 } member_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1,
-                    .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE};
+                    .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE, .upload_hover = -1};
 
 static void paint_status(int x, int y, int d, int status, unsigned bg);
 static void status_dot(int cx, int cy, int s, int status, unsigned bg);
@@ -1095,6 +1107,9 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static int tray_h(void);
+static void paint_tray(int x0, int w, int bottom);
+static void uploads_clear(void);
 static void picker_open(int mode, const char *msg_id, int right, int bottom);
 static void picker_close(void);
 static void picker_layout(void);
@@ -1188,7 +1203,7 @@ static RECT message_area(void)
     r.left = S(RAIL_W + SIDE_W);
     r.right = main_right();
     r.top = S(HEADER_H);
-    r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8) - (g_ui.bar ? S(BAR_H) : 0);
+    r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
     return r;
 }
 
@@ -2295,8 +2310,13 @@ static void paint_main(RECT rc)
         /* Composer frame; the edit control sits inside it. */
         {
             int cy = rc.bottom - S(24) - S(COMPOSER_H);
+            paint_tray(x0, w, cy - (g_ui.bar ? S(BAR_H) : 0));
             paint_bar(x0, w, cy);
             r_round(x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
+            /* Attach button, like Discord's "+" */
+            r_circle(x0 + S(28), cy + (S(COMPOSER_H) - S(24)) / 2, S(24), g_ui.hover_attach ? ARGB(C_INK) : ARGB(C_MUTED));
+            text(g_ui.f_h, C_PANEL, rect(x0 + S(28), cy + (S(COMPOSER_H) - S(24)) / 2 - S(1), S(24), S(24)), "+",
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             text_w(g_ui.f_icon_mid, g_ui.picker && g_ui.picker_mode == PICK_COMPOSER ? C_AMBER : C_MUTED,
                    rect(x0 + w - S(16) - S(44), cy, S(40), S(COMPOSER_H)), L"\xE76E", -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2648,7 +2668,7 @@ static void place_composer(void)
     if (show) {
         int cy = rc.bottom - S(24) - S(COMPOSER_H);
         int eh = S(22);
-        MoveWindow(g_ui.composer, x0 + S(32), cy + (S(COMPOSER_H) - eh) / 2, main_right() - x0 - S(64) - S(40), eh, TRUE);
+        MoveWindow(g_ui.composer, x0 + S(64), cy + (S(COMPOSER_H) - eh) / 2, main_right() - x0 - S(96) - S(40), eh, TRUE);
     }
     ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
 }
@@ -2662,6 +2682,7 @@ static void open_channel(int index)
     pop_close();
     g_ui.channel = index;
     picker_close();
+    uploads_clear();
     typing_clear();
     g_ui.bar = BAR_NONE;
     g_ui.confirm = 0;
@@ -5044,6 +5065,172 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     SetFocus(g_ui.picker_edit);
 }
 
+/* ---- Files waiting to be sent ---- */
+
+#define UPLOAD_MAX 10
+#define UPLOAD_LIMIT (10ll * 1024 * 1024) /* Discord's limit without Nitro */
+#define TRAY_H 132
+#define CARD 104
+
+static int tray_h(void)
+{
+    return g_ui.nuploads ? S(TRAY_H) : 0;
+}
+
+static void uploads_clear(void)
+{
+    for (int i = 0; i < g_ui.nuploads; i++) {
+        sb_free(&g_ui.uploads[i].path);
+        r_image_free(g_ui.uploads[i].thumb);
+    }
+    g_ui.nuploads = 0;
+}
+
+static void upload_remove(int i)
+{
+    sb_free(&g_ui.uploads[i].path);
+    r_image_free(g_ui.uploads[i].thumb);
+    for (int k = i; k < g_ui.nuploads - 1; k++)
+        g_ui.uploads[k] = g_ui.uploads[k + 1];
+    g_ui.nuploads--;
+}
+
+/* Queues a file to send with the next message. */
+static void upload_add(const wchar_t *path)
+{
+    HANDLE f;
+    LARGE_INTEGER size;
+    upload_t *u;
+
+    if (!open_is_text())
+        return;
+    if (g_ui.nuploads == UPLOAD_MAX) {
+        set_text(&g_ui.send_error, "You can send up to 10 files at a time");
+        return;
+    }
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return;
+    if (!GetFileSizeEx(f, &size) || size.QuadPart > UPLOAD_LIMIT) {
+        CloseHandle(f);
+        set_text(&g_ui.send_error, "Files can be up to 10 MB");
+        return;
+    }
+    u = &g_ui.uploads[g_ui.nuploads++];
+    *u = (upload_t){0};
+    wide_to_utf8(path, (size_t)lstrlenW(path), &u->path);
+    u->size = size.QuadPart;
+    /* A preview for pictures, decoded small. */
+    if (size.QuadPart < 8 * 1024 * 1024) {
+        sb_t data = {0};
+        DWORD got = 0;
+        sb_reserve(&data, (size_t)size.QuadPart);
+        if (ReadFile(f, data.data, (DWORD)size.QuadPart, &got, NULL))
+            u->thumb = r_image_decode(data.data, got, S(CARD));
+        sb_free(&data);
+    }
+    CloseHandle(f);
+    sb_clear(&g_ui.send_error);
+}
+
+static const char *upload_name(const upload_t *u)
+{
+    const char *name = u->path.data;
+
+    for (const char *p = u->path.data; *p; p++)
+        if (*p == '\\' || *p == '/')
+            name = p + 1;
+    return name;
+}
+
+static void paint_tray(int x0, int w, int bottom)
+{
+    int y = bottom - S(TRAY_H), x = x0 + S(28);
+
+    if (!g_ui.nuploads)
+        return;
+    r_round(x0 + S(16), y, w - S(32), S(TRAY_H) + S(10), S(10), 0xFF181818);
+    for (int i = 0; i < g_ui.nuploads; i++, x += S(CARD) + S(12)) {
+        const upload_t *u = &g_ui.uploads[i];
+        int cy = y + S(12);
+        r_round(x, cy, S(CARD), S(CARD), S(8), 0xFF222222);
+        if (u->thumb)
+            r_image_cover(u->thumb, x + S(8), cy + S(8), S(CARD) - S(16), S(CARD) - S(40), S(6));
+        else
+            text_w(g_ui.f_icon_big, C_MUTED, rect(x, cy + S(8), S(CARD), S(CARD) - S(40)), L"\xE8A5", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_small, C_INK, rect(x + S(8), cy + S(CARD) - S(28), S(CARD) - S(16), S(20)), upload_name(u),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        /* remove button */
+        r_circle(x + S(CARD) - S(22), cy - S(6), S(26), g_ui.upload_hover == i ? 0xFFC0363Au : 0xFF2A2A2A);
+        text_w(g_ui.f_icon, C_INK, rect(x + S(CARD) - S(22), cy - S(6), S(26), S(26)), L"\xE74D", -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/* Remove button of card i under (x, y). */
+static int tray_hit(int x, int y)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), top, cx;
+
+    if (!g_ui.nuploads)
+        return -1;
+    GetClientRect(g_ui.wnd, &rc);
+    top = rc.bottom - S(24) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - S(TRAY_H) + S(12);
+    cx = x0 + S(28);
+    for (int i = 0; i < g_ui.nuploads; i++, cx += S(CARD) + S(12))
+        if (x >= cx + S(CARD) - S(22) && x < cx + S(CARD) + S(4) && y >= top - S(6) && y < top + S(20))
+            return i;
+    return -1;
+}
+
+static void pick_files(void)
+{
+    enum { N = 8192 };
+    wchar_t *buf = mem_alloc(N * sizeof(wchar_t)); /* on the heap: no __chkstk without the CRT */
+    OPENFILENAMEW ofn = {sizeof ofn};
+
+    ofn.hwndOwner = g_ui.wnd;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = N;
+    ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetOpenFileNameW(&ofn)) {
+        mem_free(buf);
+        return;
+    }
+    /* One file: a full path. Several: the folder, then names, NUL-separated. */
+    if (!buf[lstrlenW(buf) + 1]) {
+        upload_add(buf);
+    } else {
+        wchar_t *path = mem_alloc(MAX_PATH * 4 * sizeof(wchar_t));
+        for (wchar_t *name = buf + lstrlenW(buf) + 1; *name; name += lstrlenW(name) + 1) {
+            wsprintfW(path, L"%s\\%s", buf, name);
+            upload_add(path);
+        }
+        mem_free(path);
+    }
+    mem_free(buf);
+    place_composer();
+    clamp_msg_scroll();
+    redraw();
+}
+
+static void on_drop(HDROP drop)
+{
+    UINT n = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
+    wchar_t *path = mem_alloc(MAX_PATH * 4 * sizeof(wchar_t));
+
+    for (UINT i = 0; i < n; i++)
+        if (DragQueryFileW(drop, i, path, MAX_PATH * 4))
+            upload_add(path);
+    mem_free(path);
+    DragFinish(drop);
+    place_composer();
+    clamp_msg_scroll();
+    redraw();
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -5053,7 +5240,7 @@ static void send_composer(void)
     sb_t text = {0};
     size_t a = 0, b;
 
-    if (n <= 0 || !open_is_text())
+    if ((n <= 0 && !g_ui.nuploads) || !open_is_text())
         return;
     w = mem_alloc(((size_t)n + 1) * sizeof(wchar_t));
     GetWindowTextW(g_ui.composer, w, n + 1);
@@ -5064,13 +5251,22 @@ static void send_composer(void)
         a++;
     while (b > a && (text.data[b - 1] == ' ' || text.data[b - 1] == '	'))
         b--;
-    if (b > a) {
+    if (b > a || g_ui.nuploads) {
         sb_t out = {0};
         text.data[b] = 0;
         /* :smile: and :server_emoji: become the real thing, as in Discord. */
         emoji_expand(text.data + a, b - a, &out, custom_emoji_markup, NULL);
         sb_clear(&g_ui.send_error);
-        if (g_ui.bar == BAR_EDIT)
+        if (g_ui.nuploads && g_ui.bar != BAR_EDIT) {
+            sb_t paths = {0};
+            for (int i = 0; i < g_ui.nuploads; i++)
+                sb_addn(&paths, g_ui.uploads[i].path.data, g_ui.uploads[i].path.len + 1);
+            app_send_files(g_ui.msgs_channel, out.data ? out.data : "", g_ui.bar == BAR_REPLY ? g_ui.bar_msg : NULL,
+                           g_ui.bar_mention, paths.data, g_ui.nuploads);
+            sb_free(&paths);
+            uploads_clear();
+            place_composer();
+        } else if (g_ui.bar == BAR_EDIT)
             app_edit_message(g_ui.msgs_channel, g_ui.bar_msg, out.data);
         else if (g_ui.bar == BAR_REPLY)
             app_send_reply(g_ui.msgs_channel, out.data, g_ui.bar_msg, g_ui.bar_mention);
@@ -5130,6 +5326,19 @@ static void update_hover(int x, int y)
         }
         link = link || mh >= 0;
     }
+    {
+        RECT crc;
+        int th = tray_hit(x, y), cy, att;
+        GetClientRect(g_ui.wnd, &crc);
+        cy = crc.bottom - S(24) - S(COMPOSER_H);
+        att = open_is_text() && x >= S(RAIL_W + SIDE_W) + S(24) && x < S(RAIL_W + SIDE_W) + S(56) && y >= cy && y < cy + S(COMPOSER_H);
+        if (th != g_ui.upload_hover || att != g_ui.hover_attach) {
+            g_ui.upload_hover = th;
+            g_ui.hover_attach = att;
+            redraw();
+        }
+        link = link || th >= 0 || att;
+    }
     if (g_ui.confirm) {
         int h = confirm_hit(x, y);
         if (h != g_ui.confirm_hover) {
@@ -5176,6 +5385,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_ui.composer, EM_LIMITTEXT, 2000, 0);
         make_fonts();
         img_init(wnd, UI_IMAGE);
+        DragAcceptFiles(wnd, TRUE);
+        return 0;
+    case WM_DROPFILES:
+        on_drop((HDROP)wp);
         return 0;
     case WM_SIZE:
         if (wp == SIZE_MINIMIZED) {
@@ -5262,6 +5475,21 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (click_bar(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
+            {
+                int ti = tray_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (ti >= 0) {
+                    upload_remove(ti);
+                    g_ui.upload_hover = -1;
+                    place_composer();
+                    clamp_msg_scroll();
+                    redraw();
+                    return 0;
+                }
+                if (g_ui.hover_attach) {
+                    pick_files();
+                    return 0;
+                }
+            }
             {
                 RECT crc;
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), cx0 = S(RAIL_W + SIDE_W), cw, cy;
@@ -5382,6 +5610,8 @@ HWND ui_create(HINSTANCE inst)
     COLORREF caption = GDI(C_RAIL);
     UINT dpi = GetDpiForSystem();
 
+    /* Single-threaded COM on the UI thread: the file dialog needs it (image decoding works either way). */
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     r_init();
     g_ui.icon_big = make_icon(32);
     g_ui.icon_small = make_icon(16);
