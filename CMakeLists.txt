@@ -53,3 +53,6 @@ endfunction()
 
 silicord_test(json_test)
 add_test(NAME json COMMAND json_test)
+
+silicord_test(crypto_test bcrypt crypt32)
+add_test(NAME crypto COMMAND crypto_test)
