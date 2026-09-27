@@ -6,7 +6,9 @@
 
 enum {
     CH_TEXT = 0,
+    CH_DM = 1,
     CH_VOICE = 2,
+    CH_GROUP_DM = 3,
     CH_CATEGORY = 4,
     CH_NEWS = 5,
     CH_STAGE = 13,
@@ -26,6 +28,9 @@ typedef struct {
     char id[24];
     unsigned name;
     int type;
+    /* Direct messages: the other user (or the group icon, with user_id empty). */
+    char user_id[24];
+    char avatar[40];
 } channel_t;
 
 typedef struct {
@@ -34,6 +39,8 @@ typedef struct {
     unsigned nguilds;
     channel_t *channels;
     unsigned nchannels;
+    unsigned dm_first;  /* direct messages, most recent first */
+    unsigned dm_count;
     char user_id[24];
     char user_avatar[40];
     unsigned user_name;

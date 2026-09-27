@@ -330,6 +330,139 @@ static int guild_rank(json_t d, const char *id)
     return -1;
 }
 
+/* ---- Direct messages ---- */
+
+typedef struct {
+    json_t json;
+    char last[24];
+} tmp_dm_t;
+
+/* Recipients come as full user objects, or as ids pointing into READY's "users". */
+static int next_recipient(json_t d, json_t ch, json_iter_t *it, int *by_id, json_t *user)
+{
+    json_t v, users, u, uid;
+    json_iter_t uit;
+
+    if (!*by_id) {
+        if (json_next(it, NULL, user))
+            return 1;
+        return 0;
+    }
+    while (json_next(it, NULL, &v)) {
+        char id[24];
+        json_raw(v, id, sizeof id);
+        if (!json_get(d, "users", &users))
+            return 0;
+        json_iter(users, &uit);
+        while (json_next(&uit, NULL, &u))
+            if (json_get(u, "id", &uid) && id_eq(uid, id)) {
+                *user = u;
+                return 1;
+            }
+    }
+    (void)ch;
+    return 0;
+}
+
+static void start_recipients(json_t ch, json_iter_t *it, int *by_id)
+{
+    json_t list;
+
+    *by_id = 0;
+    if (json_get(ch, "recipients", &list)) {
+        json_iter(list, it);
+    } else if (json_get(ch, "recipient_ids", &list)) {
+        *by_id = 1;
+        json_iter(list, it);
+    } else {
+        it->p = it->end = NULL;
+    }
+}
+
+static void add_user_name(model_t *m, json_t user)
+{
+    json_t v;
+
+    if ((json_get(user, "global_name", &v) && json_type(v) == JSON_STRING) || json_get(user, "username", &v))
+        json_str(v, &m->strings);
+}
+
+static void add_dm(model_t *m, unsigned *cap, json_t d, json_t ch)
+{
+    json_t v, user;
+    json_iter_t it;
+    int by_id, n = 0;
+    tmp_channel_t tmp = {0};
+    channel_t *out;
+
+    tmp.json = ch;
+    if (json_get(ch, "id", &v))
+        json_raw(v, tmp.id, sizeof tmp.id);
+    tmp.type = json_get(ch, "type", &v) ? (int)to_i64(v) : CH_DM;
+    if (tmp.type != CH_DM && tmp.type != CH_GROUP_DM)
+        return;
+    push_channel(m, cap, &tmp);
+    out = &m->channels[m->nchannels - 1];
+
+    if (tmp.type == CH_GROUP_DM && json_get(ch, "icon", &v))
+        json_raw(v, out->avatar, sizeof out->avatar);
+    if (json_get(ch, "name", &v) && json_type(v) == JSON_STRING && v.end - v.p > 2)
+        return; /* named group: push_channel stored the name */
+
+    /* Name after the recipients: "Ann" or "Ann, Bob, Carl". */
+    out->name = (unsigned)m->strings.len;
+    start_recipients(ch, &it, &by_id);
+    while (it.p && next_recipient(d, ch, &it, &by_id, &user)) {
+        if (n++)
+            sb_add(&m->strings, ", ");
+        add_user_name(m, user);
+        if (n == 1 && tmp.type == CH_DM) {
+            if (json_get(user, "id", &v))
+                json_raw(v, out->user_id, sizeof out->user_id);
+            if (json_get(user, "avatar", &v))
+                json_raw(v, out->avatar, sizeof out->avatar);
+        }
+    }
+    if (!n)
+        sb_add(&m->strings, "Unknown user");
+    sb_addn(&m->strings, "", 1);
+}
+
+static void add_dms(model_t *m, unsigned *cap, json_t d)
+{
+    json_t list, ch, v;
+    json_iter_t it;
+    unsigned total, n = 0;
+    tmp_dm_t *tmp;
+
+    m->dm_first = m->nchannels;
+    if (!json_get(d, "private_channels", &list))
+        return;
+    total = (unsigned)json_count(list);
+    tmp = mem_alloc((total + 1) * sizeof *tmp);
+    json_iter(list, &it);
+    while (n < total && json_next(&it, NULL, &ch)) {
+        tmp[n].json = ch;
+        if (json_get(ch, "last_message_id", &v))
+            json_raw(v, tmp[n].last, sizeof tmp[n].last);
+        n++;
+    }
+    /* Most recent conversation first. */
+    for (unsigned a = 1; a < n; a++) {
+        tmp_dm_t x = tmp[a];
+        unsigned b = a;
+        while (b > 0 && id_cmp(tmp[b - 1].last, x.last) < 0) {
+            tmp[b] = tmp[b - 1];
+            b--;
+        }
+        tmp[b] = x;
+    }
+    for (unsigned i = 0; i < n; i++)
+        add_dm(m, cap, d, tmp[i].json);
+    m->dm_count = m->nchannels - m->dm_first;
+    mem_free(tmp);
+}
+
 model_t *model_from_ready(json_t d)
 {
     model_t *m = mem_alloc(sizeof *m);
@@ -347,8 +480,10 @@ model_t *model_from_ready(json_t d)
         if ((json_get(user, "global_name", &v) && json_type(v) == JSON_STRING) || json_get(user, "username", &v))
             m->user_name = add_str(m, v);
     }
-    if (!json_get(d, "guilds", &guilds))
+    if (!json_get(d, "guilds", &guilds)) {
+        add_dms(m, &cap, d);
         return m;
+    }
 
     total = (unsigned)json_count(guilds);
     m->guilds = mem_alloc((total + 1) * sizeof *m->guilds);
@@ -387,6 +522,7 @@ model_t *model_from_ready(json_t d)
         rank[b] = r;
     }
     mem_free(rank);
+    add_dms(m, &cap, d);
     return m;
 }
 
