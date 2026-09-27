@@ -71,6 +71,8 @@ void app_open_channel(const char *channel_id);
 /* Loads the latest 50 messages, or the 50 before `before` if it is not NULL. */
 void app_fetch_messages(const char *channel_id, const char *before);
 void app_send_message(const char *channel_id, const char *text);
+/* Loads the channel's pinned messages; they come back as a BATCH_PINS batch. */
+void app_fetch_pins(const char *channel_id);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */
 void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention);
 void app_edit_message(const char *channel_id, const char *message_id, const char *text);

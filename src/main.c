@@ -291,6 +291,7 @@ static int is_structure_event(json_t t)
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
         "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE",
         "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
+        "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE",
     };
 
     for (int i = 0; i < (int)ARRAYSIZE(names); i++)
@@ -628,9 +629,11 @@ static DWORD WINAPI fetch_main(LPVOID arg)
     msg_batch_t *b = NULL;
     json_t root;
     char path[128];
-    int kind = j->before[0] ? BATCH_OLDER : BATCH_HISTORY;
+    int kind = j->flag ? BATCH_PINS : j->before[0] ? BATCH_OLDER : BATCH_HISTORY;
 
-    if (j->before[0])
+    if (j->flag)
+        wsprintfA(path, "/channels/%s/pins", j->channel);
+    else if (j->before[0])
         wsprintfA(path, "/channels/%s/messages?limit=50&before=%s", j->channel, j->before);
     else
         wsprintfA(path, "/channels/%s/messages?limit=50", j->channel);
@@ -1154,6 +1157,14 @@ void app_fetch_messages(const char *channel_id, const char *before)
 
     if (before)
         lstrcpynA(j->before, before, sizeof j->before);
+    CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
+}
+
+void app_fetch_pins(const char *channel_id)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    j->flag = 1;
     CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
 }
 

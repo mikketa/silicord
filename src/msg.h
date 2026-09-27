@@ -74,7 +74,7 @@ typedef struct {
     int mention_everyone;
 } msg_t;
 
-enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION };
+enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION, BATCH_PINS };
 
 typedef struct {
     int kind;
