@@ -57,10 +57,13 @@ int http_request(const char *method, const char *path, const char *token,
 
     sb_add(&url, API_BASE);
     sb_add(&url, path);
-    sb_add(&hdr, "Authorization: ");
-    sb_add(&hdr, token);
+    if (token) {
+        sb_add(&hdr, "Authorization: ");
+        sb_add(&hdr, token);
+        sb_add(&hdr, "\r\n");
+    }
     if (body)
-        sb_add(&hdr, "\r\nContent-Type: application/json");
+        sb_add(&hdr, "Content-Type: application/json\r\n");
 
     wmethod = utf8_to_wide(method, sc_strlen(method));
     wurl = utf8_to_wide(url.data, url.len);
@@ -70,7 +73,7 @@ int http_request(const char *method, const char *path, const char *token,
     req = WinHttpOpenRequest(g_api, wmethod, wurl, NULL, WINHTTP_NO_REFERER,
                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (req &&
-        WinHttpAddRequestHeaders(req, whdr, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD) &&
+        (!hdr.len || WinHttpAddRequestHeaders(req, whdr, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD)) &&
         WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)body,
                            (DWORD)body_len, (DWORD)body_len, 0) &&
         WinHttpReceiveResponse(req, NULL) &&

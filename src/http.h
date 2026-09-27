@@ -16,7 +16,7 @@ HINTERNET http_session(void);
 
 /*
  * Synchronous HTTPS request to the Discord API. `path` is relative to API_BASE,
- * `body` may be NULL. On transport failure returns 0 and GetLastError() holds
+ * `token` and `body` may be NULL. On transport failure returns 0 and GetLastError() holds
  * the WinHTTP error.
  */
 int http_request(const char *method, const char *path, const char *token,
