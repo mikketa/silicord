@@ -145,7 +145,18 @@ int profile_parse(json_t root, const char *guild_id, profile_t *out)
     if (guild_id && guild_id[0]) {
         lstrcpynA(out->guild_id, guild_id, sizeof out->guild_id);
         if (json_get(root, "guild_member", &v) && json_type(v) == JSON_OBJECT) {
+            json_t roles, role;
             get_str(v, "nick", &out->name);
+            if (json_get(v, "roles", &roles)) {
+                json_iter(roles, &it);
+                while (json_next(&it, NULL, &role)) {
+                    char id[24];
+                    json_raw(role, id, sizeof id);
+                    if (out->roles.len)
+                        sb_add(&out->roles, ",");
+                    sb_add(&out->roles, id);
+                }
+            }
             if (get_raw(v, "avatar", out->avatar, sizeof out->avatar))
                 out->member_avatar = 1;
             if (get_raw(v, "banner", out->banner, sizeof out->banner))
@@ -180,6 +191,7 @@ void profile_free(profile_t *p)
     sb_free(&p->name);
     sb_free(&p->bio);
     sb_free(&p->pronouns);
+    sb_free(&p->roles);
     for (int i = 0; i < p->nbadges; i++) {
         sb_free(&p->badges[i].description);
         sb_free(&p->badges[i].link);

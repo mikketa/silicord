@@ -17,7 +17,7 @@ static const char k_full[] =
     "\"mutual_guilds\":[{\"id\":\"1\",\"nick\":null},{\"id\":\"2\"},{\"id\":\"3\"}],"
     "\"mutual_friends\":[{\"id\":\"5\",\"avatar\":\"f5\"},{\"id\":\"6\",\"avatar\":null}],"
     "\"mutual_friends_count\":2,"
-    "\"guild_member\":{\"nick\":\"Server Niok\",\"avatar\":\"ga\",\"roles\":[]},"
+    "\"guild_member\":{\"nick\":\"Server Niok\",\"avatar\":\"ga\",\"roles\":[\"5\",\"6\"]},"
     "\"guild_member_profile\":{\"bio\":\"\",\"pronouns\":\"they/them\",\"banner\":null}}";
 
 static const char k_error[] = "{\"message\":\"Unknown User\",\"code\":10013}";
@@ -61,6 +61,7 @@ void entry(void)
     check(str_eq(&p.bio, "sys/net admin\nGNU/linux"), "empty server bio keeps the global one");
     check(str_eq(&p.pronouns, "they/them"), "server pronouns");
     check(lstrcmpA(p.guild_id, "77") == 0, "guild id kept");
+    check(str_eq(&p.roles, "5,6"), "server roles");
     profile_free(&p);
 
     check(json_parse(k_bare, sizeof k_bare - 1, &root) && profile_parse(root, NULL, &p), "bare profile parses");

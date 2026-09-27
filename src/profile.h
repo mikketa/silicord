@@ -67,6 +67,8 @@ typedef struct {
     profile_badge_t *badges;
     int nbadges;
 
+    sb_t roles;           /* server profile: comma-separated role ids */
+
     int mutual_guilds;    /* -1 when unknown */
     int mutual_friends;
     profile_friend_t friends[PROFILE_MAX_FRIENDS];
