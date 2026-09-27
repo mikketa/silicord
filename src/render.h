@@ -3,9 +3,9 @@
 #include "md.h"
 
 /*
- * Drawing through Direct2D (software rasterizer, no GPU driver loaded) and
- * DirectWrite: anti-aliased shapes, images, and text with color emoji.
- * Colors are 0xAARRGGBB. Everything except r_image_decode() runs on the UI thread.
+ * Software drawing: DirectWrite renders the text (with color emoji) into a
+ * bitmap we own, and the shapes and images are rasterized by hand. Colors
+ * are 0xAARRGGBB. Everything except r_image_decode() runs on the UI thread.
  */
 #ifdef __cplusplus
 extern "C" {
@@ -15,19 +15,23 @@ typedef struct r_font r_font_t;
 typedef struct r_image r_image_t;
 
 int r_init(void);
-/* Starts a frame drawn onto `dc` (w x h pixels); r_end() presents it. */
+/*
+ * A frame is drawn in horizontal bands through one small bitmap. Repeat the
+ * whole paint for each band; primitives outside it cost next to nothing:
+ *
+ *     while (r_begin(dc, w, h)) { ...draw everything...; r_end(dc); }
+ */
 int r_begin(HDC dc, int w, int h);
-void r_end(void);
+void r_end(HDC dc);
+/* Whether rows [y, y + h) can be seen in the current band and clip: lets callers skip work. */
+int r_visible(int y, int h);
 
 void r_fill(int x, int y, int w, int h, unsigned argb);
 void r_round(int x, int y, int w, int h, int radius, unsigned argb);
 void r_circle(int x, int y, int d, unsigned argb);
-/*
- * Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle).
- * The decoded pixels are freed once they are on the render target, so an image
- * is only held once; if the target is lost, r_image_lost() tells to reload it.
- */
+/* Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle). */
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
+/* Whether the image must be decoded again before drawing (never, with this renderer). */
 int r_image_lost(const r_image_t *img);
 /* Memory the image holds, in bytes. */
 size_t r_image_bytes(const r_image_t *img);

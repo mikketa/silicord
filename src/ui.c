@@ -1486,7 +1486,7 @@ static void paint_messages(RECT rc, const char *name)
         y -= h;
         if (y + h < a.top)
             break;
-        if (y < a.bottom)
+        if (y < a.bottom && r_visible(y, h))
             paint_message(i, x0, y, w);
     }
     if (!g_ui.msgs_has_more && y > a.top - S(WELCOME_H))
@@ -1610,14 +1610,14 @@ static void paint(HWND wnd)
     GetClientRect(wnd, &rc);
     g_ui.frame++;
     QueryPerformanceCounter(&g_ui.frame_start);
-    if (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
+    while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
         if (g_ui.view == VIEW_APP)
             paint_app(rc);
         else if (g_ui.view == VIEW_LOADING)
             paint_loading(rc);
         else
             paint_login(rc);
-        r_end();
+        r_end(dc);
     }
     EndPaint(wnd, &ps);
     /* The popout is painted separately: what it shows was drawn at its last paint. */
@@ -2930,9 +2930,9 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         GetClientRect(wnd, &rc);
         g_ui.pop_frame = ++g_ui.frame;
         QueryPerformanceCounter(&g_ui.frame_start);
-        if (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
+        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
             pop_render(1);
-            r_end();
+            r_end(dc);
         }
         EndPaint(wnd, &ps);
         return 0;
