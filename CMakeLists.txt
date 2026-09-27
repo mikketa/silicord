@@ -39,6 +39,7 @@ add_executable(silicord
   src/gfx.c
   src/gw.c
   src/http.c
+  src/img.c
   src/ra.c
   src/ui.c
   src/ws.c
