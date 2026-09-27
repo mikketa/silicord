@@ -281,6 +281,7 @@ static int is_structure_event(json_t t)
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
         "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE",
+        "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
     };
 
     for (int i = 0; i < (int)ARRAYSIZE(names); i++)
@@ -394,6 +395,55 @@ static void on_ready(void *ctx, json_t d)
     if (current(s)) {
         json_t presences;
         ui_post_model(model);
+        /* Friends and requests: resolved to {id, type, username, global_name, avatar} for the UI. */
+        {
+            json_t rels, rel, rv, ruser, users, u;
+            json_iter_t rit, uit;
+            sb_t *p = mem_alloc(sizeof *p);
+            int first = 1;
+            sb_add(p, "RELATIONSHIPS");
+            sb_addn(p, "", 1);
+            sb_add(p, "[");
+            if (json_get(d, "relationships", &rels)) {
+                json_iter(rels, &rit);
+                while (json_next(&rit, NULL, &rel)) {
+                    char id[24] = "";
+                    int found = 0;
+                    if (json_get(rel, "user", &ruser) && json_type(ruser) == JSON_OBJECT) {
+                        found = 1;
+                    } else if ((json_get(rel, "user_id", &rv) || json_get(rel, "id", &rv)) && json_get(d, "users", &users)) {
+                        json_raw(rv, id, sizeof id);
+                        json_iter(users, &uit);
+                        while (!found && json_next(&uit, NULL, &u)) {
+                            json_t uid;
+                            char got[24];
+                            if (json_get(u, "id", &uid)) {
+                                json_raw(uid, got, sizeof got);
+                                if (lstrcmpA(got, id) == 0) {
+                                    ruser = u;
+                                    found = 1;
+                                }
+                            }
+                        }
+                    }
+                    if (!found)
+                        continue;
+                    if (!first)
+                        sb_add(p, ",");
+                    first = 0;
+                    sb_add(p, "{\"type\":");
+                    if (json_get(rel, "type", &rv))
+                        sb_addn(p, rv.p, (size_t)(rv.end - rv.p));
+                    else
+                        sb_add(p, "0");
+                    sb_add(p, ",\"ruser\":");
+                    sb_addn(p, ruser.p, (size_t)(ruser.end - ruser.p));
+                    sb_add(p, "}");
+                }
+            }
+            sb_add(p, "]");
+            ui_post(UI_EVENT, p);
+        }
         /* Friends' statuses, applied once the model is in place. */
         if (json_get(d, "presences", &presences)) {
             sb_t *p = mem_alloc(sizeof *p);
@@ -968,6 +1018,49 @@ void app_react(const char *channel_id, const char *message_id, const msg_reactio
     sb_add(&j->text, "/@me?location=Message&type=0");
     lstrcpyA(j->before, add ? "PUT" : "DELETE");
     CloseHandle(CreateThread(NULL, 0, react_main, j, 0, NULL));
+}
+
+static DWORD WINAPI relation_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[96];
+
+    /* j->channel: user id (or empty to add by username in j->text); j->before: method. */
+    if (j->channel[0]) {
+        wsprintfA(path, "/users/@me/relationships/%s", j->channel);
+        http_request(j->before, path, j->token.data, lstrcmpA(j->before, "PUT") == 0 ? "{}" : NULL,
+                     lstrcmpA(j->before, "PUT") == 0 ? 2 : 0, &resp);
+    } else {
+        sb_t body = {0};
+        sb_add(&body, "{\"username\":");
+        sb_json_str(&body, j->text.data, j->text.len);
+        sb_add(&body, ",\"discriminator\":null}");
+        http_request("POST", "/users/@me/relationships", j->token.data, body.data, body.len, &resp);
+        sb_free(&body);
+        ui_post(UI_FRIEND_RESULT, ui_text(resp.status == 204 || resp.status == 200
+                                              ? "Success! Your friend request was sent."
+                                              : "Hm, didn't work. Double check that the username is correct."));
+    }
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_relationship(const char *user_id, const char *method)
+{
+    rest_job_t *j = new_job(user_id);
+
+    lstrcpynA(j->before, method, sizeof j->before);
+    CloseHandle(CreateThread(NULL, 0, relation_main, j, 0, NULL));
+}
+
+void app_add_friend(const char *username)
+{
+    rest_job_t *j = new_job("");
+
+    sb_add(&j->text, username);
+    CloseHandle(CreateThread(NULL, 0, relation_main, j, 0, NULL));
 }
 
 void app_set_status(const char *status)

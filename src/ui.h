@@ -30,6 +30,7 @@ enum {
     UI_DM_OPENED,       /* text = channel id of a direct message we asked to open */
     UI_FONT,            /* wParam = display name font id, payload = the font file (NULL on failure) */
     UI_TYPING,          /* text = channel id, NUL, user id, NUL, display name (empty in DMs) */
+    UI_FRIEND_RESULT,   /* text = outcome of a friend request */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -84,6 +85,10 @@ void app_ack(const char *channel_id, const char *message_id);
 void app_fetch_channel(const char *channel_id);
 /* Subscribes to a server channel's live typing and member list (op 14), as Discord does when opening it. */
 void app_subscribe(const char *guild_id, const char *channel_id);
+/* Friends: "PUT" accepts a request (or adds), "DELETE" removes, ignores, cancels or unblocks. */
+void app_relationship(const char *user_id, const char *method);
+/* Sends a friend request by username; the outcome comes back as UI_FRIEND_RESULT. */
+void app_add_friend(const char *username);
 /* Our status: "online", "idle", "dnd" or "invisible". */
 void app_set_status(const char *status);
 /* Same, also asking for the member list rows [start, start + 99]. */
