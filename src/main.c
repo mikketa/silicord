@@ -844,6 +844,11 @@ void app_send_message(const char *channel_id, const char *text)
     CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
 }
 
+void app_log(const char *text)
+{
+    log_line("", text);
+}
+
 void app_quit(void)
 {
     stop_login();

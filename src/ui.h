@@ -62,6 +62,8 @@ void app_login_token(const char *token);
 void app_logout(void);
 void app_reconnect(void);
 void app_quit(void);
+/* Writes a line to the --debug log (no-op otherwise). */
+void app_log(const char *text);
 /* Live messages are only forwarded for the open channel (empty string for none). */
 void app_open_channel(const char *channel_id);
 /* Loads the latest 50 messages, or the 50 before `before` if it is not NULL. */
