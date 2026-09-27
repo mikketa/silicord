@@ -177,6 +177,7 @@ typedef struct {
     int msgs_loading, msgs_older_loading, msgs_has_more, msgs_status;
     int msg_scroll;            /* distance from the bottom, in pixels */
     char new_after[24];        /* messages after this one were unread when the channel opened */
+    char flash_id[24];         /* message briefly highlighted after a jump */
     msg_batch_t *pins;         /* pinned messages panel, NULL when closed */
     int pins_open, pins_scroll, pins_content;
     int layout_w;              /* width the cached heights were computed for */
@@ -231,6 +232,12 @@ typedef struct {
     char ac_query[64];
     mention_t mention[32];
     int nmention;
+
+    /* Quick switcher. */
+    HWND qs, qs_edit;
+    WNDPROC qs_edit_proc;
+    HBRUSH qs_brush;
+    int qs_kind[12], qs_index[12], nqs, qs_sel;
 
     /* Files to send with the next message. */
     upload_t uploads[10];
@@ -302,6 +309,7 @@ static void rel_remove(const char *id);
 
 #define WM_TRAY (WM_APP + 60)
 #define TIMER_ACK 1
+#define TIMER_FLASH 3
 #define ACK_DELAY 1500
 
 static const unsigned char k_word[8][7] = {
@@ -1186,6 +1194,9 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static int divider_h(const msg_t *m);
+static void qs_open(void);
+static void qs_close(void);
 static int pins_button_x(void);
 static void paint_pins(void);
 static void pins_close(void);
@@ -2354,7 +2365,10 @@ static void paint_message(int i, int x0, int y, int w)
         y += S(8);
         h -= S(8);
     }
-    if (m->mentions_me) {
+    if (g_ui.flash_id[0] && lstrcmpA(g_ui.flash_id, m->id) == 0) {
+        int top = y + (m->grouped == 1 ? 0 : S(12));
+        fill(x0, top, w, h - (top - y), C_MENTION_HOVER);
+    } else if (m->mentions_me) {
         /* Messages that ping us, like Discord: tinted with a bar on the left. */
         int top = y + (m->grouped == 1 ? 0 : S(12));
         fill(x0, top, w, h - (top - y), g_ui.hover_msg == i ? C_MENTION_HOVER : C_MENTION);
@@ -2882,6 +2896,7 @@ static void open_channel(int index)
     pop_close();
     g_ui.channel = index;
     g_ui.friend_hover = -1;
+    qs_close();
     pins_close();
     picker_close();
     uploads_clear();
@@ -3465,10 +3480,46 @@ static int click_part(int x, int y)
     return 1;
 }
 
+/* Scrolls so message i is in view and flashes it, as when clicking a reply in Discord. */
+static void jump_to(int i)
+{
+    RECT a = message_area();
+    int below = 0;
+
+    for (int k = g_ui.nmsgs - 1; k > i; k--)
+        below += msg_height(&g_ui.msgs[k]);
+    /* Put the message about a third from the top. */
+    g_ui.msg_scroll = below + msg_height(&g_ui.msgs[i]) - (a.bottom - a.top) * 2 / 3;
+    clamp_msg_scroll();
+    lstrcpynA(g_ui.flash_id, g_ui.msgs[i].id, sizeof g_ui.flash_id);
+    SetTimer(g_ui.wnd, TIMER_FLASH, 1500, NULL);
+    redraw();
+}
+
+/* A click on the "replying to" line. */
+static int click_reply(int x, int y)
+{
+    int top, i = message_at(x, y, &top), target;
+    msg_t *m;
+
+    if (i < 0)
+        return 0;
+    m = &g_ui.msgs[i];
+    top += divider_h(m);
+    if (!m->reply.len || !m->reply_id[0] || m->grouped == 1 || y < top + S(16) || y >= top + S(38) || x < text_x())
+        return 0;
+    target = find_msg(m->reply_id);
+    if (target >= 0)
+        jump_to(target);
+    return 1;
+}
+
 static int click_message(int x, int y)
 {
     int i, link;
 
+    if (click_reply(x, y))
+        return 1;
     if (click_part(x, y))
         return 1;
     if (!rich_hit(x, y, &i, &link))
@@ -3869,6 +3920,62 @@ static int pop_render(int draw)
             text(g_ui.f_small, C_MUTED, rect(x, y, w - pad - x, S(20)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         y += S(20);
+    }
+
+    /* Roles in this server, as pills with their color. */
+    if (p && p->roles.len && g_ui.guild >= 0 && lstrcmpA(p->guild_id, g_ui.model->guilds[g_ui.guild].id) == 0) {
+        model_role_t r, list[32];
+        unsigned cursor = 0;
+        int rx = pad, first = 1, nr = 0;
+        y += S(12);
+        if (draw)
+            text(g_ui.f_cat, C_INK, rect(pad, y, inner, S(18)), "Roles", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        y += S(22);
+        while (nr < 32 && model_role_next(g_ui.model, g_ui.guild, &cursor, &r)) {
+            int in_list = 0;
+            const char *q = p->roles.data;
+            size_t idn = (size_t)lstrlenA(r.id);
+            while (*q && !in_list) {
+                size_t k = 0;
+                while (q[k] && q[k] != ',')
+                    k++;
+                in_list = k == idn && CompareStringA(LOCALE_INVARIANT, 0, q, (int)k, r.id, (int)k) == CSTR_EQUAL;
+                q += k + (q[k] == ',');
+            }
+            if (in_list)
+                list[nr++] = r;
+        }
+        /* Highest role first, like Discord. */
+        for (int a = 1; a < nr; a++) {
+            model_role_t x = list[a];
+            int b = a;
+            while (b > 0 && list[b - 1].position < x.position) {
+                list[b] = list[b - 1];
+                b--;
+            }
+            list[b] = x;
+        }
+        for (int ri = 0; ri < nr; ri++) {
+            char rname[64];
+            int pw;
+            r = list[ri];
+            lstrcpynA(rname, r.name, r.name_len + 1 < (int)sizeof rname ? r.name_len + 1 : (int)sizeof rname);
+            pw = text_width(g_ui.f_small, rname) + S(30);
+            if (pw > inner)
+                pw = inner;
+            if (rx + pw > pad + inner && !first) {
+                rx = pad;
+                y += S(28);
+            }
+            if (draw) {
+                r_round(rx, y, pw, S(24), S(4), 0xFF1E1E1E);
+                r_circle(rx + S(8), y + S(7), S(10), r.color ? 0xFF000000u | r.color : 0xFF99AAB5u);
+                text(g_ui.f_small, C_INK, rect(rx + S(22), y, pw - S(26), S(24)), rname, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            rx += pw + S(4);
+            first = 0;
+        }
+        y += S(24);
     }
 
     /* Bio, as markdown. */
@@ -6188,6 +6295,238 @@ static void paint_pins(void)
     r_unclip();
 }
 
+/* ---- Quick switcher (Ctrl+K) ---- */
+
+#define QS_W 560
+#define QS_ROW 40
+#define QS_MAX 12
+
+enum { QS_CHANNEL, QS_DM, QS_GUILD };
+
+static void qs_rebuild(void)
+{
+    char q[64] = "";
+    wchar_t w[64];
+    const model_t *m = g_ui.model;
+
+    g_ui.nqs = 0;
+    g_ui.qs_sel = 0;
+    if (!m)
+        return;
+    GetWindowTextW(g_ui.qs_edit, w, 64);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, q, sizeof q, NULL, NULL);
+#define QS_ADD(k, i)                                              \
+    do {                                                          \
+        if (g_ui.nqs < QS_MAX) {                                  \
+            g_ui.qs_kind[g_ui.nqs] = (k);                         \
+            g_ui.qs_index[g_ui.nqs] = (i);                        \
+            g_ui.nqs++;                                           \
+        }                                                         \
+    } while (0)
+    /* Empty query: recent conversations, like Discord. */
+    for (unsigned i = m->dm_first; i < m->dm_first + m->dm_count; i++)
+        if (ci_contains(model_str(m, m->channels[i].name), q))
+            QS_ADD(QS_DM, (int)i);
+    if (q[0]) {
+        for (unsigned g = 0; g < m->nguilds; g++) {
+            if (ci_contains(model_str(m, m->guilds[g].name), q))
+                QS_ADD(QS_GUILD, (int)g);
+            for (unsigned c = m->guilds[g].first; c < m->guilds[g].first + m->guilds[g].count; c++)
+                if (m->channels[c].type != CH_CATEGORY && !is_voice_type(m->channels[c].type) &&
+                    ci_contains(model_str(m, m->channels[c].name), q))
+                    QS_ADD(QS_CHANNEL, (int)c);
+        }
+    }
+#undef QS_ADD
+}
+
+static void qs_close(void)
+{
+    HWND w = g_ui.qs;
+
+    if (!w)
+        return;
+    g_ui.qs = NULL;
+    g_ui.qs_edit = NULL;
+    DestroyWindow(w);
+    SetFocus(g_ui.composer);
+    redraw();
+}
+
+static void qs_go(int i)
+{
+    int kind = g_ui.qs_kind[i], index = g_ui.qs_index[i];
+
+    qs_close();
+    if (kind == QS_GUILD)
+        select_guild(index);
+    else
+        go_to_channel(index);
+}
+
+static int qs_height(void)
+{
+    return S(96) + (g_ui.nqs ? g_ui.nqs : 1) * S(QS_ROW) + S(16);
+}
+
+static void qs_paint(void)
+{
+    int w = S(QS_W), h = qs_height(), y = S(96);
+    const model_t *m = g_ui.model;
+
+    r_fill(0, 0, w, h, 0xFF000000u);
+    r_round(0, 0, w, h, S(10), 0xFF151515);
+    r_round_outline(0, 0, w, h, S(10), 1, 0xFF2A2A2A);
+    text(g_ui.f_h, C_INK, rect(S(20), S(12), w - S(40), S(24)), "Where would you like to go?", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    r_round(S(20), S(44), w - S(40), S(40), S(6), 0xFF0B0B0B);
+    if (!g_ui.nqs)
+        text(g_ui.f_body, C_MUTED, rect(0, y, w, S(QS_ROW)), "No results", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    for (int i = 0; i < g_ui.nqs; i++, y += S(QS_ROW)) {
+        int k = g_ui.qs_kind[i], idx = g_ui.qs_index[i];
+        const char *name, *where = "";
+        if (i == g_ui.qs_sel)
+            r_round(S(12), y, w - S(24), S(QS_ROW) - S(2), S(6), ARGB(C_SELECT));
+        if (k == QS_GUILD) {
+            r_image_t *img = guild_icon(&m->guilds[idx]);
+            name = model_str(m, m->guilds[idx].name);
+            if (img)
+                r_image(img, S(24), y + S(8), S(24), S(24), S(8));
+            else
+                r_round(S(24), y + S(8), S(24), S(24), S(8), ARGB(C_ITEM));
+        } else {
+            const channel_t *c = &m->channels[idx];
+            int g = model_channel_guild(m, (unsigned)idx);
+            name = model_str(m, c->name);
+            if (g >= 0)
+                where = model_str(m, m->guilds[g].name);
+            if (k == QS_DM) {
+                r_image_t *img = dm_icon(c);
+                if (img)
+                    r_image(img, S(24), y + S(8), S(24), S(24), S(12));
+                else
+                    r_circle(S(24), y + S(8), S(24), ARGB(C_ITEM));
+            } else {
+                text(g_ui.f_h, C_FAINT, rect(S(24), y, S(24), S(QS_ROW)), model_is_thread(c->type) ? "\xE2\x86\xB3" : "#",
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        text(g_ui.f_body, C_INK, rect(S(60), y, w - S(260), S(QS_ROW)), name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (*where)
+            text(g_ui.f_cat, C_FAINT, rect(w - S(200), y, S(176), S(QS_ROW)), where, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+}
+
+static void qs_place(void)
+{
+    RECT rc;
+    int w = S(QS_W), h = qs_height();
+
+    GetClientRect(g_ui.wnd, &rc);
+    SetWindowPos(g_ui.qs, HWND_TOP, (rc.right - w) / 2, rc.bottom / 5, w, h, SWP_NOACTIVATE);
+    InvalidateRect(g_ui.qs, NULL, FALSE);
+}
+
+static LRESULT CALLBACK qs_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN) {
+        if (wp == VK_ESCAPE) {
+            qs_close();
+            return 0;
+        }
+        if ((wp == VK_UP || wp == VK_DOWN) && g_ui.nqs) {
+            g_ui.qs_sel = (g_ui.qs_sel + (wp == VK_DOWN ? 1 : g_ui.nqs - 1)) % g_ui.nqs;
+            InvalidateRect(g_ui.qs, NULL, FALSE);
+            return 0;
+        }
+        if (wp == VK_RETURN) {
+            if (g_ui.nqs)
+                qs_go(g_ui.qs_sel);
+            return 0;
+        }
+    }
+    if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE))
+        return 0;
+    return CallWindowProcW(g_ui.qs_edit_proc, h, msg, wp, lp);
+}
+
+static int qs_hit(int y)
+{
+    int i = (y - S(96)) / S(QS_ROW);
+
+    return y >= S(96) && i < g_ui.nqs ? i : -1;
+}
+
+static LRESULT CALLBACK qs_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        RECT rc;
+        HDC dc = BeginPaint(wnd, &ps);
+        GetClientRect(wnd, &rc);
+        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
+            qs_paint();
+            r_end(dc);
+        }
+        EndPaint(wnd, &ps);
+        return 0;
+    }
+    case WM_COMMAND:
+        if ((HWND)lp == g_ui.qs_edit && HIWORD(wp) == EN_CHANGE) {
+            qs_rebuild();
+            qs_place();
+        }
+        return 0;
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, GDI(C_INK));
+        SetBkColor((HDC)wp, RGB(0x0B, 0x0B, 0x0B));
+        return (LRESULT)g_ui.qs_brush;
+    case WM_MOUSEMOVE: {
+        int i = qs_hit(GET_Y_LPARAM(lp));
+        if (i >= 0 && i != g_ui.qs_sel) {
+            g_ui.qs_sel = i;
+            InvalidateRect(wnd, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        int i = qs_hit(GET_Y_LPARAM(lp));
+        if (i >= 0)
+            qs_go(i);
+        return 0;
+    }
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+static void qs_open(void)
+{
+    HFONT font;
+
+    if (g_ui.qs || g_ui.view != VIEW_APP || !g_ui.model) {
+        qs_close();
+        return;
+    }
+    picker_close();
+    pop_close();
+    if (!g_ui.qs_brush)
+        g_ui.qs_brush = CreateSolidBrush(RGB(0x0B, 0x0B, 0x0B));
+    g_ui.qs = CreateWindowExW(0, L"SilicordSwitch", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 0, 0, g_ui.wnd,
+                              NULL, NULL, NULL);
+    g_ui.qs_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(32), S(53), S(QS_W) - S(64), S(22),
+                                   g_ui.qs, NULL, NULL, NULL);
+    g_ui.qs_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.qs_edit, GWLP_WNDPROC, (LONG_PTR)qs_edit_proc);
+    font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
+    SendMessageW(g_ui.qs_edit, WM_SETFONT, (WPARAM)font, FALSE);
+    SendMessageW(g_ui.qs_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search for servers, channels or DMs");
+    qs_rebuild();
+    qs_place();
+    ShowWindow(g_ui.qs, SW_SHOWNA);
+    SetFocus(g_ui.qs_edit);
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -6250,6 +6589,12 @@ static void send_composer(void)
 
 static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_KEYDOWN && wp == 'K' && GetKeyState(VK_CONTROL) < 0) {
+        qs_open();
+        return 0;
+    }
+    if (msg == WM_CHAR && wp == 11) /* Ctrl+K's control character */
+        return 0;
     if (msg == WM_KEYDOWN && ac_key(wp)) {
         g_ui.ac_ate = wp == VK_RETURN || wp == VK_TAB || wp == VK_ESCAPE;
         return 0;
@@ -6372,6 +6717,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DROPFILES:
         on_drop((HDROP)wp);
         return 0;
+    case WM_KEYDOWN:
+        if (wp == 'K' && GetKeyState(VK_CONTROL) < 0) {
+            qs_open();
+            return 0;
+        }
+        break;
     case WM_SIZE:
         if (wp == SIZE_MINIMIZED) {
             /* Sitting in the tray: return free heap pages and the working set to Windows. */
@@ -6583,6 +6934,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
+        if (wp == TIMER_FLASH) {
+            KillTimer(wnd, TIMER_FLASH);
+            g_ui.flash_id[0] = 0;
+            redraw();
+            return 0;
+        }
         if (wp == TIMER_TYPING) {
             typing_prune();
             redraw();
@@ -6663,6 +7020,9 @@ HWND ui_create(HINSTANCE inst)
     RegisterClassExW(&wc);
     wc.lpfnWndProc = picker_proc;
     wc.lpszClassName = L"SilicordEmoji";
+    RegisterClassExW(&wc);
+    wc.lpfnWndProc = qs_proc;
+    wc.lpszClassName = L"SilicordSwitch";
     RegisterClassExW(&wc);
 
     g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
