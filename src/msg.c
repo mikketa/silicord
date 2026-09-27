@@ -1,4 +1,5 @@
 #include "msg.h"
+#include "md.h"
 #include "mem.h"
 #include "sc_asm.h"
 
@@ -51,8 +52,9 @@ static int mention_name(json_t mentions, const char *id, size_t len, sb_t *out)
             continue;
         json_raw(v, got, sizeof got);
         if (sc_strlen(got) == len && same(got, id, len)) {
-            sb_add(out, "@");
+            sb_add(out, MD_MENTION_OPEN "@");
             user_name(user, out);
+            sb_add(out, MD_MENTION_CLOSE);
             return 1;
         }
     }
@@ -61,8 +63,8 @@ static int mention_name(json_t mentions, const char *id, size_t len, sb_t *out)
 
 /*
  * Rewrites Discord markup into readable text:
- *   <@id> <@!id>  -> @name (from the mentions array)
- *   <@&id>        -> @role
+ *   <@id> <@!id>  -> @name (from the mentions array), wrapped in MD_MENTION_OPEN/CLOSE
+ *   <@&id>        -> @role, wrapped the same way
  *   <:name:id>    -> :name:   (custom emoji, also <a:name:id>)
  * Channel mentions <#id> are left for the UI, which knows channel names.
  */
@@ -88,9 +90,9 @@ static void format_content(const char *s, size_t n, json_t mentions, sb_t *out)
             if (j < n && s[j] == '>' && j > i + 2 + (role || nick)) {
                 size_t id0 = i + 2 + (role || nick);
                 if (role)
-                    sb_add(out, "@role");
+                    sb_add(out, MD_MENTION_OPEN "@role" MD_MENTION_CLOSE);
                 else if (!mention_name(mentions, s + id0, j - id0, out))
-                    sb_add(out, "@unknown-user");
+                    sb_add(out, MD_MENTION_OPEN "@unknown-user" MD_MENTION_CLOSE);
                 i = j + 1;
                 continue;
             }

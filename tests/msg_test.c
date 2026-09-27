@@ -1,6 +1,7 @@
 /* Message parsing and formatting tests. */
 #include <windows.h>
 #include "test.h"
+#include "md.h"
 #include "msg.h"
 
 static int parse(const char *s, msg_t *m)
@@ -24,9 +25,11 @@ static void test_content(void)
     expect_text("{\"id\":\"1\",\"content\":\"hi <@42> and <@!43>\",\"mentions\":["
                 "{\"id\":\"42\",\"username\":\"bob\",\"global_name\":null},"
                 "{\"id\":\"43\",\"username\":\"x\",\"global_name\":\"Ann\"}]}",
-                "hi @bob and @Ann", "user mentions use the display name");
+                "hi " MD_MENTION_OPEN "@bob" MD_MENTION_CLOSE " and " MD_MENTION_OPEN "@Ann" MD_MENTION_CLOSE,
+                "user mentions use the display name");
     expect_text("{\"id\":\"1\",\"content\":\"<:pog:123> <a:dance:456>\"}", ":pog: :dance:", "custom emoji");
-    expect_text("{\"id\":\"1\",\"content\":\"<@&9> <@77>\",\"mentions\":[]}", "@role @unknown-user",
+    expect_text("{\"id\":\"1\",\"content\":\"<@&9> <@77>\",\"mentions\":[]}",
+                MD_MENTION_OPEN "@role" MD_MENTION_CLOSE " " MD_MENTION_OPEN "@unknown-user" MD_MENTION_CLOSE,
                 "role and unknown mentions");
     expect_text("{\"id\":\"1\",\"content\":\"see <#5> <3 a<b\"}", "see <#5> <3 a<b",
                 "channel mentions and stray brackets are kept");
