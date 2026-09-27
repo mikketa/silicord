@@ -2,7 +2,11 @@
 #include "json.h"
 #include "sb.h"
 
-/* Compact copy of what the UI needs from READY. Strings are offsets into `strings`. */
+/*
+ * Compact copy of what the UI needs from READY. Strings are offsets into
+ * `strings`. The model is immutable: gateway events produce an updated copy
+ * with model_apply().
+ */
 
 enum {
     CH_TEXT = 0,
@@ -20,13 +24,19 @@ typedef struct {
     char id[24];
     char icon[40];      /* CDN hash, empty if none */
     unsigned name;
-    unsigned first;     /* first channel, channels are stored in display order */
+    unsigned first;     /* the guild's channels, in display order */
     unsigned count;
     int muted;
+    /* What we need to decide which new channels are visible. */
+    unsigned long long base_perms;
+    int sees_all;       /* owner, administrator, or our roles are unknown */
+    unsigned my_roles;  /* comma-separated role ids */
 } guild_t;
 
 typedef struct {
     char id[24];
+    char parent[24];    /* category */
+    long long position;
     unsigned name;
     int type;
     /* Direct messages: the other user (or the group icon, with user_id empty). */
@@ -56,12 +66,22 @@ typedef struct {
 model_t *model_from_ready(json_t d);
 void model_free(model_t *m);
 
+/*
+ * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, GUILD_CREATE/UPDATE/DELETE,
+ * GUILD_MEMBER_UPDATE for us). Returns a new model, or NULL when nothing changed.
+ * `m` is left untouched; read state carries over by channel id.
+ */
+model_t *model_apply(const model_t *m, const char *event, json_t d);
+
 /* Snowflake order: negative, zero or positive like strcmp. */
 int model_id_cmp(const char *a, const char *b);
 int model_find_channel(const model_t *m, const char *id);
+int model_find_guild(const model_t *m, const char *id);
 /* Index of the guild owning channel i, -1 for direct messages. */
 int model_channel_guild(const model_t *m, unsigned i);
 int model_unread(const model_t *m, unsigned i);
+/* Whether we have role `role_id` in guild g. */
+int model_has_role(const model_t *m, int g, const char *role_id);
 
 static __inline const char *model_str(const model_t *m, unsigned off)
 {

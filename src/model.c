@@ -5,14 +5,7 @@
 #define PERM_VIEW_CHANNEL 0x400ull
 #define MAX_ROLES 64
 
-typedef struct {
-    json_t json;
-    char id[24];
-    char parent[24];
-    int type;
-    long long position;
-    int visible;
-} tmp_channel_t;
+typedef char role_id_t[24];
 
 /* ---- JSON helpers ---- */
 
@@ -24,19 +17,6 @@ static int field(json_t obj, const char *key, json_t *out)
     return json_get(obj, key, out) || (json_get(obj, "properties", &props) && json_get(props, key, out));
 }
 
-static int id_eq(json_t v, const char *id)
-{
-    char tmp[24];
-
-    json_raw(v, tmp, sizeof tmp);
-    for (int i = 0;; i++) {
-        if (tmp[i] != id[i])
-            return 0;
-        if (!tmp[i])
-            return 1;
-    }
-}
-
 static int str_eq(const char *a, const char *b)
 {
     while (*a && *a == *b) {
@@ -44,6 +24,14 @@ static int str_eq(const char *a, const char *b)
         b++;
     }
     return *a == *b;
+}
+
+static int id_eq(json_t v, const char *id)
+{
+    char tmp[24];
+
+    json_raw(v, tmp, sizeof tmp);
+    return str_eq(tmp, id);
 }
 
 static unsigned long long to_u64(json_t v)
@@ -63,6 +51,11 @@ static long long to_i64(json_t v)
 
     json_int(v, &n);
     return n;
+}
+
+static int is_true(json_t v)
+{
+    return json_type(v) == JSON_TRUE;
 }
 
 static unsigned add_str(model_t *m, json_t v)
@@ -91,31 +84,35 @@ static int id_cmp(const char *a, const char *b)
     return 0;
 }
 
-/* ---- Permissions ---- */
-
-static int is_voice(int type)
+static void copy_id(char *dst, const char *src, size_t size)
 {
-    return type == CH_VOICE || type == CH_STAGE;
+    size_t i = 0;
+
+    for (; i + 1 < size && src[i]; i++)
+        dst[i] = src[i];
+    dst[i] = 0;
 }
 
-static int has_role(const char (*mine)[24], int nmine, json_t id)
+/* ---- Roles and permissions ---- */
+
+static int has_role(const role_id_t *mine, int n, json_t id)
 {
-    for (int i = 0; i < nmine; i++)
+    for (int i = 0; i < n; i++)
         if (id_eq(id, mine[i]))
             return 1;
     return 0;
 }
 
 static unsigned long long channel_perms(json_t ch, unsigned long long base, const char *guild_id,
-                                        const char *user_id, const char (*mine)[24], int nmine)
+                                        const char *user_id, const role_id_t *mine, int nmine)
 {
-    json_t ows, ow, v, type;
+    json_t ows, ow, v;
     json_iter_t it;
     unsigned long long perms = base, allow = 0, deny = 0;
 
     if (!json_get(ch, "permission_overwrites", &ows))
         return perms;
-    /* @everyone, then all roles together, then the member. */
+    /* @everyone, then all our roles together, then us. */
     json_iter(ows, &it);
     while (json_next(&it, NULL, &ow))
         if (json_get(ow, "id", &v) && id_eq(v, guild_id)) {
@@ -125,8 +122,8 @@ static unsigned long long channel_perms(json_t ch, unsigned long long base, cons
     json_iter(ows, &it);
     while (json_next(&it, NULL, &ow))
         if (json_get(ow, "id", &v) && !id_eq(v, guild_id) && has_role(mine, nmine, v)) {
-            deny |= json_get(ow, "deny", &type) ? to_u64(type) : 0;
-            allow |= json_get(ow, "allow", &type) ? to_u64(type) : 0;
+            deny |= json_get(ow, "deny", &v) ? to_u64(v) : 0;
+            allow |= json_get(ow, "allow", &v) ? to_u64(v) : 0;
         }
     perms = (perms & ~deny) | allow;
     json_iter(ows, &it);
@@ -138,13 +135,25 @@ static unsigned long long channel_perms(json_t ch, unsigned long long base, cons
     return perms;
 }
 
-/* Finds our role ids in merged_members[index] or in the guild's own member list. */
-static int my_roles(json_t d, json_t guild, unsigned index, const char *user_id, char (*out)[24])
+static int read_roles(json_t list, role_id_t *out)
 {
-    json_t merged, list, v, roles, role, member = {0};
-    json_iter_t it, rit;
+    json_iter_t it;
+    json_t role;
+    int n = 0;
+
+    json_iter(list, &it);
+    while (n < MAX_ROLES && json_next(&it, NULL, &role))
+        json_raw(role, out[n++], sizeof out[0]);
+    return n;
+}
+
+/* Our role ids from merged_members[index] or the guild's member list; -1 if we are not listed. */
+static int my_roles(json_t d, json_t guild, unsigned index, const char *user_id, role_id_t *out)
+{
+    json_t merged, list, v, roles, member = {0};
+    json_iter_t it;
     unsigned i = 0;
-    int n = 0, found = 0;
+    int found = 0;
 
     if (json_get(d, "merged_members", &merged)) {
         json_iter(merged, &it);
@@ -166,17 +175,114 @@ static int my_roles(json_t d, json_t guild, unsigned index, const char *user_id,
     }
     if (!found)
         return -1;
-    if (json_get(member, "roles", &roles)) {
-        json_iter(roles, &rit);
-        while (n < MAX_ROLES && json_next(&rit, NULL, &role))
-            json_raw(role, out[n++], 24);
+    return json_get(member, "roles", &roles) ? read_roles(roles, out) : 0;
+}
+
+static unsigned roles_string(model_t *m, const role_id_t *mine, int n)
+{
+    unsigned off;
+
+    if (n <= 0)
+        return 0;
+    off = (unsigned)m->strings.len;
+    for (int i = 0; i < n; i++) {
+        if (i)
+            sb_add(&m->strings, ",");
+        sb_add(&m->strings, mine[i]);
+    }
+    sb_addn(&m->strings, "", 1);
+    return off;
+}
+
+static int parse_roles(const model_t *m, unsigned off, role_id_t *out)
+{
+    const char *p = model_str(m, off);
+    int n = 0;
+
+    while (*p && n < MAX_ROLES) {
+        size_t k = 0;
+        while (*p && *p != ',') {
+            if (k + 1 < sizeof out[0])
+                out[n][k++] = *p;
+            p++;
+        }
+        out[n++][k] = 0;
+        if (*p == ',')
+            p++;
     }
     return n;
 }
 
-/* ---- Ordering ---- */
+int model_has_role(const model_t *m, int g, const char *role_id)
+{
+    role_id_t mine[MAX_ROLES];
+    int n;
 
-static int channel_before(const tmp_channel_t *a, const tmp_channel_t *b)
+    if (g < 0 || (unsigned)g >= m->nguilds)
+        return 0;
+    n = parse_roles(m, m->guilds[g].my_roles, mine);
+    for (int i = 0; i < n; i++)
+        if (str_eq(mine[i], role_id))
+            return 1;
+    return 0;
+}
+
+/* Base permissions: @everyone plus our roles. Owners and administrators see everything. */
+static void guild_perms(model_t *m, guild_t *out, json_t g, const role_id_t *mine, int nmine)
+{
+    json_t role, v, roles = {0};
+    json_iter_t it;
+
+    out->base_perms = 0;
+    out->my_roles = roles_string(m, mine, nmine);
+    out->sees_all = nmine < 0 || !json_get(g, "roles", &roles);
+    if (out->sees_all)
+        return;
+    json_iter(roles, &it);
+    while (json_next(&it, NULL, &role))
+        if (json_get(role, "id", &v) && (id_eq(v, out->id) || has_role(mine, nmine, v)))
+            out->base_perms |= json_get(role, "permissions", &v) ? to_u64(v) : 0;
+    if ((field(g, "owner_id", &v) && id_eq(v, m->user_id)) || (out->base_perms & PERM_ADMINISTRATOR))
+        out->sees_all = 1;
+}
+
+static int visible(const model_t *m, const guild_t *g, json_t ch)
+{
+    role_id_t mine[MAX_ROLES];
+    int n;
+
+    if (g->sees_all)
+        return 1;
+    n = parse_roles(m, g->my_roles, mine);
+    return (channel_perms(ch, g->base_perms, g->id, m->user_id, mine, n) & PERM_VIEW_CHANNEL) != 0;
+}
+
+/* ---- Channels and ordering ---- */
+
+static int is_voice(int type)
+{
+    return type == CH_VOICE || type == CH_STAGE;
+}
+
+static channel_t make_channel(model_t *m, json_t ch)
+{
+    channel_t c = {0};
+    json_t v;
+
+    if (json_get(ch, "id", &v))
+        json_raw(v, c.id, sizeof c.id);
+    if (json_get(ch, "parent_id", &v))
+        json_raw(v, c.parent, sizeof c.parent);
+    if (json_get(ch, "last_message_id", &v))
+        json_raw(v, c.last_message, sizeof c.last_message);
+    c.type = json_get(ch, "type", &v) ? (int)to_i64(v) : 0;
+    c.position = json_get(ch, "position", &v) ? to_i64(v) : 0;
+    if (json_get(ch, "name", &v) && json_type(v) == JSON_STRING)
+        c.name = add_str(m, v);
+    return c;
+}
+
+static int before(const channel_t *a, const channel_t *b)
 {
     if (is_voice(a->type) != is_voice(b->type))
         return !is_voice(a->type);
@@ -185,12 +291,12 @@ static int channel_before(const tmp_channel_t *a, const tmp_channel_t *b)
     return id_cmp(a->id, b->id) < 0;
 }
 
-static void sort_channels(tmp_channel_t **v, unsigned n)
+static void sort_ptrs(const channel_t **v, unsigned n)
 {
     for (unsigned i = 1; i < n; i++) {
-        tmp_channel_t *x = v[i];
+        const channel_t *x = v[i];
         unsigned j = i;
-        while (j > 0 && channel_before(x, v[j - 1])) {
+        while (j > 0 && before(x, v[j - 1])) {
             v[j] = v[j - 1];
             j--;
         }
@@ -198,107 +304,99 @@ static void sort_channels(tmp_channel_t **v, unsigned n)
     }
 }
 
-static void push_channel(model_t *m, unsigned *cap, const tmp_channel_t *c)
+/*
+ * Display order: channels outside any category, then each category followed by
+ * its channels. Categories are kept even when empty so later channels have a
+ * home; the UI skips empty ones.
+ */
+static void order_slice(channel_t *v, unsigned n)
 {
-    json_t name;
-    channel_t *out;
+    const channel_t **roots = mem_alloc((n + 1) * sizeof *roots);
+    const channel_t **cats = mem_alloc((n + 1) * sizeof *cats);
+    const channel_t **kids = mem_alloc((n + 1) * sizeof *kids);
+    channel_t *out = mem_alloc((n + 1) * sizeof *out);
+    unsigned nr = 0, nc = 0, k = 0;
 
+    for (unsigned i = 0; i < n; i++) {
+        int in_cat = 0;
+        if (v[i].type == CH_CATEGORY) {
+            cats[nc++] = &v[i];
+            continue;
+        }
+        for (unsigned j = 0; v[i].parent[0] && j < n && !in_cat; j++)
+            in_cat = v[j].type == CH_CATEGORY && str_eq(v[j].id, v[i].parent);
+        if (!in_cat)
+            roots[nr++] = &v[i];
+    }
+    sort_ptrs(roots, nr);
+    sort_ptrs(cats, nc);
+    for (unsigned i = 0; i < nr; i++)
+        out[k++] = *roots[i];
+    for (unsigned c = 0; c < nc; c++) {
+        unsigned nk = 0;
+        out[k++] = *cats[c];
+        for (unsigned i = 0; i < n; i++)
+            if (v[i].type != CH_CATEGORY && v[i].parent[0] && str_eq(v[i].parent, cats[c]->id))
+                kids[nk++] = &v[i];
+        sort_ptrs(kids, nk);
+        for (unsigned i = 0; i < nk; i++)
+            out[k++] = *kids[i];
+    }
+    for (unsigned i = 0; i < k; i++)
+        v[i] = out[i];
+    mem_free(out);
+    mem_free(kids);
+    mem_free(cats);
+    mem_free(roots);
+}
+
+static void push(model_t *m, unsigned *cap, const channel_t *c)
+{
     if (m->nchannels == *cap) {
         *cap = *cap ? *cap * 2 : 256;
         m->channels = mem_realloc(m->channels, *cap * sizeof *m->channels);
     }
-    out = &m->channels[m->nchannels++];
-    *out = (channel_t){0};
-    if (json_get(c->json, "last_message_id", &name))
-        json_raw(name, out->last_message, sizeof out->last_message);
-    for (unsigned k = 0; k < sizeof out->id; k++)
-        if (!(out->id[k] = c->id[k]))
-            break;
-    out->type = c->type;
-    out->name = json_get(c->json, "name", &name) ? add_str(m, name) : 0;
+    m->channels[m->nchannels++] = *c;
 }
 
-static void add_guild_channels(model_t *m, unsigned *cap, json_t d, json_t g, unsigned index, guild_t *guild)
+/* Fills `out` and appends the guild's visible channels. from_ready: roles come from READY. */
+static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned index, int from_ready, guild_t *out)
 {
-    json_t chans, ch, v, role, roles = {0};
+    json_t v, chans, ch;
     json_iter_t it;
-    char mine[MAX_ROLES][24];
-    unsigned long long base = 0;
-    int nmine, known;
-    unsigned n = 0, total, nlist = 0;
-    tmp_channel_t *tmp;
-    tmp_channel_t **list;
+    role_id_t mine[MAX_ROLES];
+    int nmine;
+    unsigned total, n = 0;
+    channel_t *tmp;
 
-    guild->first = m->nchannels;
-    guild->count = 0;
+    *out = (guild_t){0};
+    if (json_get(g, "id", &v))
+        json_raw(v, out->id, sizeof out->id);
+    if (field(g, "icon", &v))
+        json_raw(v, out->icon, sizeof out->icon);
+    if (field(g, "name", &v))
+        out->name = add_str(m, v);
+    nmine = my_roles(d, g, index, m->user_id, mine);
+    if (nmine < 0 && !from_ready)
+        nmine = 0; /* just joined: no roles yet */
+    guild_perms(m, out, g, mine, nmine);
+
+    out->first = m->nchannels;
     if (!json_get(g, "channels", &chans))
         return;
     total = (unsigned)json_count(chans);
-    if (!total)
-        return;
-
-    /* Base permissions: @everyone plus our roles; owners and admins see everything. */
-    nmine = my_roles(d, g, index, m->user_id, mine);
-    known = nmine >= 0 && json_get(g, "roles", &roles);
-    if (known) {
-        json_iter(roles, &it);
-        while (json_next(&it, NULL, &role))
-            if (json_get(role, "id", &v) && (id_eq(v, guild->id) || has_role((const char(*)[24])mine, nmine, v)))
-                base |= json_get(role, "permissions", &v) ? to_u64(v) : 0;
-        if ((field(g, "owner_id", &v) && id_eq(v, m->user_id)) || (base & PERM_ADMINISTRATOR))
-            known = 0;
-    }
-
-    tmp = mem_alloc(total * sizeof *tmp);
-    list = mem_alloc(total * sizeof *list);
+    tmp = mem_alloc((total + 1) * sizeof *tmp);
     json_iter(chans, &it);
     while (n < total && json_next(&it, NULL, &ch)) {
-        tmp_channel_t *c = &tmp[n++];
-        c->json = ch;
-        if (json_get(ch, "id", &v))
-            json_raw(v, c->id, sizeof c->id);
-        if (json_get(ch, "parent_id", &v))
-            json_raw(v, c->parent, sizeof c->parent);
-        c->type = json_get(ch, "type", &v) ? (int)to_i64(v) : 0;
-        c->position = json_get(ch, "position", &v) ? to_i64(v) : 0;
-        c->visible = !known ||
-                     (channel_perms(ch, base, guild->id, m->user_id, (const char(*)[24])mine, nmine) & PERM_VIEW_CHANNEL);
+        json_t type;
+        int is_cat = json_get(ch, "type", &type) && to_i64(type) == CH_CATEGORY;
+        if (is_cat || visible(m, out, ch))
+            tmp[n++] = make_channel(m, ch);
     }
-
-    /* Channels without a category first, then each category and its channels. */
+    order_slice(tmp, n);
     for (unsigned i = 0; i < n; i++)
-        if (tmp[i].type != CH_CATEGORY && !tmp[i].parent[0] && tmp[i].visible)
-            list[nlist++] = &tmp[i];
-    sort_channels(list, nlist);
-    for (unsigned i = 0; i < nlist; i++)
-        push_channel(m, cap, list[i]);
-
-    nlist = 0;
-    for (unsigned i = 0; i < n; i++)
-        if (tmp[i].type == CH_CATEGORY)
-            list[nlist++] = &tmp[i];
-    sort_channels(list, nlist);
-    {
-        unsigned ncat = nlist;
-        tmp_channel_t **cats = mem_alloc((ncat + 1) * sizeof *cats);
-        for (unsigned i = 0; i < ncat; i++)
-            cats[i] = list[i];
-        for (unsigned c = 0; c < ncat; c++) {
-            nlist = 0;
-            for (unsigned i = 0; i < n; i++)
-                if (tmp[i].type != CH_CATEGORY && tmp[i].visible && str_eq(tmp[i].parent, cats[c]->id))
-                    list[nlist++] = &tmp[i];
-            if (!nlist)
-                continue;
-            sort_channels(list, nlist);
-            push_channel(m, cap, cats[c]);
-            for (unsigned i = 0; i < nlist; i++)
-                push_channel(m, cap, list[i]);
-        }
-        mem_free(cats);
-    }
-    guild->count = m->nchannels - guild->first;
-    mem_free(list);
+        push(m, cap, &tmp[i]);
+    out->count = n;
     mem_free(tmp);
 }
 
@@ -335,22 +433,14 @@ static int guild_rank(json_t d, const char *id)
 
 /* ---- Direct messages ---- */
 
-typedef struct {
-    json_t json;
-    char last[24];
-} tmp_dm_t;
-
 /* Recipients come as full user objects, or as ids pointing into READY's "users". */
-static int next_recipient(json_t d, json_t ch, json_iter_t *it, int *by_id, json_t *user)
+static int next_recipient(json_t d, json_iter_t *it, int by_id, json_t *user)
 {
     json_t v, users, u, uid;
     json_iter_t uit;
 
-    if (!*by_id) {
-        if (json_next(it, NULL, user))
-            return 1;
-        return 0;
-    }
+    if (!by_id)
+        return json_next(it, NULL, user);
     while (json_next(it, NULL, &v)) {
         char id[24];
         json_raw(v, id, sizeof id);
@@ -363,23 +453,7 @@ static int next_recipient(json_t d, json_t ch, json_iter_t *it, int *by_id, json
                 return 1;
             }
     }
-    (void)ch;
     return 0;
-}
-
-static void start_recipients(json_t ch, json_iter_t *it, int *by_id)
-{
-    json_t list;
-
-    *by_id = 0;
-    if (json_get(ch, "recipients", &list)) {
-        json_iter(list, it);
-    } else if (json_get(ch, "recipient_ids", &list)) {
-        *by_id = 1;
-        json_iter(list, it);
-    } else {
-        it->p = it->end = NULL;
-    }
 }
 
 static void add_user_name(model_t *m, json_t user)
@@ -390,36 +464,38 @@ static void add_user_name(model_t *m, json_t user)
         json_str(v, &m->strings);
 }
 
-static void add_dm(model_t *m, unsigned *cap, json_t d, json_t ch)
+/* Returns 0 if `ch` is not a DM or group DM. */
+static int make_dm(model_t *m, json_t d, json_t ch, channel_t *out)
 {
-    json_t v, user;
+    json_t v, list, user;
     json_iter_t it;
-    int by_id, n = 0;
-    tmp_channel_t tmp = {0};
-    channel_t *out;
+    int by_id = 0, n = 0;
 
-    tmp.json = ch;
-    if (json_get(ch, "id", &v))
-        json_raw(v, tmp.id, sizeof tmp.id);
-    tmp.type = json_get(ch, "type", &v) ? (int)to_i64(v) : CH_DM;
-    if (tmp.type != CH_DM && tmp.type != CH_GROUP_DM)
-        return;
-    push_channel(m, cap, &tmp);
-    out = &m->channels[m->nchannels - 1];
-
-    if (tmp.type == CH_GROUP_DM && json_get(ch, "icon", &v))
+    *out = make_channel(m, ch);
+    if (!json_get(ch, "type", &v))
+        out->type = CH_DM;
+    if (out->type != CH_DM && out->type != CH_GROUP_DM)
+        return 0;
+    if (out->type == CH_GROUP_DM && json_get(ch, "icon", &v))
         json_raw(v, out->avatar, sizeof out->avatar);
-    if (json_get(ch, "name", &v) && json_type(v) == JSON_STRING && v.end - v.p > 2)
-        return; /* named group: push_channel stored the name */
+    if (out->name && model_str(m, out->name)[0])
+        return 1; /* named group */
 
     /* Name after the recipients: "Ann" or "Ann, Bob, Carl". */
     out->name = (unsigned)m->strings.len;
-    start_recipients(ch, &it, &by_id);
-    while (it.p && next_recipient(d, ch, &it, &by_id, &user)) {
+    if (json_get(ch, "recipients", &list)) {
+        json_iter(list, &it);
+    } else if (json_get(ch, "recipient_ids", &list)) {
+        by_id = 1;
+        json_iter(list, &it);
+    } else {
+        it.p = it.end = NULL;
+    }
+    while (it.p && next_recipient(d, &it, by_id, &user)) {
         if (n++)
             sb_add(&m->strings, ", ");
         add_user_name(m, user);
-        if (n == 1 && tmp.type == CH_DM) {
+        if (n == 1 && out->type == CH_DM) {
             if (json_get(user, "id", &v))
                 json_raw(v, out->user_id, sizeof out->user_id);
             if (json_get(user, "avatar", &v))
@@ -429,14 +505,15 @@ static void add_dm(model_t *m, unsigned *cap, json_t d, json_t ch)
     if (!n)
         sb_add(&m->strings, "Unknown user");
     sb_addn(&m->strings, "", 1);
+    return 1;
 }
 
 static void add_dms(model_t *m, unsigned *cap, json_t d)
 {
-    json_t list, ch, v;
+    json_t list, ch;
     json_iter_t it;
     unsigned total, n = 0;
-    tmp_dm_t *tmp;
+    channel_t *tmp;
 
     m->dm_first = m->nchannels;
     if (!json_get(d, "private_channels", &list))
@@ -444,29 +521,26 @@ static void add_dms(model_t *m, unsigned *cap, json_t d)
     total = (unsigned)json_count(list);
     tmp = mem_alloc((total + 1) * sizeof *tmp);
     json_iter(list, &it);
-    while (n < total && json_next(&it, NULL, &ch)) {
-        tmp[n].json = ch;
-        if (json_get(ch, "last_message_id", &v))
-            json_raw(v, tmp[n].last, sizeof tmp[n].last);
-        n++;
-    }
+    while (n < total && json_next(&it, NULL, &ch))
+        if (make_dm(m, d, ch, &tmp[n]))
+            n++;
     /* Most recent conversation first. */
     for (unsigned a = 1; a < n; a++) {
-        tmp_dm_t x = tmp[a];
+        channel_t x = tmp[a];
         unsigned b = a;
-        while (b > 0 && id_cmp(tmp[b - 1].last, x.last) < 0) {
+        while (b > 0 && id_cmp(tmp[b - 1].last_message, x.last_message) < 0) {
             tmp[b] = tmp[b - 1];
             b--;
         }
         tmp[b] = x;
     }
     for (unsigned i = 0; i < n; i++)
-        add_dm(m, cap, d, tmp[i].json);
-    m->dm_count = m->nchannels - m->dm_first;
+        push(m, cap, &tmp[i]);
+    m->dm_count = n;
     mem_free(tmp);
 }
 
-/* ---- Read state and mutes ---- */
+/* ---- Lookups ---- */
 
 int model_id_cmp(const char *a, const char *b)
 {
@@ -478,6 +552,14 @@ int model_find_channel(const model_t *m, const char *id)
     for (unsigned i = 0; i < m->nchannels; i++)
         if (str_eq(m->channels[i].id, id))
             return (int)i;
+    return -1;
+}
+
+int model_find_guild(const model_t *m, const char *id)
+{
+    for (unsigned g = 0; g < m->nguilds; g++)
+        if (str_eq(m->guilds[g].id, id))
+            return (int)g;
     return -1;
 }
 
@@ -499,6 +581,8 @@ int model_unread(const model_t *m, unsigned i)
     return id_cmp(c->last_message, c->read) > 0;
 }
 
+/* ---- Read state and mutes ---- */
+
 /* READY sends these either as {"entries": [...]} or as a bare array. */
 static int entries(json_t d, const char *key, json_t *out)
 {
@@ -510,11 +594,6 @@ static int entries(json_t d, const char *key, json_t *out)
         return json_get(v, "entries", out);
     *out = v;
     return json_type(v) == JSON_ARRAY;
-}
-
-static int is_true(json_t v)
-{
-    return json_type(v) == JSON_TRUE;
 }
 
 static void apply_read_state(model_t *m, json_t d)
@@ -536,11 +615,8 @@ static void apply_read_state(model_t *m, json_t d)
             continue;
         if (json_get(e, "last_message_id", &v))
             json_raw(v, m->channels[i].read, sizeof m->channels[i].read);
-        if (json_get(e, "mention_count", &v)) {
-            long long n = 0;
-            json_int(v, &n);
-            m->channels[i].mentions = (int)n;
-        }
+        if (json_get(e, "mention_count", &v))
+            m->channels[i].mentions = (int)to_i64(v);
     }
 }
 
@@ -554,21 +630,19 @@ static void apply_mutes(model_t *m, json_t d)
         return;
     json_iter(list, &it);
     while (json_next(&it, NULL, &e)) {
+        int g;
         id[0] = 0;
         if (json_get(e, "guild_id", &v))
             json_raw(v, id, sizeof id);
-        if (id[0] && json_get(e, "muted", &v) && is_true(v))
-            for (unsigned g = 0; g < m->nguilds; g++)
-                if (str_eq(m->guilds[g].id, id))
-                    m->guilds[g].muted = 1;
+        if (id[0] && json_get(e, "muted", &v) && is_true(v) && (g = model_find_guild(m, id)) >= 0)
+            m->guilds[g].muted = 1;
         if (!json_get(e, "channel_overrides", &overrides))
             continue;
         json_iter(overrides, &oit);
         while (json_next(&oit, NULL, &o)) {
             int i;
-            if (!json_get(o, "channel_id", &v) || !json_get(o, "muted", &v) || !is_true(v))
+            if (!json_get(o, "muted", &v) || !is_true(v) || !json_get(o, "channel_id", &v))
                 continue;
-            json_get(o, "channel_id", &v);
             json_raw(v, id, sizeof id);
             i = model_find_channel(m, id);
             if (i >= 0)
@@ -576,6 +650,8 @@ static void apply_mutes(model_t *m, json_t d)
         }
     }
 }
+
+/* ---- READY ---- */
 
 model_t *model_from_ready(json_t d)
 {
@@ -594,36 +670,21 @@ model_t *model_from_ready(json_t d)
         if ((json_get(user, "global_name", &v) && json_type(v) == JSON_STRING) || json_get(user, "username", &v))
             m->user_name = add_str(m, v);
     }
-    if (!json_get(d, "guilds", &guilds)) {
-        add_dms(m, &cap, d);
-        apply_read_state(m, d);
-        apply_mutes(m, d);
-        return m;
-    }
 
-    total = (unsigned)json_count(guilds);
+    total = json_get(d, "guilds", &guilds) ? (unsigned)json_count(guilds) : 0;
     m->guilds = mem_alloc((total + 1) * sizeof *m->guilds);
     rank = mem_alloc((total + 1) * sizeof *rank);
-    json_iter(guilds, &it);
-    while (json_next(&it, NULL, &g)) {
-        guild_t *out = &m->guilds[m->nguilds];
-        json_t name;
-
-        if (!field(g, "name", &name)) {
+    if (total) {
+        json_iter(guilds, &it);
+        while (json_next(&it, NULL, &g)) {
+            if (field(g, "name", &v)) { /* skip unavailable guilds */
+                build_guild(m, &cap, d, g, i, 1, &m->guilds[m->nguilds]);
+                rank[m->nguilds] = guild_rank(d, m->guilds[m->nguilds].id);
+                m->nguilds++;
+            }
             i++;
-            continue; /* unavailable guild */
         }
-        if (json_get(g, "id", &v))
-            json_raw(v, out->id, sizeof out->id);
-        if (field(g, "icon", &v))
-            json_raw(v, out->icon, sizeof out->icon);
-        out->name = add_str(m, name);
-        add_guild_channels(m, &cap, d, g, i, out);
-        rank[m->nguilds] = guild_rank(d, out->id);
-        m->nguilds++;
-        i++;
     }
-
     /* Stable insertion sort by sidebar rank. */
     for (unsigned a = 1; a < m->nguilds; a++) {
         guild_t x = m->guilds[a];
@@ -652,4 +713,233 @@ void model_free(model_t *m)
     mem_free(m->guilds);
     mem_free(m->channels);
     mem_free(m);
+}
+
+/* ---- Live updates ---- */
+
+static model_t *clone_empty(const model_t *m, unsigned extra_guilds)
+{
+    model_t *n = mem_alloc(sizeof *n);
+
+    sb_addn(&n->strings, m->strings.data, m->strings.len);
+    copy_id(n->user_id, m->user_id, sizeof n->user_id);
+    copy_id(n->user_avatar, m->user_avatar, sizeof n->user_avatar);
+    n->user_name = m->user_name;
+    n->guilds = mem_alloc((m->nguilds + extra_guilds + 1) * sizeof *n->guilds);
+    return n;
+}
+
+static void copy_guild(model_t *n, unsigned *cap, const model_t *m, unsigned g, const char *skip_id)
+{
+    guild_t *out = &n->guilds[n->nguilds++];
+
+    *out = m->guilds[g];
+    out->first = n->nchannels;
+    out->count = 0;
+    for (unsigned i = m->guilds[g].first; i < m->guilds[g].first + m->guilds[g].count; i++)
+        if (!skip_id || !str_eq(m->channels[i].id, skip_id)) {
+            push(n, cap, &m->channels[i]);
+            out->count++;
+        }
+}
+
+/* Copies the DM list, replacing (or dropping, when `with` is NULL) the entry `id`; `front` goes on top. */
+static void copy_dms(model_t *n, unsigned *cap, const model_t *m, const char *id, const channel_t *with,
+                     const channel_t *front)
+{
+    n->dm_first = n->nchannels;
+    if (front)
+        push(n, cap, front);
+    for (unsigned i = m->dm_first; i < m->dm_first + m->dm_count; i++) {
+        if (id && str_eq(m->channels[i].id, id)) {
+            if (with)
+                push(n, cap, with);
+        } else {
+            push(n, cap, &m->channels[i]);
+        }
+    }
+    n->dm_count = n->nchannels - n->dm_first;
+}
+
+/* Keeps what we knew about a channel (read state, mute) across an update. */
+static void carry_state(channel_t *c, const model_t *m)
+{
+    int i = model_find_channel(m, c->id);
+
+    if (i < 0)
+        return;
+    copy_id(c->read, m->channels[i].read, sizeof c->read);
+    c->mentions = m->channels[i].mentions;
+    c->muted = m->channels[i].muted;
+    if (id_cmp(m->channels[i].last_message, c->last_message) > 0)
+        copy_id(c->last_message, m->channels[i].last_message, sizeof c->last_message);
+}
+
+static model_t *apply_channel(const model_t *m, json_t d, int deleted)
+{
+    json_t v;
+    char id[24] = {0}, guild_id[24] = {0};
+    int old, gi = -1;
+    unsigned cap = 0;
+    model_t *n;
+
+    if (json_get(d, "id", &v))
+        json_raw(v, id, sizeof id);
+    if (json_get(d, "guild_id", &v))
+        json_raw(v, guild_id, sizeof guild_id);
+    old = model_find_channel(m, id);
+    if (guild_id[0] && (gi = model_find_guild(m, guild_id)) < 0)
+        return NULL;
+    if (deleted && old < 0)
+        return NULL;
+
+    if (gi < 0) {
+        channel_t c;
+        n = clone_empty(m, 0);
+        for (unsigned g = 0; g < m->nguilds; g++)
+            copy_guild(n, &cap, m, g, NULL);
+        if (deleted) {
+            copy_dms(n, &cap, m, id, NULL, NULL);
+        } else if (!make_dm(n, d, d, &c)) {
+            model_free(n);
+            return NULL;
+        } else {
+            carry_state(&c, m);
+            copy_dms(n, &cap, m, old >= 0 ? id : NULL, old >= 0 ? &c : NULL, old >= 0 ? NULL : &c);
+        }
+        return n;
+    }
+
+    n = clone_empty(m, 0);
+    for (unsigned g = 0; g < m->nguilds; g++) {
+        const guild_t *src = &m->guilds[g];
+        channel_t *tmp;
+        unsigned k = 0;
+        int show;
+
+        if ((int)g != gi) {
+            copy_guild(n, &cap, m, g, NULL);
+            continue;
+        }
+        tmp = mem_alloc((src->count + 2) * sizeof *tmp);
+        for (unsigned i = src->first; i < src->first + src->count; i++)
+            if (!str_eq(m->channels[i].id, id))
+                tmp[k++] = m->channels[i];
+        show = !deleted && ((json_get(d, "type", &v) && to_i64(v) == CH_CATEGORY) || visible(m, src, d));
+        if (show) {
+            tmp[k] = make_channel(n, d);
+            carry_state(&tmp[k], m);
+            k++;
+        }
+        order_slice(tmp, k);
+        n->guilds[n->nguilds] = *src;
+        n->guilds[n->nguilds].first = n->nchannels;
+        n->guilds[n->nguilds].count = k;
+        n->nguilds++;
+        for (unsigned i = 0; i < k; i++)
+            push(n, &cap, &tmp[i]);
+        mem_free(tmp);
+        if (!show && old < 0) {
+            model_free(n); /* a channel we cannot see: nothing changes */
+            return NULL;
+        }
+    }
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    return n;
+}
+
+static model_t *apply_guild_create(const model_t *m, json_t d)
+{
+    json_t v;
+    char id[24] = {0};
+    int gi;
+    unsigned cap = 0;
+    guild_t fresh;
+    model_t *n;
+    json_t none = {0};
+
+    if (json_get(d, "id", &v))
+        json_raw(v, id, sizeof id);
+    if (!field(d, "name", &v))
+        return NULL; /* unavailable */
+    gi = model_find_guild(m, id);
+    n = clone_empty(m, 1);
+    build_guild(n, &cap, none, d, 0, 0, &fresh);
+    for (unsigned i = fresh.first; i < fresh.first + fresh.count; i++)
+        carry_state(&n->channels[i], m);
+    if (gi >= 0)
+        fresh.muted = m->guilds[gi].muted;
+    else
+        n->guilds[n->nguilds++] = fresh; /* joined: on top, like Discord */
+    for (unsigned g = 0; g < m->nguilds; g++) {
+        if ((int)g == gi)
+            n->guilds[n->nguilds++] = fresh;
+        else
+            copy_guild(n, &cap, m, g, NULL);
+    }
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    return n;
+}
+
+static model_t *apply_guild_patch(const model_t *m, const char *event, json_t d)
+{
+    json_t v, user;
+    char id[24] = {0};
+    int gi;
+    unsigned cap = 0;
+    model_t *n;
+
+    if (json_get(d, str_eq(event, "GUILD_MEMBER_UPDATE") ? "guild_id" : "id", &v))
+        json_raw(v, id, sizeof id);
+    if ((gi = model_find_guild(m, id)) < 0)
+        return NULL;
+    if (str_eq(event, "GUILD_DELETE") && json_get(d, "unavailable", &v) && is_true(v))
+        return NULL; /* outage, not a leave */
+    if (str_eq(event, "GUILD_MEMBER_UPDATE") &&
+        !(json_get(d, "user", &user) && json_get(user, "id", &v) && id_eq(v, m->user_id)))
+        return NULL;
+
+    n = clone_empty(m, 0);
+    for (unsigned g = 0; g < m->nguilds; g++)
+        if ((int)g != gi || !str_eq(event, "GUILD_DELETE"))
+            copy_guild(n, &cap, m, g, NULL);
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    if (str_eq(event, "GUILD_DELETE"))
+        return n;
+
+    {
+        guild_t *g = &n->guilds[gi];
+        role_id_t mine[MAX_ROLES];
+        int nmine;
+
+        if (str_eq(event, "GUILD_MEMBER_UPDATE")) {
+            json_t roles;
+            nmine = json_get(d, "roles", &roles) ? read_roles(roles, mine) : 0;
+            g->my_roles = roles_string(n, mine, nmine);
+            return n;
+        }
+        /* GUILD_UPDATE: name, icon, and permissions if roles came along. */
+        if (field(d, "name", &v))
+            g->name = add_str(n, v);
+        if (field(d, "icon", &v))
+            json_raw(v, g->icon, sizeof g->icon);
+        if (json_get(d, "roles", &v)) {
+            nmine = parse_roles(n, g->my_roles, mine);
+            guild_perms(n, g, d, mine, nmine);
+        }
+    }
+    return n;
+}
+
+model_t *model_apply(const model_t *m, const char *event, json_t d)
+{
+    if (str_eq(event, "CHANNEL_CREATE") || str_eq(event, "CHANNEL_UPDATE"))
+        return apply_channel(m, d, 0);
+    if (str_eq(event, "CHANNEL_DELETE"))
+        return apply_channel(m, d, 1);
+    if (str_eq(event, "GUILD_CREATE"))
+        return apply_guild_create(m, d);
+    if (str_eq(event, "GUILD_UPDATE") || str_eq(event, "GUILD_DELETE") || str_eq(event, "GUILD_MEMBER_UPDATE"))
+        return apply_guild_patch(m, event, d);
+    return NULL;
 }
