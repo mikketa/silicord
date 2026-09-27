@@ -4,7 +4,7 @@
  */
 #include <windows.h>
 #include <d2d1.h>
-#include <dwrite.h>
+#include <dwrite_3.h>
 #include <wincodec.h>
 #include "render.h"
 
@@ -164,6 +164,87 @@ extern "C" void r_image(r_image_t *img, int x, int y, int w, int h, int radius)
     bb->Release();
 }
 
+extern "C" void r_image_cover(r_image_t *img, int x, int y, int w, int h, int radius)
+{
+    ID2D1RoundedRectangleGeometry *g = NULL;
+    ID2D1Layer *layer = NULL;
+    D2D1_ROUNDED_RECT rr = rounded(x, y, w, h, radius);
+    float sx, sy, s;
+    int dw, dh;
+
+    if (!img || !img->w || !img->h || w <= 0 || h <= 0)
+        return;
+    sx = (float)w / (float)img->w;
+    sy = (float)h / (float)img->h;
+    s = sx > sy ? sx : sy;
+    dw = (int)((float)img->w * s + 0.5f);
+    dh = (int)((float)img->h * s + 0.5f);
+    /* Round the visible rectangle, not the scaled image. */
+    if (SUCCEEDED(g_d2d->CreateRoundedRectangleGeometry(&rr, &g)) && SUCCEEDED(g_rt->CreateLayer(NULL, &layer))) {
+        D2D1_LAYER_PARAMETERS lp = {};
+        lp.contentBounds = rectf(x, y, w, h);
+        lp.geometricMask = g;
+        lp.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+        lp.maskTransform._11 = lp.maskTransform._22 = 1;
+        lp.opacity = 1;
+        g_rt->PushLayer(&lp, layer);
+        r_image(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh, 0);
+        g_rt->PopLayer();
+    }
+    if (layer)
+        layer->Release();
+    if (g)
+        g->Release();
+}
+
+extern "C" unsigned r_image_average(r_image_t *img)
+{
+    unsigned long long r = 0, g = 0, b = 0, n = 0;
+    UINT step;
+
+    if (!img || !img->pixels)
+        return 0;
+    step = img->w * img->h > 4096 ? img->w * img->h / 4096 : 1;
+    for (UINT i = 0; i < img->w * img->h; i += step) {
+        const BYTE *p = img->pixels + (size_t)i * 4;
+        if (p[3] < 250)
+            continue;
+        b += p[0];
+        g += p[1];
+        r += p[2];
+        n++;
+    }
+    if (!n)
+        return 0;
+    return 0xFF000000u | (unsigned)(r / n) << 16 | (unsigned)(g / n) << 8 | (unsigned)(b / n);
+}
+
+extern "C" void r_round_gradient(int x, int y, int w, int h, int radius, unsigned top, unsigned bottom)
+{
+    D2D1_GRADIENT_STOP stops[2] = {{0.0f, color(top)}, {1.0f, color(bottom)}};
+    ID2D1GradientStopCollection *sc = NULL;
+    ID2D1LinearGradientBrush *lb = NULL;
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES lp = {{(float)x, (float)y}, {(float)x, (float)(y + h)}};
+    D2D1_ROUNDED_RECT rr = rounded(x, y, w, h, radius);
+
+    if (SUCCEEDED(g_rt->CreateGradientStopCollection(stops, 2, &sc)) &&
+        SUCCEEDED(g_rt->CreateLinearGradientBrush(&lp, NULL, sc, &lb)))
+        g_rt->FillRoundedRectangle(&rr, lb);
+    if (lb)
+        lb->Release();
+    if (sc)
+        sc->Release();
+}
+
+extern "C" void r_round_outline(int x, int y, int w, int h, int radius, int width, unsigned argb)
+{
+    float half = (float)width / 2;
+    D2D1_ROUNDED_RECT rr = {{(float)x + half, (float)y + half, (float)(x + w) - half, (float)(y + h) - half},
+                            (float)radius - half, (float)radius - half};
+
+    g_rt->DrawRoundedRectangle(&rr, brush(argb), (float)width);
+}
+
 extern "C" void r_clip(int x, int y, int w, int h)
 {
     D2D1_RECT_F r = rectf(x, y, w, h);
@@ -188,6 +269,56 @@ extern "C" r_font_t *r_font(const wchar_t *family, int px, int weight, int itali
         return NULL;
     }
     g_dw->CreateEllipsisTrimmingSign(f->format, &f->ellipsis);
+    return f;
+}
+
+/* Registered once, kept for the life of the process. */
+static IDWriteInMemoryFontFileLoader *g_mem_loader;
+
+extern "C" r_font_t *r_font_data(const void *data, size_t n, int px, int weight)
+{
+    IDWriteFactory5 *f5 = NULL;
+    IDWriteFontFile *file = NULL;
+    IDWriteFontSetBuilder1 *builder = NULL;
+    IDWriteFontSet *set = NULL;
+    IDWriteFontCollection1 *coll = NULL;
+    IDWriteFontFamily *family = NULL;
+    IDWriteLocalizedStrings *names = NULL;
+    WCHAR name[128];
+    r_font_t *f = NULL;
+
+    if (FAILED(g_dw->QueryInterface(__uuidof(IDWriteFactory5), (void **)&f5)))
+        return NULL;
+    if (!g_mem_loader && SUCCEEDED(f5->CreateInMemoryFontFileLoader(&g_mem_loader)))
+        f5->RegisterFontFileLoader(g_mem_loader);
+    if (g_mem_loader &&
+        SUCCEEDED(g_mem_loader->CreateInMemoryFontFileReference(f5, data, (UINT32)n, NULL, &file)) &&
+        SUCCEEDED(f5->CreateFontSetBuilder(&builder)) && SUCCEEDED(builder->AddFontFile(file)) &&
+        SUCCEEDED(builder->CreateFontSet(&set)) && SUCCEEDED(f5->CreateFontCollectionFromFontSet(set, &coll)) &&
+        coll->GetFontFamilyCount() > 0 && SUCCEEDED(coll->GetFontFamily(0, &family)) &&
+        SUCCEEDED(family->GetFamilyNames(&names)) && SUCCEEDED(names->GetString(0, name, 128))) {
+        f = (r_font_t *)mem_alloc(sizeof *f);
+        if (FAILED(g_dw->CreateTextFormat(name, coll, (DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STYLE_NORMAL,
+                                          DWRITE_FONT_STRETCH_NORMAL, (float)px, L"", &f->format))) {
+            mem_free(f);
+            f = NULL;
+        } else {
+            g_dw->CreateEllipsisTrimmingSign(f->format, &f->ellipsis);
+        }
+    }
+    if (names)
+        names->Release();
+    if (family)
+        family->Release();
+    if (coll)
+        coll->Release();
+    if (set)
+        set->Release();
+    if (builder)
+        builder->Release();
+    if (file)
+        file->Release();
+    f5->Release();
     return f;
 }
 
@@ -229,6 +360,111 @@ extern "C" void r_text(r_font_t *f, unsigned argb, int x, int y, int w, int h, c
     if (!f || w <= 0 || !(l = layout(f, s, len, w, h, flags)))
         return;
     g_rt->DrawTextLayout(at, l, brush(argb), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    l->Release();
+}
+
+static unsigned opaque(unsigned rgb, unsigned alpha)
+{
+    return alpha << 24 | (rgb & 0xFFFFFF);
+}
+
+static unsigned mix(unsigned a, unsigned b, int pct) /* pct of b */
+{
+    unsigned out = 0;
+
+    for (int shift = 0; shift < 24; shift += 8) {
+        int ca = (int)(a >> shift & 0xFF), cb = (int)(b >> shift & 0xFF);
+        out |= (unsigned)(ca + (cb - ca) * pct / 100) << shift;
+    }
+    return out;
+}
+
+/* Draws the layout at eight points of a ring of radius r around (x, y). */
+static void ring(IDWriteTextLayout *l, float x, float y, float r, ID2D1Brush *b)
+{
+    static const float k[8][2] = {{1, 0}, {0.7f, 0.7f}, {0, 1}, {-0.7f, 0.7f}, {-1, 0}, {-0.7f, -0.7f}, {0, -1}, {0.7f, -0.7f}};
+
+    for (int i = 0; i < 8; i++) {
+        D2D1_POINT_2F at = {x + k[i][0] * r, y + k[i][1] * r};
+        g_rt->DrawTextLayout(at, l, b, D2D1_DRAW_TEXT_OPTIONS_NONE);
+    }
+}
+
+static ID2D1LinearGradientBrush *gradient(const unsigned *colors, int n, float x0, float y0, float x1, float y1,
+                                          ID2D1GradientStopCollection **sc)
+{
+    D2D1_GRADIENT_STOP stops[8];
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES lp = {{x0, y0}, {x1, y1}};
+    ID2D1LinearGradientBrush *lb = NULL;
+
+    if (n > 8)
+        n = 8;
+    for (int i = 0; i < n; i++) {
+        stops[i].position = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
+        stops[i].color = color(opaque(colors[i], 0xFF));
+    }
+    if (FAILED(g_rt->CreateGradientStopCollection(stops, (UINT32)n, sc)))
+        return NULL;
+    if (FAILED(g_rt->CreateLinearGradientBrush(&lp, NULL, *sc, &lb))) {
+        (*sc)->Release();
+        *sc = NULL;
+    }
+    return lb;
+}
+
+extern "C" void r_text_styled(r_font_t *f, const unsigned *colors, int ncolors, int effect, int x, int y, int w, int h,
+                              const wchar_t *s, int len, unsigned flags)
+{
+    IDWriteTextLayout *l;
+    DWRITE_TEXT_METRICS m;
+    ID2D1GradientStopCollection *sc = NULL;
+    ID2D1LinearGradientBrush *lb = NULL;
+    D2D1_POINT_2F at = {(float)x, (float)y};
+    unsigned first = ncolors > 0 ? colors[0] : 0xFFFFFF;
+    unsigned second = ncolors > 1 ? colors[1] : mix(first, 0x000000, 50);
+    float px, left, top;
+
+    if (!f || w <= 0 || !(l = layout(f, s, len, w, h, flags)))
+        return;
+    l->GetMetrics(&m);
+    px = f->format->GetFontSize();
+    left = (float)x + m.left;
+    top = (float)y + m.top;
+
+    switch (effect) {
+    case 3: /* neon: light text in a soft glow of the color */
+        ring(l, at.x, at.y, px / 10, brush(opaque(first, 0x40)));
+        ring(l, at.x, at.y, px / 20, brush(opaque(first, 0x60)));
+        g_rt->DrawTextLayout(at, l, brush(opaque(mix(first, 0xFFFFFF, 65), 0xFF)), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        break;
+    case 4: { /* toon: dark outline, vertical gradient */
+        unsigned v[2] = {mix(first, 0xFFFFFF, 25), first};
+        ring(l, at.x, at.y, px / 14 > 1 ? px / 14 : 1, brush(opaque(mix(second, 0x000000, 70), 0xFF)));
+        lb = gradient(v, 2, left, top, left, top + m.height, &sc);
+        break;
+    }
+    case 5: { /* pop: offset colored shadow */
+        D2D1_POINT_2F sh = {at.x + px / 12, at.y + px / 12};
+        g_rt->DrawTextLayout(sh, l, brush(opaque(second, 0xFF)), D2D1_DRAW_TEXT_OPTIONS_NONE);
+        g_rt->DrawTextLayout(at, l, brush(opaque(first, 0xFF)), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        break;
+    }
+    case 2: case 6: case 7: case 8: /* gradients (glow, prism and gummy are animated in Discord) */
+        if (ncolors > 1) {
+            lb = gradient(colors, ncolors, left, top, left + m.width, top, &sc);
+            break;
+        }
+        /* fall through */
+    default:
+        g_rt->DrawTextLayout(at, l, brush(opaque(first, 0xFF)), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        break;
+    }
+    if (lb) {
+        g_rt->DrawTextLayout(at, l, lb, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        lb->Release();
+    }
+    if (sc)
+        sc->Release();
     l->Release();
 }
 

@@ -24,10 +24,19 @@ void r_round(int x, int y, int w, int h, int radius, unsigned argb);
 void r_circle(int x, int y, int d, unsigned argb);
 /* Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle). */
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
+/* Same, but scaled to cover the rectangle and cropped around the center. */
+void r_image_cover(r_image_t *img, int x, int y, int w, int h, int radius);
+/* Average color of the opaque pixels, 0xFFRRGGBB (0 if there are none). */
+unsigned r_image_average(r_image_t *img);
+/* Rounded rectangle filled with a vertical gradient, and a rounded outline. */
+void r_round_gradient(int x, int y, int w, int h, int radius, unsigned top, unsigned bottom);
+void r_round_outline(int x, int y, int w, int h, int radius, int width, unsigned argb);
 void r_clip(int x, int y, int w, int h);
 void r_unclip(void);
 
 r_font_t *r_font(const wchar_t *family, int px, int weight, int italic);
+/* Font from a TTF/OTF file in memory (the data is copied). NULL if it cannot be read. */
+r_font_t *r_font_data(const void *data, size_t n, int px, int weight);
 void r_font_free(r_font_t *f);
 
 enum {
@@ -43,6 +52,14 @@ enum {
 void r_text(r_font_t *f, unsigned argb, int x, int y, int w, int h, const wchar_t *s, int len, unsigned flags);
 int r_text_width(r_font_t *f, const wchar_t *s, int len);
 int r_text_height(r_font_t *f, const wchar_t *s, int len, int width);
+
+/*
+ * Text drawn with a Discord display name style: `effect` is
+ * display_name_styles.effect_id (1 solid, 2 gradient, 3 neon, 4 toon, 5 pop,
+ * 6 glow, 7 prism, 8 gummy) and `colors` its 0xRRGGBB colors.
+ */
+void r_text_styled(r_font_t *f, const unsigned *colors, int ncolors, int effect, int x, int y, int w, int h,
+                   const wchar_t *s, int len, unsigned flags);
 
 /* ---- Rich text (parsed markdown) ---- */
 
