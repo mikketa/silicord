@@ -480,6 +480,8 @@ static channel_t make_channel(model_t *m, json_t ch)
     c.position = json_get(ch, "position", &v) ? to_i64(v) : 0;
     if (json_get(ch, "name", &v) && json_type(v) == JSON_STRING)
         c.name = add_str(m, v);
+    if (json_get(ch, "topic", &v) && json_type(v) == JSON_STRING && v.end - v.p > 2)
+        c.topic = add_str(m, v);
     return c;
 }
 
@@ -510,7 +512,8 @@ static void sort_ptrs(const channel_t **v, unsigned n)
  * its channels. Categories are kept even when empty so later channels have a
  * home; the UI skips empty ones.
  */
-static void order_slice(channel_t *v, unsigned n)
+/* Sorts a guild's channels for display; threads whose channel is missing are dropped. Returns the count. */
+static unsigned order_slice(channel_t *v, unsigned n)
 {
     const channel_t **roots = mem_alloc((n + 1) * sizeof *roots);
     const channel_t **cats = mem_alloc((n + 1) * sizeof *cats);
@@ -520,6 +523,8 @@ static void order_slice(channel_t *v, unsigned n)
 
     for (unsigned i = 0; i < n; i++) {
         int in_cat = 0;
+        if (model_is_thread(v[i].type))
+            continue; /* placed under their channel below */
         if (v[i].type == CH_CATEGORY) {
             cats[nc++] = &v[i];
             continue;
@@ -531,24 +536,34 @@ static void order_slice(channel_t *v, unsigned n)
     }
     sort_ptrs(roots, nr);
     sort_ptrs(cats, nc);
+#define WITH_THREADS(ch)                                                            \
+    do {                                                                            \
+        out[k++] = *(ch);                                                           \
+        for (unsigned t_ = 0; t_ < n; t_++)                                         \
+            if (model_is_thread(v[t_].type) && str_eq(v[t_].parent, (ch)->id))      \
+                out[k++] = v[t_];                                                   \
+    } while (0)
     for (unsigned i = 0; i < nr; i++)
-        out[k++] = *roots[i];
+        WITH_THREADS(roots[i]);
     for (unsigned c = 0; c < nc; c++) {
         unsigned nk = 0;
         out[k++] = *cats[c];
         for (unsigned i = 0; i < n; i++)
-            if (v[i].type != CH_CATEGORY && v[i].parent[0] && str_eq(v[i].parent, cats[c]->id))
+            if (v[i].type != CH_CATEGORY && !model_is_thread(v[i].type) && v[i].parent[0] &&
+                str_eq(v[i].parent, cats[c]->id))
                 kids[nk++] = &v[i];
         sort_ptrs(kids, nk);
         for (unsigned i = 0; i < nk; i++)
-            out[k++] = *kids[i];
+            WITH_THREADS(kids[i]);
     }
+#undef WITH_THREADS
     for (unsigned i = 0; i < k; i++)
         v[i] = out[i];
     mem_free(out);
     mem_free(kids);
     mem_free(cats);
     mem_free(roots);
+    return k;
 }
 
 static void push(model_t *m, unsigned *cap, const channel_t *c)
@@ -598,7 +613,26 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
         if (is_cat || visible(m, out, ch))
             tmp[n++] = make_channel(m, ch);
     }
-    order_slice(tmp, n);
+    /* Active threads we joined, under a channel we can see. */
+    if (json_get(g, "threads", &chans)) {
+        unsigned nchan = n;
+        tmp = mem_realloc(tmp, (total + json_count(chans) + 1) * sizeof *tmp);
+        json_iter(chans, &it);
+        while (json_next(&it, NULL, &ch)) {
+            json_t member, meta, arch;
+            channel_t t;
+            int parent_seen = 0;
+            if (!json_get(ch, "member", &member) ||
+                (json_get(ch, "thread_metadata", &meta) && json_get(meta, "archived", &arch) && is_true(arch)))
+                continue;
+            t = make_channel(m, ch);
+            for (unsigned i = 0; i < nchan && !parent_seen; i++)
+                parent_seen = str_eq(tmp[i].id, t.parent);
+            if (parent_seen)
+                tmp[n++] = t;
+        }
+    }
+    n = order_slice(tmp, n);
     for (unsigned i = 0; i < n; i++)
         push(m, cap, &tmp[i]);
     out->count = n;
@@ -1036,7 +1070,7 @@ static model_t *apply_channel(const model_t *m, json_t d, int deleted)
             carry_state(&tmp[k], m);
             k++;
         }
-        order_slice(tmp, k);
+        k = order_slice(tmp, k);
         n->guilds[n->nguilds] = *src;
         n->guilds[n->nguilds].first = n->nchannels;
         n->guilds[n->nguilds].count = k;
@@ -1208,6 +1242,20 @@ static model_t *apply_emojis(const model_t *m, json_t d)
 
 model_t *model_apply(const model_t *m, const char *event, json_t d)
 {
+    if (str_eq(event, "THREAD_CREATE") || str_eq(event, "THREAD_UPDATE")) {
+        json_t v, member, owner, meta, arch;
+        char id[24] = "";
+        int known = json_get(d, "id", &v) ? (json_raw(v, id, sizeof id), model_find_channel(m, id) >= 0) : 0;
+        int ours = json_get(d, "member", &member) ||
+                   (json_get(d, "owner_id", &owner) && id_eq(owner, m->user_id));
+        if (json_get(d, "thread_metadata", &meta) && json_get(meta, "archived", &arch) && is_true(arch))
+            return known ? apply_channel(m, d, 1) : NULL; /* archived: gone from the list */
+        if (!known && !ours)
+            return NULL;
+        return apply_channel(m, d, 0);
+    }
+    if (str_eq(event, "THREAD_DELETE"))
+        return apply_channel(m, d, 1);
     if (str_eq(event, "GUILD_EMOJIS_UPDATE"))
         return apply_emojis(m, d);
     if (str_eq(event, "GUILD_ROLE_CREATE") || str_eq(event, "GUILD_ROLE_UPDATE"))

@@ -111,6 +111,35 @@ static void test_updates(const model_t *m)
     model_free(n);
 }
 
+static void test_threads(const model_t *m)
+{
+    model_t *a, *b, *c;
+    int i;
+
+    a = apply(m, "THREAD_CREATE", "{\"id\":\"90\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,\"name\":\"side chat\","
+                                  "\"member\":{\"id\":\"90\",\"user_id\":\"100\"},\"thread_metadata\":{\"archived\":false}}");
+    check(a != NULL, "joined thread is added");
+    i = a ? model_find_channel(a, "90") : -1;
+    check(i > 0 && lstrcmpA(a->channels[i - 1].id, "11") == 0 && model_is_thread(a->channels[i].type),
+          "thread sits right under its channel");
+    check(!apply(m, "THREAD_CREATE", "{\"id\":\"91\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,\"name\":\"x\","
+                                     "\"owner_id\":\"5\"}"),
+          "threads we are not in are left out");
+    b = a ? apply(a, "THREAD_UPDATE", "{\"id\":\"90\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,\"name\":\"s\","
+                                      "\"thread_metadata\":{\"archived\":true}}")
+          : NULL;
+    check(b && model_find_channel(b, "90") < 0, "archived thread leaves the list");
+    c = a ? apply(a, "CHANNEL_UPDATE", "{\"id\":\"11\",\"guild_id\":\"1\",\"type\":0,\"name\":\"general\","
+                                       "\"topic\":\"Talk here\",\"parent_id\":\"10\",\"position\":1}")
+          : NULL;
+    i = c ? model_find_channel(c, "11") : -1;
+    check(i >= 0 && lstrcmpA(model_str(c, c->channels[i].topic), "Talk here") == 0 && model_find_channel(c, "90") == i + 1,
+          "channel topic, and its thread stays under it");
+    model_free(a);
+    model_free(b);
+    model_free(c);
+}
+
 static void test_emojis(const model_t *m)
 {
     model_t *a = apply(m, "GUILD_EMOJIS_UPDATE", "{\"guild_id\":\"1\",\"emojis\":["
@@ -213,6 +242,7 @@ void entry(void)
     test_updates(m);
     test_roles(m);
     test_emojis(m);
+    test_threads(m);
     model_free(m);
     finish();
 }

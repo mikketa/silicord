@@ -15,6 +15,9 @@ enum {
     CH_GROUP_DM = 3,
     CH_CATEGORY = 4,
     CH_NEWS = 5,
+    CH_NEWS_THREAD = 10,
+    CH_PUBLIC_THREAD = 11,
+    CH_PRIVATE_THREAD = 12,
     CH_STAGE = 13,
     CH_FORUM = 15,
     CH_MEDIA = 16,
@@ -40,6 +43,7 @@ typedef struct {
     char parent[24];    /* category */
     long long position;
     unsigned name;
+    unsigned topic;     /* 0 if none */
     int type;
     /* Direct messages: the other user (or the group icon, with user_id empty). */
     char user_id[24];
@@ -69,12 +73,18 @@ model_t *model_from_ready(json_t d);
 void model_free(model_t *m);
 
 /*
- * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, GUILD_CREATE/UPDATE/DELETE,
+ * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, THREAD_CREATE/UPDATE/DELETE
+ * for threads we are in, GUILD_CREATE/UPDATE/DELETE,
  * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_EMOJIS_UPDATE, GUILD_MEMBER_UPDATE for
  * us). Returns a new model, or NULL when nothing changed.
  * `m` is left untouched; read state carries over by channel id.
  */
 model_t *model_apply(const model_t *m, const char *event, json_t d);
+
+static __inline int model_is_thread(int type)
+{
+    return type == CH_NEWS_THREAD || type == CH_PUBLIC_THREAD || type == CH_PRIVATE_THREAD;
+}
 
 /* Snowflake order: negative, zero or positive like strcmp. */
 int model_id_cmp(const char *a, const char *b);
