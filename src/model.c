@@ -586,6 +586,7 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
     channel_t *tmp;
 
     *out = (guild_t){0};
+    out->folder = -1;
     if (json_get(g, "id", &v))
         json_raw(v, out->id, sizeof out->id);
     if (field(g, "icon", &v))
@@ -637,6 +638,42 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
         push(m, cap, &tmp[i]);
     out->count = n;
     mem_free(tmp);
+}
+
+/* Folder of guild `id` in the user's settings (only real folders, with an id), -1 if none. */
+static int guild_folder(model_t *m, json_t d, const char *id)
+{
+    json_t settings, folders, folder, ids, v;
+    json_iter_t it, fit;
+
+    if (!json_get(d, "user_settings", &settings) || !json_get(settings, "guild_folders", &folders))
+        return -1;
+    json_iter(folders, &it);
+    while (json_next(&it, NULL, &folder)) {
+        char fid[24] = "";
+        if (!json_get(folder, "id", &v) || json_type(v) == JSON_NULL || !json_get(folder, "guild_ids", &ids))
+            continue;
+        json_raw(v, fid, sizeof fid);
+        json_iter(ids, &fit);
+        while (json_next(&fit, NULL, &v))
+            if (id_eq(v, id)) {
+                /* Known folder, or a new entry. */
+                for (unsigned f = 0; f < m->nfolders; f++)
+                    if (str_eq(m->folders[f].id, fid))
+                        return (int)f;
+                m->folders = mem_realloc(m->folders, (m->nfolders + 1) * sizeof *m->folders);
+                m->folders[m->nfolders] = (folder_t){0};
+                copy_id(m->folders[m->nfolders].id, fid, sizeof m->folders[0].id);
+                if (json_get(folder, "name", &v) && json_type(v) == JSON_STRING && v.end - v.p > 2)
+                    m->folders[m->nfolders].name = add_str(m, v);
+                if (json_get(folder, "color", &v) && json_type(v) == JSON_NUMBER) {
+                    m->folders[m->nfolders].color = (unsigned)to_i64(v) & 0xFFFFFF;
+                    m->folders[m->nfolders].has_color = 1;
+                }
+                return (int)m->nfolders++;
+            }
+    }
+    return -1;
 }
 
 /* Rank of a guild in the user's sidebar order, -1 if unknown (new guilds go on top). */
@@ -919,6 +956,7 @@ model_t *model_from_ready(json_t d)
             if (field(g, "name", &v)) { /* skip unavailable guilds */
                 build_guild(m, &cap, d, g, i, 1, &m->guilds[m->nguilds]);
                 rank[m->nguilds] = guild_rank(d, m->guilds[m->nguilds].id);
+                m->guilds[m->nguilds].folder = guild_folder(m, d, m->guilds[m->nguilds].id);
                 m->nguilds++;
             }
             i++;
@@ -951,6 +989,7 @@ void model_free(model_t *m)
     sb_free(&m->strings);
     mem_free(m->guilds);
     mem_free(m->channels);
+    mem_free(m->folders);
     mem_free(m);
 }
 
@@ -965,6 +1004,10 @@ static model_t *clone_empty(const model_t *m, unsigned extra_guilds)
     copy_id(n->user_avatar, m->user_avatar, sizeof n->user_avatar);
     n->user_name = m->user_name;
     n->guilds = mem_alloc((m->nguilds + extra_guilds + 1) * sizeof *n->guilds);
+    n->folders = mem_alloc((m->nfolders + 1) * sizeof *n->folders);
+    for (unsigned f = 0; f < m->nfolders; f++)
+        n->folders[f] = m->folders[f];
+    n->nfolders = m->nfolders;
     return n;
 }
 
@@ -1106,8 +1149,10 @@ static model_t *apply_guild_create(const model_t *m, json_t d)
     build_guild(n, &cap, none, d, 0, 0, &fresh);
     for (unsigned i = fresh.first; i < fresh.first + fresh.count; i++)
         carry_state(&n->channels[i], m);
-    if (gi >= 0)
+    if (gi >= 0) {
         fresh.muted = m->guilds[gi].muted;
+        fresh.folder = m->guilds[gi].folder;
+    }
     else
         n->guilds[n->nguilds++] = fresh; /* joined: on top, like Discord */
     for (unsigned g = 0; g < m->nguilds; g++) {

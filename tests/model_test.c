@@ -27,6 +27,7 @@ static const char k_ready[] =
     "{\"id\":\"11\",\"last_message_id\":\"400\",\"mention_count\":2},"
     "{\"id\":\"14\",\"last_message_id\":\"300\"},"
     "{\"id\":\"21\",\"last_message_id\":\"850\",\"mention_count\":1}]},"
+    "\"user_settings\":{\"guild_folders\":[{\"id\":42,\"name\":\"Pals\",\"color\":255,\"guild_ids\":[\"1\"]}]},"
     "\"user_guild_settings\":{\"entries\":[{\"guild_id\":\"1\",\"muted\":false,"
     "\"channel_overrides\":[{\"channel_id\":\"14\",\"muted\":true}]}]}"
     "}";
@@ -238,6 +239,9 @@ void entry(void)
           model_channel_guild(m, m->dm_first) == -1, "channel to guild lookup");
     check(model_id_cmp("900", "1000") < 0 && model_id_cmp("1000", "999") > 0, "snowflakes compare as numbers");
     check(model_has_role(m, 0, "50") && !model_has_role(m, 0, "1"), "our roles are remembered");
+    check(m->nfolders == 1 && m->guilds[0].folder == 0 && lstrcmpA(model_str(m, m->folders[0].name), "Pals") == 0 &&
+              m->folders[0].has_color && m->folders[0].color == 255,
+          "server folders");
 
     test_updates(m);
     test_roles(m);

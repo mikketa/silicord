@@ -36,7 +36,16 @@ typedef struct {
     unsigned my_roles;  /* comma-separated role ids */
     unsigned roles;     /* packed role list, read with model_role_next() */
     unsigned emojis;    /* packed custom emoji list, read with model_emoji_next() */
+    int folder;         /* index in model_t.folders, -1 when not in a folder */
 } guild_t;
+
+/* A server folder from the user's settings; its guilds are consecutive in the list. */
+typedef struct {
+    char id[24];
+    unsigned name;      /* 0 if unnamed */
+    unsigned color;     /* 0xRRGGBB */
+    int has_color;
+} folder_t;
 
 typedef struct {
     char id[24];
@@ -66,6 +75,8 @@ typedef struct {
     char user_id[24];
     char user_avatar[40];
     unsigned user_name;
+    folder_t *folders;
+    unsigned nfolders;
 } model_t;
 
 /* Builds the model from the READY payload `d`. Never returns NULL. */
