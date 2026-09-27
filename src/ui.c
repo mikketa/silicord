@@ -106,6 +106,7 @@ typedef struct {
     NOTIFYICONDATAW tray;
     int notified_channel;
     int ack_pending;
+    int reconnecting;
 } ui_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1};
@@ -773,7 +774,7 @@ static void paint_user_panel(RECT rc)
     int right = S(RAIL_W + SIDE_W) - S(8);
     const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name)
                                                           : str_or_empty(&g_ui.account);
-    int dot = g_ui.disconnected ? C_FAINT : g_ui.model ? C_GREEN : C_AMBER;
+    int dot = g_ui.disconnected ? C_FAINT : g_ui.model && !g_ui.reconnecting ? C_GREEN : C_AMBER;
 
     fill(x0, y, S(SIDE_W), S(PANEL_H), C_PANEL);
     if (g_ui.model && g_ui.model->user_id[0]) {
@@ -1839,12 +1840,21 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         place_composer();
         break;
     case UI_READY:
+        g_ui.reconnecting = 0;
         set_model((model_t *)lp);
         update_title();
         set_text(&g_ui.status, "Online");
         g_ui.view = VIEW_APP;
         redraw();
         return;
+    case UI_RECONNECTING:
+        g_ui.reconnecting = 1;
+        set_text(&g_ui.status, s);
+        break;
+    case UI_ONLINE:
+        g_ui.reconnecting = 0;
+        set_text(&g_ui.status, "Online");
+        break;
     case UI_DISCONNECTED:
         g_ui.disconnected = 1;
         set_text(&g_ui.status, s);
@@ -2082,7 +2092,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_ACTIVITY) {
+        if (msg >= UI_QR && msg <= UI_ONLINE) {
             on_worker(msg, wp, lp);
             return 0;
         }

@@ -22,6 +22,8 @@ enum {
     UI_MESSAGES,        /* msg_batch_t* */
     UI_SEND_FAILED,     /* text = reason */
     UI_ACTIVITY,        /* activity_t*: a message anywhere, or a read marker from another device */
+    UI_RECONNECTING,    /* connection lost, text = status */
+    UI_ONLINE,          /* session resumed */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };

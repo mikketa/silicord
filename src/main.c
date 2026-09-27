@@ -141,7 +141,11 @@ static void on_gw_status(void *ctx, const char *text)
     log_line("gateway: ", text);
     sb_clear(&s->last_status);
     sb_add(&s->last_status, text);
-    if (current(s))
+    if (!current(s))
+        return;
+    if (lstrcmpA(text, "Online") == 0)
+        ui_post(UI_ONLINE, NULL);
+    else
         ui_post(UI_STATUS, ui_text(text));
 }
 
@@ -324,36 +328,85 @@ static DWORD check_token(const char *token, sb_t *name)
     return status;
 }
 
+/* Waits between attempts: 1 s, 2 s, 5 s, 10 s, then every 30 s. */
+static unsigned backoff(int attempt)
+{
+    static const unsigned steps[] = {1000, 2000, 5000, 10000, 30000};
+    return steps[attempt < (int)ARRAYSIZE(steps) ? attempt : (int)ARRAYSIZE(steps) - 1];
+}
+
+static void post_reconnecting(session_t *s, unsigned delay)
+{
+    char text[64];
+
+    wsprintfA(text, "Reconnecting in %u s\xE2\x80\xA6", (delay + 999) / 1000);
+    log_line("session: ", text);
+    if (current(s))
+        ui_post(UI_RECONNECTING, ui_text(text));
+}
+
 static DWORD WINAPI session_main(LPVOID arg)
 {
     session_t *s = arg;
     gw_events_t ev = {s, on_gw_status, on_ready, on_dispatch};
     sb_t name = {0}, text = {0};
-    DWORD status = check_token(s->token.data, &name);
+    DWORD status;
+    int attempt = 0, resume = 0, established;
 
-    if (status == 200) {
-        if (!cred_save(s->token.data, s->token.len))
-            log_line("session: ", "could not save the token");
-        if (current(s))
-            ui_post(UI_ACCOUNT, copy(name.data ? name.data : "", name.len));
-        gw_run(s->token.data, &ev);
-        sb_add(&text, s->last_status.len ? s->last_status.data : "Disconnected");
-        if (current(s))
-            ui_post(UI_DISCONNECTED, copy(text.data, text.len));
-    } else if (status == 401) {
+    /* Check the token; while offline, keep trying instead of giving up. */
+    for (;;) {
+        status = check_token(s->token.data, &name);
+        if (status && status < 500)
+            break;
+        post_reconnecting(s, backoff(attempt));
+        if (gw_wait(backoff(attempt++)))
+            goto end;
+    }
+    if (status == 401) {
         cred_delete();
         if (current(s))
             ui_post(UI_LOGIN_FAILED, ui_text("Discord rejected this token."));
-    } else {
-        if (status) {
-            sb_add(&text, "Discord answered with HTTP ");
-            sb_u64(&text, status);
-        } else {
-            sb_add(&text, "Could not reach discord.com");
-        }
+        goto end;
+    }
+    if (status != 200) {
+        sb_add(&text, "Discord answered with HTTP ");
+        sb_u64(&text, status);
         if (current(s))
             ui_post(UI_DISCONNECTED, copy(text.data, text.len));
+        goto end;
     }
+    if (!cred_save(s->token.data, s->token.len))
+        log_line("session: ", "could not save the token");
+    if (current(s))
+        ui_post(UI_ACCOUNT, copy(name.data ? name.data : "", name.len));
+
+    for (attempt = 0;;) {
+        gw_result_t r = gw_run(s->token.data, &ev, resume, &established);
+        unsigned delay;
+
+        if (established)
+            attempt = 0;
+        if (r == GW_STOPPED || !current(s))
+            break;
+        if (r == GW_AUTH_FAILED) {
+            cred_delete();
+            if (current(s))
+                ui_post(UI_LOGIN_FAILED, ui_text("Your session expired. Log in again."));
+            break;
+        }
+        if (r == GW_FATAL) {
+            sb_add(&text, s->last_status.len ? s->last_status.data : "Disconnected");
+            if (current(s))
+                ui_post(UI_DISCONNECTED, copy(text.data, text.len));
+            break;
+        }
+        resume = r == GW_RESUME;
+        delay = backoff(attempt++);
+        post_reconnecting(s, delay);
+        if (gw_wait(delay))
+            break;
+    }
+end:
     log_line("session: ", "ended");
     sb_free(&text);
     sb_free(&name);

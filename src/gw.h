@@ -2,8 +2,9 @@
 #include "json.h"
 
 /*
- * Discord gateway: Hello, Identify, Heartbeat, Ready. Callbacks run on the
- * thread that called gw_run(); JSON slices are only valid during the call.
+ * Discord gateway: Hello, Identify or Resume, Heartbeat, dispatches.
+ * Callbacks run on the thread that called gw_run(); JSON slices are only
+ * valid during the call.
  */
 typedef struct {
     void *ctx;
@@ -13,8 +14,23 @@ typedef struct {
     void (*dispatch)(void *ctx, json_t t, json_t d);
 } gw_events_t;
 
-/* Blocks until the connection closes or gw_stop() is called. */
-int gw_run(const char *token, const gw_events_t *ev);
+typedef enum {
+    GW_STOPPED,     /* gw_stop() was called */
+    GW_RESUME,      /* connection lost: reconnect and resume the session */
+    GW_REIDENTIFY,  /* the session cannot be resumed: reconnect and identify again */
+    GW_AUTH_FAILED, /* the token is no longer valid */
+    GW_FATAL,       /* Discord refused the connection for good */
+} gw_result_t;
+
+/*
+ * Runs one connection until it ends. With `resume`, picks up the previous
+ * session (Discord replays missed events). `established` is set once READY or
+ * RESUMED was received, so callers can reset their backoff.
+ */
+gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *established);
+/* Waits up to `ms`; returns 1 if gw_stop() was called meanwhile. */
+int gw_wait(unsigned ms);
 /* Safe from any thread. Stays in effect, so later gw_run() calls return at once, until gw_reset(). */
 void gw_stop(void);
+/* Also forgets the session, so the next gw_run() identifies. */
 void gw_reset(void);

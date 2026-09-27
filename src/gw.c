@@ -11,11 +11,14 @@ enum {
     OP_DISPATCH = 0,
     OP_HEARTBEAT = 1,
     OP_IDENTIFY = 2,
+    OP_RESUME = 6,
     OP_RECONNECT = 7,
     OP_INVALID_SESSION = 9,
     OP_HELLO = 10,
     OP_HEARTBEAT_ACK = 11,
 };
+
+#define CONTINUE (-1)
 
 typedef struct {
     ws_t ws;
@@ -27,7 +30,12 @@ typedef struct {
     DWORD interval;
     volatile LONG64 seq;   /* -1 until the first dispatch */
     volatile LONG acked;
+    volatile LONG zombie;  /* no heartbeat ack: the connection is dead */
     volatile LONG ready;   /* events created; gw_run() and gw_reset() run on one thread */
+    int resuming;
+    int *established;
+    char session_id[80];
+    wchar_t resume_host[128];
 } gw_t;
 
 static gw_t g_gw;
@@ -68,6 +76,23 @@ static int send_identify(gw_t *g)
     return ok;
 }
 
+static int send_resume(gw_t *g)
+{
+    sb_t msg = {0};
+    int ok;
+
+    sb_add(&msg, "{\"op\":6,\"d\":{\"token\":");
+    sb_json_str(&msg, g->token, sc_strlen(g->token));
+    sb_add(&msg, ",\"session_id\":");
+    sb_json_str(&msg, g->session_id, sc_strlen(g->session_id));
+    sb_add(&msg, ",\"seq\":");
+    sb_i64(&msg, InterlockedCompareExchange64(&g->seq, 0, 0));
+    sb_add(&msg, "}}");
+    ok = ws_send(&g->ws, &msg);
+    sb_free(&msg);
+    return ok;
+}
+
 static DWORD WINAPI heartbeat_main(LPVOID arg)
 {
     gw_t *g = arg;
@@ -77,8 +102,9 @@ static DWORD WINAPI heartbeat_main(LPVOID arg)
 
     while (WaitForMultipleObjects(2, events, FALSE, wait) == WAIT_TIMEOUT) {
         if (!InterlockedExchange(&g->acked, 0)) {
-            status(g, "Connection lost");
-            gw_stop();
+            /* Zombie connection: close it and let gw_run() resume. */
+            InterlockedExchange(&g->zombie, 1);
+            ws_shutdown(&g->ws);
             break;
         }
         if (!send_heartbeat(g))
@@ -88,7 +114,40 @@ static DWORD WINAPI heartbeat_main(LPVOID arg)
     return 0;
 }
 
-/* Returns 0 when the session must end. */
+static void forget_session(gw_t *g)
+{
+    g->session_id[0] = 0;
+    g->resume_host[0] = 0;
+    InterlockedExchange64(&g->seq, -1);
+}
+
+/* Keeps what RESUME needs: the session id and the host to resume on. */
+static void remember_session(gw_t *g, json_t d)
+{
+    json_t v;
+    char url[128];
+    const char *host;
+    int n = 0;
+
+    if (json_get(d, "session_id", &v))
+        json_raw(v, g->session_id, sizeof g->session_id);
+    g->resume_host[0] = 0;
+    if (!json_get(d, "resume_gateway_url", &v))
+        return;
+    json_raw(v, url, sizeof url);
+    host = url;
+    for (const char *p = url; *p; p++)
+        if (p[0] == '/' && p[1] == '/') {
+            host = p + 2;
+            break;
+        }
+    while (host[n] && host[n] != '/' && host[n] != '?' && n < (int)ARRAYSIZE(g->resume_host) - 1) {
+        g->resume_host[n] = (wchar_t)(unsigned char)host[n];
+        n++;
+    }
+    g->resume_host[n] = 0;
+}
+
 static int handle(gw_t *g, const sb_t *msg)
 {
     json_t root, op, s, t, d = {0};
@@ -96,7 +155,7 @@ static int handle(gw_t *g, const sb_t *msg)
 
     if (!json_parse(msg->data, msg->len, &root) || !json_get(root, "op", &op) ||
         !json_int(op, &opcode))
-        return 1;
+        return CONTINUE;
     json_get(root, "d", &d);
 
     switch (opcode) {
@@ -105,37 +164,63 @@ static int handle(gw_t *g, const sb_t *msg)
         long long interval;
 
         if (!json_get(d, "heartbeat_interval", &hb) || !json_int(hb, &interval) || interval <= 0)
-            return 0;
+            return GW_RESUME;
         g->interval = (DWORD)interval;
         g->acked = 1;
         g->heartbeat = CreateThread(NULL, 0, heartbeat_main, g, 0, NULL);
-        return send_identify(g);
+        if (g->resuming)
+            return send_resume(g) ? CONTINUE : GW_RESUME;
+        forget_session(g);
+        return send_identify(g) ? CONTINUE : GW_RESUME;
     }
     case OP_HEARTBEAT:
-        return send_heartbeat(g);
+        return send_heartbeat(g) ? CONTINUE : GW_RESUME;
     case OP_HEARTBEAT_ACK:
         InterlockedExchange(&g->acked, 1);
-        return 1;
+        return CONTINUE;
     case OP_DISPATCH:
         if (json_get(root, "s", &s) && json_int(s, &seq))
             InterlockedExchange64(&g->seq, seq);
         if (!json_get(root, "t", &t))
-            return 1;
+            return CONTINUE;
         if (json_str_eq(t, "READY")) {
+            remember_session(g, d);
+            *g->established = 1;
             if (g->ev->ready)
                 g->ev->ready(g->ev->ctx, d);
+        } else if (json_str_eq(t, "RESUMED")) {
+            *g->established = 1;
+            status(g, "Online");
         } else if (g->ev->dispatch) {
             g->ev->dispatch(g->ev->ctx, t, d);
         }
-        return 1;
+        return CONTINUE;
     case OP_RECONNECT:
         status(g, "Discord asked to reconnect");
-        return 0;
+        return GW_RESUME;
     case OP_INVALID_SESSION:
-        status(g, "Session invalidated");
-        return 0;
+        if (json_type(d) == JSON_TRUE)
+            return GW_RESUME;
+        forget_session(g);
+        return GW_REIDENTIFY;
     default:
-        return 1;
+        return CONTINUE;
+    }
+}
+
+/* What a close code from Discord means for the next attempt. */
+static gw_result_t after_close(gw_t *g, unsigned code)
+{
+    switch (code) {
+    case 4004:
+        return GW_AUTH_FAILED;
+    case 4010: case 4011: case 4012: case 4013: case 4014:
+        return GW_FATAL;
+    case 4007: case 4009:
+        forget_session(g);
+        return GW_REIDENTIFY;
+    default:
+        return g->session_id[0] ? GW_RESUME : GW_REIDENTIFY;
     }
 }
 
@@ -146,6 +231,7 @@ static void init_once(gw_t *g)
     ws_init(&g->ws);
     g->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
     g->done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g->seq = -1;
     InterlockedExchange(&g->ready, 1);
 }
 
@@ -154,46 +240,54 @@ static int cancelled(gw_t *g)
     return WaitForSingleObject(g->cancel, 0) == WAIT_OBJECT_0;
 }
 
-int gw_run(const char *token, const gw_events_t *ev)
+gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *established)
 {
     gw_t *g = &g_gw;
     sb_t msg = {0};
-    unsigned code = 0;
+    int result = CONTINUE;
+    const wchar_t *host;
 
     init_once(g);
+    *established = 0;
     if (cancelled(g))
-        return 0;
+        return GW_STOPPED;
     ResetEvent(g->done);
     g->ev = ev;
     g->token = token;
-    g->seq = -1;
+    g->established = established;
     g->heartbeat = NULL;
+    g->zombie = 0;
+    g->resuming = resume && g->session_id[0];
+    host = g->resuming && g->resume_host[0] ? g->resume_host : GW_HOST;
 
-    if (!ws_connect(&g->ws, GW_HOST, GW_PATH, NULL)) {
-        status(g, "Could not connect to the gateway");
-        return 0;
+    if (!ws_connect(&g->ws, host, GW_PATH, NULL)) {
+        g->resume_host[0] = 0; /* next time, try the main host */
+        status(g, "Could not reach the gateway");
+        return cancelled(g) ? GW_STOPPED : (g->session_id[0] ? GW_RESUME : GW_REIDENTIFY);
     }
-    status(g, "Connected");
-    while (!cancelled(g) && ws_recv(&g->ws, &msg) && handle(g, &msg))
+    status(g, g->resuming ? "Resuming\xE2\x80\xA6" : "Connected");
+    while (!cancelled(g) && ws_recv(&g->ws, &msg) && (result = handle(g, &msg)) == CONTINUE)
         ;
 
-    code = ws_close_status(&g->ws, NULL);
-    if (code) {
-        sb_t text = {0};
-        sb_add(&text, "Disconnected (code ");
-        sb_u64(&text, code);
-        sb_add(&text, ")");
-        status(g, text.data);
-        sb_free(&text);
-    }
+    if (cancelled(g))
+        result = GW_STOPPED;
+    else if (result == CONTINUE)
+        result = g->zombie ? GW_RESUME : after_close(g, ws_close_status(&g->ws, NULL));
     SetEvent(g->done);
     if (g->heartbeat) {
         WaitForSingleObject(g->heartbeat, INFINITE);
         CloseHandle(g->heartbeat);
     }
+    ws_shutdown(&g->ws);
     ws_close(&g->ws);
     sb_free(&msg);
-    return code == WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS;
+    return (gw_result_t)result;
+}
+
+int gw_wait(unsigned ms)
+{
+    init_once(&g_gw);
+    return WaitForSingleObject(g_gw.cancel, ms) == WAIT_OBJECT_0;
 }
 
 void gw_stop(void)
@@ -210,4 +304,5 @@ void gw_reset(void)
 {
     init_once(&g_gw);
     ResetEvent(g_gw.cancel);
+    forget_session(&g_gw);
 }
