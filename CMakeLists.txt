@@ -25,6 +25,7 @@ endfunction()
 # Platform-independent pieces, shared by the client and the tests.
 add_library(silicord_core STATIC
   src/b64.c
+  src/command.c
   src/crypto.c
   src/emoji.c
   src/emoji_data.c
@@ -86,6 +87,9 @@ add_test(NAME md COMMAND md_test)
 
 silicord_test(profile_test)
 add_test(NAME profile COMMAND profile_test)
+
+silicord_test(command_test)
+add_test(NAME command COMMAND command_test)
 
 silicord_test(emoji_test)
 add_test(NAME emoji COMMAND emoji_test)
