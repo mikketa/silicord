@@ -190,6 +190,8 @@ static int handle(ra_t *r, const sb_t *msg)
         return CONTINUE;
 
     if (json_str_eq(op, "hello")) {
+        if (r->heartbeat)
+            return CONTINUE; /* one heartbeat thread: a second one would leak and outlive the socket */
         if (!json_get(root, "heartbeat_interval", &v) || !json_int(v, &interval) || interval <= 0)
             return STOP;
         r->interval = (DWORD)interval;
