@@ -1,5 +1,6 @@
 #pragma once
 #include <stddef.h>
+#include "opus_celt.h"
 
 /* Opus (RFC 6716): packet framing, and the decoder built on SILK and CELT. */
 
@@ -17,3 +18,15 @@ typedef struct {
 
 /* Splits a packet into frames, enforcing the rules of section 3.4; 0 when malformed. */
 int opus_packet_parse(const unsigned char *data, size_t n, opus_packet_t *p);
+
+/* A decoder for one stream at 48 kHz. */
+typedef struct {
+    int channels;
+    celt_decoder_t celt;
+    unsigned final_range; /* the last frame's range coder state, for conformance checks */
+} opus_decoder_t;
+
+void opus_decoder_init(opus_decoder_t *d, int channels);
+/* Decodes a packet (NULL or empty for a lost one of `lost_samples`) into interleaved floats;
+   returns the samples per channel, or -1 for a malformed packet. `pcm` holds 5760 per channel. */
+int opus_decode(opus_decoder_t *d, const unsigned char *data, size_t n, float *pcm, int lost_samples);

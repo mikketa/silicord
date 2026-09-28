@@ -1,3 +1,4 @@
+#include <string.h>
 #include "opus.h"
 
 #define MAX_FRAME 1275
@@ -129,4 +130,63 @@ int opus_packet_parse(const unsigned char *data, size_t n, opus_packet_t *p)
         }
         return 1;
     }
+}
+
+void opus_decoder_init(opus_decoder_t *d, int channels)
+{
+    memset(d, 0, sizeof *d);
+    d->channels = channels;
+    celt_init(&d->celt, channels);
+}
+
+/* The last CELT band for each bandwidth. */
+static int celt_end_band(int bandwidth)
+{
+    static const int end[5] = {13, 17, 17, 19, 21};
+
+    return end[bandwidth];
+}
+
+static int decode_frame(opus_decoder_t *d, const opus_packet_t *p, int k, float *pcm)
+{
+    int n = p->frame_samples;
+
+    if (p->mode != OPUS_CELT) {
+        /* SILK and hybrid frames arrive with the SILK decoder. */
+        memset(pcm, 0, sizeof *pcm * (size_t)(n * d->channels));
+        return n;
+    }
+    d->celt.stream_channels = p->stereo ? 2 : 1;
+    d->celt.start = 0;
+    d->celt.end = celt_end_band(p->bandwidth);
+    if (celt_decode(&d->celt, p->frames[k], p->sizes[k], pcm, n, NULL) < 0)
+        return -1;
+    d->final_range = d->celt.rng;
+    return n;
+}
+
+int opus_decode(opus_decoder_t *d, const unsigned char *data, size_t n, float *pcm, int lost_samples)
+{
+    opus_packet_t p;
+    int total = 0;
+
+    if (!data || !n) {
+        /* Concealment in 20 ms steps. */
+        while (total < lost_samples) {
+            int step = lost_samples - total < 960 ? lost_samples - total : 960;
+            step = step >= 480 ? (step >= 960 ? 960 : 480) : step >= 240 ? 240 : 120;
+            celt_decode(&d->celt, NULL, 0, pcm + total * d->channels, step, NULL);
+            total += step;
+        }
+        return total;
+    }
+    if (!opus_packet_parse(data, n, &p))
+        return -1;
+    for (int k = 0; k < p.count; k++) {
+        int got = decode_frame(d, &p, k, pcm + total * d->channels);
+        if (got < 0)
+            return -1;
+        total += got;
+    }
+    return total;
 }
