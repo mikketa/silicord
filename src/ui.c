@@ -1720,19 +1720,6 @@ static int text_w_px(void)
     return a.right - S(24) - text_x();
 }
 
-static int text_height(const sb_t *s, int width)
-{
-    wchar_t *w;
-    int h;
-
-    if (!s->len)
-        return 0;
-    w = utf8_to_wide(s->data, s->len);
-    h = r_text_height(g_ui.f_body, w, -1, width);
-    mem_free(w);
-    return h;
-}
-
 /* grouped: 0 = starts a group, 1 = continues it, 2 = starts a group after a date divider. */
 /* Whether a message pings us: a user mention, @everyone, or one of our roles. */
 static int pings_me(const msg_t *m)
