@@ -200,6 +200,15 @@ typedef struct {
     int post_y[64];
     int pins_open, pins_scroll, pins_content;
     int pins_inbox;            /* the panel shows our recent mentions instead */
+    int settings_open, settings_page, settings_hover, settings_edit_y;
+    HWND settings_edit;        /* custom status */
+    WNDPROC settings_edit_proc;
+    struct {
+        RECT r;
+        int id;
+    } set_hits[32];            /* what the settings screen drew, for clicks */
+    int nset_hits;
+    int pref_notify, pref_title; /* this computer's settings */
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
@@ -1013,7 +1022,7 @@ static void update_title(void)
     int n = total_mentions();
     wchar_t title[32];
 
-    if (n)
+    if (n && g_ui.pref_title)
         wsprintfW(title, L"(%d) Silicord", n);
     else
         lstrcpyW(title, L"Silicord");
@@ -1287,13 +1296,16 @@ static void paint_user_panel(RECT rc)
     }
 
     text(g_ui.f_h, C_INK, rect(x0 + S(52), cy - S(2), S(120), S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    text(g_ui.f_small, C_MUTED, rect(x0 + S(52), cy + S(17), S(120), S(18)), str_or_empty(&g_ui.status),
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(52), cy + S(17), S(120), S(18)),
+         g_ui.model && g_ui.model->custom_status && !g_ui.disconnected && !g_ui.reconnecting
+             ? model_str(g_ui.model, g_ui.model->custom_status)
+             : str_or_empty(&g_ui.status),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     if (g_ui.hover_kind == HIT_LOGOUT)
         r_round(right - S(32), cy, S(32), S(32), S(6), ARGB(C_SELECT));
     text_w(g_ui.f_icon, g_ui.hover_kind == HIT_LOGOUT ? C_INK : C_MUTED, rect(right - S(32), cy, S(32), S(32)),
-           ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+           g_ui.model ? L"\xE713" : ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE); /* settings once logged in */
     if (g_ui.disconnected) {
         if (g_ui.hover_kind == HIT_RETRY)
             r_round(right - S(68), cy, S(32), S(32), S(6), ARGB(C_SELECT));
@@ -1383,6 +1395,19 @@ static int divider_h(const msg_t *m);
 static void qs_open(void);
 static void qs_close(void);
 static int pins_button_x(void);
+static void paint_settings(RECT rc);
+static void settings_open(void);
+static void settings_close(void);
+static void settings_click(int x, int y);
+static int settings_hit(int x, int y);
+static void place_settings_edit(void);
+static void prefs_load(void);
+static int developer_mode(void);
+static void place_search(void);
+static void place_friend_input(void);
+static const char *const k_status_codes[] = {"online", "idle", "dnd", "invisible"};
+static const char *const k_status_names[] = {"Online", "Idle", "Do Not Disturb", "Invisible"};
+static const int k_status_states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
 static int inbox_button_x(void);
 static void paint_pins(void);
 static void pins_close(void);
@@ -3141,7 +3166,9 @@ static void paint(HWND wnd)
     g_ui.paint_wnd = wnd;
     QueryPerformanceCounter(&g_ui.frame_start);
     while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
-        if (g_ui.view == VIEW_APP)
+        if (g_ui.view == VIEW_APP && g_ui.settings_open)
+            paint_settings(rc);
+        else if (g_ui.view == VIEW_APP)
             paint_app(rc);
         else if (g_ui.view == VIEW_LOADING)
             paint_loading(rc);
@@ -3307,6 +3334,8 @@ static void utf8_to_buf(const char *s, size_t n, wchar_t *out, int size)
 
 static void notify(int i, const activity_t *a)
 {
+    if (!g_ui.pref_notify)
+        return;
     const channel_t *c = chan(i);
     int g = model_channel_guild(g_ui.model, (unsigned)i);
     const char *author = a->author.data ? a->author.data : "";
@@ -3564,7 +3593,10 @@ static void on_click(int kind, int index)
         redraw();
         break;
     case HIT_LOGOUT:
-        app_logout();
+        if (g_ui.model)
+            settings_open();
+        else
+            app_logout();
         break;
     case HIT_SELF:
         open_self();
@@ -3909,6 +3941,9 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
             set_model((model_t *)lp);
         update_title();
         set_text(&g_ui.status, "Online");
+        for (int k = 0; k < 4; k++) /* our status as the other clients have it */
+            if (lstrcmpA(g_ui.model->status, k_status_codes[k]) == 0)
+                g_ui.my_status = k_status_states[k];
         g_ui.view = VIEW_APP;
         redraw();
         return;
@@ -4979,7 +5014,12 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             static const char *const codes[] = {"online", "idle", "dnd", "invisible"};
             static const int states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
             g_ui.my_status = states[-10 - h];
-            app_set_status(codes[-10 - h]);
+            app_set_status(codes[-10 - h], g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "");
+            {
+                char fields[48];
+                wsprintfA(fields, "\"status\":\"%s\"", codes[-10 - h]);
+                app_user_settings(fields);
+            }
             redraw();
         }
         else if (p && h >= 0 && h < p->nbadges && p->badges[h].link.len)
@@ -7899,6 +7939,389 @@ static void qs_open(void)
     SetFocus(g_ui.qs_edit);
 }
 
+
+/* ---- User settings screen ---- */
+
+enum { SET_ACCOUNT, SET_NOTIFICATIONS, SET_ADVANCED, SET_ABOUT, SET_PAGES };
+enum {
+    SH_PAGE = 0,        /* + page */
+    SH_CLOSE = 10, SH_LOGOUT, SH_SAVE, SH_CLEAR, SH_NOTIFY, SH_TITLE, SH_DEVELOPER, SH_SOURCE,
+    SH_STATUS = 20,     /* + index in k_status_codes */
+};
+#define SET_NAV_W 260
+#define SET_ROW 72
+
+
+static void prefs_path(wchar_t *out)
+{
+    ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Silicord", out, MAX_PATH);
+    CreateDirectoryW(out, NULL);
+    lstrcatW(out, L"\\settings.ini");
+}
+
+/* Settings of this computer only, beside the image cache. */
+static void prefs_load(void)
+{
+    wchar_t path[MAX_PATH + 16];
+
+    prefs_path(path);
+    g_ui.pref_notify = GetPrivateProfileIntW(L"app", L"notifications", 1, path) != 0;
+    g_ui.pref_title = GetPrivateProfileIntW(L"app", L"title_count", 1, path) != 0;
+}
+
+static void prefs_save(void)
+{
+    wchar_t path[MAX_PATH + 16];
+
+    prefs_path(path);
+    WritePrivateProfileStringW(L"app", L"notifications", g_ui.pref_notify ? L"1" : L"0", path);
+    WritePrivateProfileStringW(L"app", L"title_count", g_ui.pref_title ? L"1" : L"0", path);
+}
+
+static int developer_mode(void)
+{
+    return g_ui.model && g_ui.model->developer_mode;
+}
+
+static const char *status_code(void)
+{
+    for (int k = 0; k < 4; k++)
+        if (g_ui.my_status == k_status_states[k])
+            return k_status_codes[k];
+    return "online";
+}
+
+static const char *status_name(void)
+{
+    for (int k = 0; k < 4; k++)
+        if (g_ui.my_status == k_status_states[k])
+            return k_status_names[k];
+    return "Online";
+}
+
+static void set_hit(int x, int y, int w, int h, int id)
+{
+    if (g_ui.nset_hits < (int)ARRAYSIZE(g_ui.set_hits)) {
+        g_ui.set_hits[g_ui.nset_hits].r = rect(x, y, w, h);
+        g_ui.set_hits[g_ui.nset_hits].id = id;
+        g_ui.nset_hits++;
+    }
+}
+
+static int settings_hit(int x, int y)
+{
+    for (int k = g_ui.nset_hits; k-- > 0;) {
+        RECT r = g_ui.set_hits[k].r;
+        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+            return g_ui.set_hits[k].id;
+    }
+    return -1;
+}
+
+static int settings_content_x(void)
+{
+    return S(SET_NAV_W) + S(40);
+}
+
+static int settings_content_w(RECT rc)
+{
+    int w = rc.right - settings_content_x() - S(120);
+    return w > S(660) ? S(660) : w;
+}
+
+/* The custom status box sits on the account page only. */
+static void place_settings_edit(void)
+{
+    RECT rc;
+    int show = g_ui.settings_open && g_ui.settings_page == SET_ACCOUNT;
+
+    if (!g_ui.settings_edit)
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    SetWindowPos(g_ui.settings_edit, HWND_TOP, settings_content_x() + S(14), g_ui.settings_edit_y + S(10),
+                 settings_content_w(rc) - S(216) - S(28), S(20), SWP_NOACTIVATE | (show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+}
+
+static void paint_button(int x, int y, int w, const char *label, int id, int primary)
+{
+    int hover = g_ui.settings_hover == id;
+    unsigned fillc = primary ? (hover ? 0xFFFFC23Du : ARGB(C_AMBER)) : (hover ? 0xFF3A3A3A : 0xFF2E2E2E);
+
+    r_round(x, y, w, S(38), S(6), fillc);
+    text(g_ui.f_h, primary ? C_RAIL : C_INK, rect(x, y, w, S(38)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    set_hit(x, y, w, S(38), id);
+}
+
+/* A setting with its explanation and a switch on the right. */
+static int paint_toggle(int x, int y, int w, const char *title, const char *desc, int on, int id)
+{
+    int sx = x + w - S(44), sy = y + S(8);
+
+    text(g_ui.f_h, C_INK, rect(x, y + S(4), w - S(64), S(22)), title, DT_LEFT | DT_SINGLELINE);
+    text(g_ui.f_small, C_MUTED, rect(x, y + S(28), w - S(64), S(36)), desc, DT_LEFT | DT_WORDBREAK);
+    r_round(sx, sy, S(44), S(24), S(12), on ? ARGB(C_AMBER) : 0xFF4A4A4A);
+    r_circle(on ? sx + S(22) : sx + S(2), sy + S(2), S(20), 0xFFFFFFFFu);
+    set_hit(x, y, w, S(SET_ROW), id);
+    fill(x, y + S(SET_ROW) - S(12), w, 1, C_LINE);
+    return y + S(SET_ROW);
+}
+
+static void paint_settings(RECT rc)
+{
+    static const char *const pages[] = {"My Account", "Notifications", "Advanced", "About"};
+    int nav = S(SET_NAV_W), x = settings_content_x(), w = settings_content_w(rc), y;
+
+    g_ui.nset_hits = 0;
+    fill(0, 0, rc.right, rc.bottom, C_MAIN);
+    fill(0, 0, nav, rc.bottom, C_SIDE);
+
+    /* Sections, then logging out, as in Discord's sidebar. */
+    y = S(56);
+    for (int k = 0; k < SET_PAGES; k++) {
+        int sel = g_ui.settings_page == k, hov = g_ui.settings_hover == SH_PAGE + k;
+        if (k == 0 || k == SET_ABOUT) {
+            text(g_ui.f_cat, C_FAINT, rect(S(28), y, nav - S(40), S(28)), k == 0 ? "USER SETTINGS" : "SILICORD",
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            y += S(30);
+        }
+        if (sel || hov)
+            r_round(S(16), y, nav - S(32), S(34), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        text(g_ui.f_body, sel || hov ? C_INK : C_MUTED, rect(S(28), y, nav - S(56), S(34)), pages[k],
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        set_hit(S(16), y, nav - S(32), S(34), SH_PAGE + k);
+        y += S(38);
+        if (k == SET_ADVANCED)
+            y += S(12);
+    }
+    fill(S(28), y + S(8), nav - S(56), 1, C_LINE);
+    y += S(20);
+    if (g_ui.settings_hover == SH_LOGOUT)
+        r_round(S(16), y, nav - S(32), S(34), S(6), ARGB(C_HOVER));
+    text(g_ui.f_body, C_INK, rect(S(28), y, nav - S(56), S(34)), "Log Out", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text_w(g_ui.f_icon, C_MUTED, rect(nav - S(52), y, S(24), S(34)), ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    set_hit(S(16), y, nav - S(32), S(34), SH_LOGOUT);
+
+    /* Close, with the Esc hint under it. */
+    {
+        int cx = x + w + S(40), cy = S(60);
+        r_round_outline(cx, cy, S(36), S(36), S(18), S(2) > 1 ? S(2) : 1,
+                        g_ui.settings_hover == SH_CLOSE ? ARGB(C_INK) : ARGB(C_MUTED));
+        text_w(g_ui.f_icon, g_ui.settings_hover == SH_CLOSE ? C_INK : C_MUTED, rect(cx, cy, S(36), S(36)), L"\xE711", -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_cat, C_FAINT, rect(cx - S(8), cy + S(40), S(52), S(20)), "ESC", DT_CENTER | DT_SINGLELINE);
+        set_hit(cx, cy, S(36), S(36), SH_CLOSE);
+    }
+
+    y = S(60);
+    text(g_ui.f_title, C_INK, rect(x, y, w, S(32)), pages[g_ui.settings_page], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    y += S(52);
+    switch (g_ui.settings_page) {
+    case SET_ACCOUNT: {
+        const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name) : "";
+        const char *custom = g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "";
+        r_image_t *img = g_ui.model ? user_avatar(g_ui.model->user_id, g_ui.model->user_avatar) : NULL;
+        r_round(x, y, w, S(112), S(8), 0xFF161616);
+        if (img)
+            r_image(img, x + S(20), y + S(16), S(80), S(80), S(40));
+        else
+            r_circle(x + S(20), y + S(16), S(80), ARGB(C_ITEM));
+        paint_status(x + S(20), y + S(16), S(80), g_ui.my_status, 0xFF161616);
+        text(g_ui.f_title, C_INK, rect(x + S(120), y + S(28), w - S(140), S(30)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_body, C_MUTED, rect(x + S(120), y + S(60), w - S(140), S(24)), custom[0] ? custom : status_name(),
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        y += S(136);
+        text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "STATUS", DT_LEFT | DT_SINGLELINE);
+        y += S(28);
+        for (int k = 0; k < 4; k++) {
+            int sel = g_ui.my_status == k_status_states[k], hov = g_ui.settings_hover == SH_STATUS + k;
+            if (sel || hov)
+                r_round(x, y, w, S(40), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+            status_dot(x + S(16), y + S(12), S(16), k_status_states[k], sel ? ARGB(C_SELECT) : hov ? ARGB(C_HOVER) : ARGB(C_MAIN));
+            text(g_ui.f_body, sel ? C_INK : C_MUTED, rect(x + S(48), y, w - S(60), S(40)), k_status_names[k],
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            set_hit(x, y, w, S(40), SH_STATUS + k);
+            y += S(42);
+        }
+        y += S(24);
+        text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "CUSTOM STATUS", DT_LEFT | DT_SINGLELINE);
+        y += S(28);
+        r_round(x, y, w - S(216), S(40), S(6), 0xFF1E1E1E);
+        if (g_ui.settings_edit_y != y) {
+            g_ui.settings_edit_y = y;
+            place_settings_edit();
+        }
+        paint_button(x + w - S(204), y + S(1), S(96), "Save", SH_SAVE, 1);
+        paint_button(x + w - S(100), y + S(1), S(96), "Clear", SH_CLEAR, 0);
+        break;
+    }
+    case SET_NOTIFICATIONS:
+        y = paint_toggle(x, y, w, "Enable Desktop Notifications",
+                         "A Windows notification for direct messages and mentions, following each server's notification settings.",
+                         g_ui.pref_notify, SH_NOTIFY);
+        paint_toggle(x, y, w, "Unread Count in the Title",
+                     "The number of unread mentions in the window title and on the taskbar.", g_ui.pref_title, SH_TITLE);
+        break;
+    case SET_ADVANCED:
+        paint_toggle(x, y, w, "Developer Mode",
+                     "Adds Copy ID to the menus of servers, channels, messages and users. Synced with your other Discord apps.",
+                     developer_mode(), SH_DEVELOPER);
+        break;
+    case SET_ABOUT: {
+        PROCESS_MEMORY_COUNTERS_EX pmc = {sizeof pmc};
+        char line[160];
+        K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof pmc);
+        text(g_ui.f_h, C_INK, rect(x, y, w, S(24)), "Silicord " SILICORD_VERSION, DT_LEFT | DT_SINGLELINE);
+        y += S(30);
+        text(g_ui.f_body, C_MUTED, rect(x, y, w, S(48)),
+             "A native Discord client for Windows, in C and x64 assembly. No browser, no C runtime.", DT_LEFT | DT_WORDBREAK);
+        y += S(56);
+        wsprintfA(line, "Memory: %u KB used by Silicord, %u KB for the whole process.", (unsigned)(mem_used() >> 10),
+                  (unsigned)(pmc.PrivateUsage >> 10));
+        text(g_ui.f_body, C_MUTED, rect(x, y, w, S(24)), line, DT_LEFT | DT_SINGLELINE);
+        y += S(44);
+        paint_button(x, y, S(160), "Source Code", SH_SOURCE, 0);
+        break;
+    }
+    }
+}
+
+static LRESULT CALLBACK settings_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+
+static void settings_open(void)
+{
+    if (!g_ui.settings_edit) {
+        g_ui.settings_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.wnd, NULL, NULL, NULL);
+        g_ui.settings_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.settings_edit, GWLP_WNDPROC, (LONG_PTR)settings_edit_proc);
+        SendMessageW(g_ui.settings_edit, WM_SETFONT, SendMessageW(g_ui.composer, WM_GETFONT, 0, 0), FALSE);
+        SendMessageW(g_ui.settings_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Set a custom status");
+        SendMessageW(g_ui.settings_edit, EM_LIMITTEXT, 128, 0);
+    }
+    {
+        const char *custom = g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "";
+        wchar_t *w = utf8_to_wide(custom, lstrlenA(custom));
+        SetWindowTextW(g_ui.settings_edit, w);
+        mem_free(w);
+    }
+    pop_close();
+    picker_close();
+    pins_close();
+    g_ui.settings_open = 1;
+    g_ui.settings_hover = -1;
+    g_ui.settings_edit_y = -1;
+    ShowWindow(g_ui.composer, SW_HIDE);
+    if (g_ui.search_edit)
+        ShowWindow(g_ui.search_edit, SW_HIDE);
+    if (g_ui.friend_edit)
+        ShowWindow(g_ui.friend_edit, SW_HIDE);
+    SetFocus(g_ui.wnd);
+    redraw();
+}
+
+static void settings_close(void)
+{
+    g_ui.settings_open = 0;
+    place_settings_edit();
+    place_composer();
+    place_friend_input();
+    place_search();
+    redraw();
+}
+
+/* Custom status from the box: set here and on every client. */
+static void save_custom_status(int clear)
+{
+    wchar_t w[140];
+    sb_t text = {0}, fields = {0};
+
+    if (clear)
+        SetWindowTextW(g_ui.settings_edit, L"");
+    GetWindowTextW(g_ui.settings_edit, w, ARRAYSIZE(w));
+    wide_to_utf8(w, (size_t)lstrlenW(w), &text);
+    app_set_status(status_code(), text.data);
+    if (text.len) {
+        sb_add(&fields, "\"custom_status\":{\"text\":");
+        sb_json_str(&fields, text.data, text.len);
+        sb_add(&fields, "}");
+    } else {
+        sb_add(&fields, "\"custom_status\":null");
+    }
+    app_user_settings(fields.data);
+    sb_free(&text);
+    sb_free(&fields);
+}
+
+static void settings_click(int x, int y)
+{
+    int id = settings_hit(x, y);
+
+    if (id < 0)
+        return;
+    if (id >= SH_PAGE && id < SH_PAGE + SET_PAGES) {
+        g_ui.settings_page = id - SH_PAGE;
+        g_ui.settings_edit_y = -1;
+        place_settings_edit();
+    } else if (id >= SH_STATUS && id < SH_STATUS + 4) {
+        char fields[48];
+        const char *custom = g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "";
+        g_ui.my_status = k_status_states[id - SH_STATUS];
+        app_set_status(k_status_codes[id - SH_STATUS], custom);
+        wsprintfA(fields, "\"status\":\"%s\"", k_status_codes[id - SH_STATUS]);
+        app_user_settings(fields);
+    } else {
+        switch (id) {
+        case SH_CLOSE:
+            settings_close();
+            return;
+        case SH_LOGOUT:
+            if (MessageBoxW(g_ui.wnd, L"Are you sure you want to log out?", L"Log Out",
+                            MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) == IDOK) {
+                settings_close();
+                app_logout();
+            }
+            return;
+        case SH_SAVE:
+        case SH_CLEAR:
+            save_custom_status(id == SH_CLEAR);
+            break;
+        case SH_NOTIFY:
+            g_ui.pref_notify = !g_ui.pref_notify;
+            prefs_save();
+            break;
+        case SH_TITLE:
+            g_ui.pref_title = !g_ui.pref_title;
+            prefs_save();
+            update_title();
+            break;
+        case SH_DEVELOPER:
+            if (g_ui.model) {
+                g_ui.model->developer_mode = !g_ui.model->developer_mode;
+                app_user_settings(g_ui.model->developer_mode ? "\"developer_mode\":true" : "\"developer_mode\":false");
+            }
+            break;
+        case SH_SOURCE:
+            open_url("https://github.com/mikketa/silicord");
+            break;
+        }
+    }
+    redraw();
+}
+
+static LRESULT CALLBACK settings_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        settings_close();
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        save_custom_status(0);
+        redraw();
+        return 0;
+    }
+    if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE))
+        return 0;
+    return CallWindowProcW(g_ui.settings_edit_proc, h, msg, wp, lp);
+}
+
 /* ---- Right-click menus ---- */
 
 enum {
@@ -8010,7 +8433,8 @@ static void message_menu(int i)
     if (m->content.len)
         AppendMenuW(menu, MF_STRING, CM_COPY_TEXT, L"Copy Text");
     AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Message Link");
-    AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
+    if (developer_mode())
+        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
     if (own) {
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CM_DELETE, L"Delete Message");
@@ -8060,8 +8484,10 @@ static void channel_menu(int i)
         add_mute_items(menu, muted, L"Category");
         if (g >= 0)
             AppendMenuW(menu, MF_POPUP, (UINT_PTR)notify_menu(c->notify, L"Use Server Default"), L"Notification Settings");
-        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Category ID");
+        if (developer_mode()) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Category ID");
+        }
     } else {
         AppendMenuW(menu, MF_STRING | (model_unread(g_ui.model, (unsigned)i) || c->mentions ? 0 : MF_GRAYED), CM_MARK_READ,
                     L"Mark As Read");
@@ -8072,7 +8498,8 @@ static void channel_menu(int i)
                         L"Notification Settings");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Link");
-        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Channel ID");
+        if (developer_mode())
+            AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Channel ID");
     }
     lstrcpynA(id, c->id, sizeof id);
     cmd = run_menu(menu);
@@ -8129,8 +8556,10 @@ static void guild_menu(int g)
         AppendMenuW(sub, MF_STRING | (gd->suppress_roles ? MF_CHECKED : 0), CM_SUPPRESS_ROLES, L"Suppress All Role @mentions");
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, L"Notification Settings");
     }
-    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Server ID");
+    if (developer_mode()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Server ID");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, CM_LEAVE, L"Leave Server");
     lstrcpynA(id, gd->id, sizeof id);
@@ -8215,7 +8644,8 @@ static void user_menu(const char *user_id, const char *name, const char *avatar,
         AppendMenuW(menu, MF_STRING, CM_MESSAGE, L"Message");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, CM_COPY_USERNAME, L"Copy Name");
-    AppendMenuW(menu, MF_STRING, CM_COPY_USER_ID, L"Copy User ID");
+    if (developer_mode())
+        AppendMenuW(menu, MF_STRING, CM_COPY_USER_ID, L"Copy User ID");
     cmd = run_menu(menu);
     switch (cmd) {
     case CM_PROFILE:
@@ -8994,6 +9424,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         make_fonts();
         img_init(wnd, UI_IMAGE);
         paste_cleanup();
+        prefs_load();
         DragAcceptFiles(wnd, TRUE);
         return 0;
     case WM_DROPFILES:
@@ -9001,6 +9432,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+        if (g_ui.settings_open) {
+            if (wp == VK_ESCAPE)
+                settings_close();
+            return 0;
+        }
         if (wp == 'K' && GetKeyState(VK_CONTROL) < 0) {
             qs_open();
             return 0;
@@ -9018,6 +9454,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         clamp_scroll();
         clamp_msg_scroll();
+        if (g_ui.settings_open) {
+            g_ui.settings_edit_y = -1;
+            redraw();
+            return 0;
+        }
         place_composer();
         place_friend_input();
         place_search();
@@ -9029,7 +9470,15 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             composer_changed();
         break;
     case WM_CTLCOLOREDIT:
-        if ((HWND)lp == g_ui.search_edit || (HWND)lp == g_ui.friend_edit) {
+        if ((HWND)lp == g_ui.search_edit || (HWND)lp == g_ui.friend_edit || (HWND)lp == g_ui.settings_edit) {
+            if ((HWND)lp == g_ui.settings_edit) {
+                static HBRUSH box;
+                if (!box)
+                    box = CreateSolidBrush(RGB(0x1E, 0x1E, 0x1E));
+                SetTextColor((HDC)wp, GDI(C_INK));
+                SetBkColor((HDC)wp, RGB(0x1E, 0x1E, 0x1E));
+                return (LRESULT)box;
+            }
             static HBRUSH dark;
             if (!dark)
                 dark = CreateSolidBrush(RGB(0x0B, 0x0B, 0x0B));
@@ -9058,6 +9507,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         paint(wnd);
         return 0;
     case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && g_ui.settings_open) {
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.settings_hover >= 0 ? IDC_HAND : IDC_ARROW)));
+            return TRUE;
+        }
         if (LOWORD(lp) == HTCLIENT) {
             SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.hover_kind != HIT_NONE || g_ui.hover_link ? IDC_HAND : IDC_ARROW)));
             return TRUE;
@@ -9066,8 +9519,15 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, wnd, 0};
         TrackMouseEvent(&tme);
-        if (g_ui.view == VIEW_APP)
+        if (g_ui.view == VIEW_APP && g_ui.settings_open) {
+            int h = settings_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (h != g_ui.settings_hover) {
+                g_ui.settings_hover = h;
+                redraw();
+            }
+        } else if (g_ui.view == VIEW_APP) {
             update_hover(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        }
         return 0;
     }
     case WM_MOUSELEAVE:
@@ -9078,6 +9538,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_LBUTTONUP:
+        if (g_ui.view == VIEW_APP && g_ui.settings_open) {
+            settings_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            return 0;
+        }
         if (g_ui.view == VIEW_APP) {
             int kind, index;
             int action;

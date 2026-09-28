@@ -125,7 +125,10 @@ void app_relationship(const char *user_id, const char *method);
 /* Sends a friend request by username; the outcome comes back as UI_FRIEND_RESULT. */
 void app_add_friend(const char *username);
 /* Our status: "online", "idle", "dnd" or "invisible". */
-void app_set_status(const char *status);
+/* This session's presence: status and custom status text (NULL or empty for none). */
+void app_set_status(const char *status, const char *custom);
+/* Changes synced user settings: `fields` are JSON members such as "\"developer_mode\":true". */
+void app_user_settings(const char *fields);
 /* Same, also asking for the member list rows [start, start + 99]. */
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start);
 /* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */

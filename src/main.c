@@ -289,7 +289,7 @@ static int is_structure_event(json_t t)
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
         "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE", "GUILD_STICKERS_UPDATE",
-        "USER_GUILD_SETTINGS_UPDATE",
+        "USER_GUILD_SETTINGS_UPDATE", "USER_SETTINGS_UPDATE",
         "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
         "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE",
     };
@@ -1101,16 +1101,35 @@ void app_add_friend(const char *username)
     CloseHandle(CreateThread(NULL, 0, relation_main, j, 0, NULL));
 }
 
-void app_set_status(const char *status)
+static void rest(const char *method, const char *path, const sb_t *body);
+
+void app_set_status(const char *status, const char *custom)
 {
     sb_t msg = {0};
 
-    /* Op 3, Presence Update: this session's status. */
+    /* Op 3, Presence Update: this session's status, the custom status as a type 4 activity. */
     sb_add(&msg, "{\"op\":3,\"d\":{\"status\":\"");
     sb_add(&msg, status);
-    sb_add(&msg, "\",\"since\":0,\"activities\":[],\"afk\":false}}");
+    sb_add(&msg, "\",\"since\":0,\"activities\":[");
+    if (custom && custom[0]) {
+        sb_add(&msg, "{\"type\":4,\"name\":\"Custom Status\",\"id\":\"custom\",\"state\":");
+        sb_json_str(&msg, custom, (size_t)lstrlenA(custom));
+        sb_add(&msg, "}");
+    }
+    sb_add(&msg, "],\"afk\":false}}");
     gw_send(&msg);
     sb_free(&msg);
+}
+
+void app_user_settings(const char *fields)
+{
+    sb_t body = {0};
+
+    sb_add(&body, "{");
+    sb_add(&body, fields);
+    sb_add(&body, "}");
+    rest("PATCH", "/users/@me/settings", &body);
+    sb_free(&body);
 }
 
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start)
@@ -1157,7 +1176,6 @@ void app_request_members(const char *guild_id, const char *const *user_ids, int 
     sb_free(&msg);
 }
 
-static void rest(const char *method, const char *path, const sb_t *body);
 
 void app_vote(const char *channel_id, const char *message_id, const int *answers, int n)
 {
