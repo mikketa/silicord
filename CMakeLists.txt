@@ -41,6 +41,7 @@ add_library(silicord_core STATIC
   src/mem.c
   src/memberlist.c
   src/mls_crypto.c
+  src/mls_group.c
   src/mls_msg.c
   src/mls_path.c
   src/mls_schedule.c
@@ -133,6 +134,8 @@ silicord_test(mls_path_test bcrypt)
 add_test(NAME mls_path COMMAND mls_path_test)
 silicord_test(mls_msg_test bcrypt)
 add_test(NAME mls_msg COMMAND mls_msg_test)
+silicord_test(mls_group_test bcrypt)
+add_test(NAME mls_group COMMAND mls_group_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)
