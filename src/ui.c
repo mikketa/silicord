@@ -7638,6 +7638,82 @@ static void open_post(int i)
         go_to_channel(c);
 }
 
+/* ---- Keyboard shortcuts ---- */
+
+/* Next (dir 1) or previous (-1) channel of the open list, optionally only unread ones. */
+static void step_channel(int dir, int unread_only)
+{
+    unsigned first, count;
+    int i;
+
+    if (!g_ui.model || !side_range(&first, &count) || !count)
+        return;
+    i = g_ui.channel >= 0 ? g_ui.channel : (dir > 0 ? (int)first - 1 : (int)(first + count));
+    for (unsigned k = 0; k < count; k++) {
+        i += dir;
+        if (i < (int)first)
+            i = (int)(first + count - 1);
+        if (i >= (int)(first + count))
+            i = (int)first;
+        if (chan(i)->type == CH_CATEGORY || is_voice_type(chan(i)->type))
+            continue;
+        if (unread_only && !channel_unread((unsigned)i) && !chan(i)->mentions)
+            continue;
+        go_to_channel(i);
+        return;
+    }
+}
+
+static void step_guild(int dir)
+{
+    int n = g_ui.model ? (int)g_ui.model->nguilds : 0, g;
+
+    if (!n)
+        return;
+    g = g_ui.guild + dir;
+    if (g < -1)
+        g = n - 1;
+    if (g >= n)
+        g = -1; /* home comes around */
+    select_guild(g);
+}
+
+/* Returns 1 when the key was a shortcut. */
+static int shortcut(WPARAM key)
+{
+    int ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+
+    if (g_ui.view != VIEW_APP)
+        return 0;
+    if ((key == VK_UP || key == VK_DOWN) && alt && ctrl) {
+        step_guild(key == VK_DOWN ? 1 : -1);
+        return 1;
+    }
+    if ((key == VK_UP || key == VK_DOWN) && alt) {
+        step_channel(key == VK_DOWN ? 1 : -1, shift);
+        return 1;
+    }
+    if ((key == VK_PRIOR || key == VK_NEXT) && open_is_text()) {
+        RECT a = message_area();
+        g_ui.msg_scroll += (key == VK_PRIOR ? 1 : -1) * (a.bottom - a.top) * 4 / 5;
+        clamp_msg_scroll();
+        maybe_load_older();
+        redraw();
+        return 1;
+    }
+    if (key == 'E' && ctrl && open_is_text()) {
+        RECT rc;
+        int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0;
+        GetClientRect(g_ui.wnd, &rc);
+        if (g_ui.picker)
+            picker_close();
+        else
+            picker_open(PICK_COMPOSER, NULL, x0 + w - S(16), rc.bottom - S(24) - S(COMPOSER_H) - S(8));
+        return 1;
+    }
+    return 0;
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -7700,6 +7776,16 @@ static void send_composer(void)
 
 static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_ui.ac_kind == AC_NONE && shortcut(wp))
+        return 0;
+    if (msg == WM_CHAR && wp == 5) /* Ctrl+E's control character */
+        return 0;
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && !g_ui.confirm && !g_ui.bar && g_ui.ac_kind == AC_NONE && g_ui.channel >= 0) {
+        /* Esc marks the channel read, like Discord. */
+        mark_read(g_ui.channel);
+        redraw();
+        return 0;
+    }
     if (msg == WM_KEYDOWN && wp == 'K' && GetKeyState(VK_CONTROL) < 0) {
         qs_open();
         return 0;
@@ -7845,10 +7931,13 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         on_drop((HDROP)wp);
         return 0;
     case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
         if (wp == 'K' && GetKeyState(VK_CONTROL) < 0) {
             qs_open();
             return 0;
         }
+        if (shortcut(wp))
+            return 0;
         break;
     case WM_SIZE:
         if (wp == SIZE_MINIMIZED) {
