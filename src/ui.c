@@ -337,6 +337,7 @@ static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_chann
                     .friend_hover = -1};
 
 static void paint_status(int x, int y, int d, int status, unsigned bg);
+static const char *status_name(void);
 static void status_dot(int cx, int cy, int s, int status, unsigned bg);
 static presence_t *presence_find(const char *user);
 static void anim_schedule(void);
@@ -1311,9 +1312,9 @@ static void paint_user_panel(RECT rc)
 
     text(g_ui.f_h, C_INK, rect(x0 + S(52), cy - S(2), S(120), S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     text(g_ui.f_small, C_MUTED, rect(x0 + S(52), cy + S(17), S(120), S(18)),
-         g_ui.model && g_ui.model->custom_status && !g_ui.disconnected && !g_ui.reconnecting
-             ? model_str(g_ui.model, g_ui.model->custom_status)
-             : str_or_empty(&g_ui.status),
+         !g_ui.model || g_ui.disconnected || g_ui.reconnecting ? str_or_empty(&g_ui.status) /* connection trouble first */
+         : g_ui.model->custom_status                         ? model_str(g_ui.model, g_ui.model->custom_status)
+                                                             : status_name(),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     if (g_ui.hover_kind == HIT_LOGOUT)
@@ -4548,7 +4549,7 @@ static int pop_render(int draw)
         else
             r_circle(ax, ay, S(POP_AVATAR), ARGB(C_ITEM));
         if (p && p->decoration[0]) {
-            r_image_t *deco = cdn_image("ad", "/avatar-decoration-presets/%s.png?size=240&passthrough=false",
+            r_image_t *deco = cdn_image("ad", "/avatar-decoration-presets/%s.png?size=240&passthrough=true",
                                         p->decoration, NULL, S(POP_AVATAR) * 6 / 5);
             int d = S(POP_AVATAR) * 6 / 5;
             if (deco)
