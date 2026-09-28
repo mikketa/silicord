@@ -47,7 +47,7 @@ Images from Discord's CDN are kept in `%LOCALAPPDATA%\Silicord\images` (at most 
 
 Clicking an avatar or a name opens that user's profile. Display names with a custom font use free fonts (SIL Open Font License) that Silicord downloads once from the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, and keeps in `%LOCALAPPDATA%\Silicord\fonts`.
 
-`silicord --debug` also opens a console with a connection log, mirrored to `%TEMP%\silicord-debug.log`. It includes a `[mem]` line each time a channel opens: memory allocated by Silicord itself (and its images) against the whole process.
+`silicord --debug` also opens a console with a connection log, mirrored to `%TEMP%\silicord-debug.log`. It includes `[mem]`, `[net]` and `[cpu]` lines each time a channel opens: memory allocated by Silicord itself (and its images) against the whole process, bytes received from the gateway, the API and the CDN (with the hourly rate), and CPU time since start. The About screen in the settings shows the same.
 
 ## Building
 

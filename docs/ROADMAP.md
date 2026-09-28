@@ -33,7 +33,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [ ] Local cache for channels and users
 - [x] Disk cache for CDN images, memory budget for decoded images
 - [x] Memory counters in `--debug` (Silicord's allocations against the whole process)
-- [ ] Metrics: idle CPU, bytes received per hour
+- [x] Metrics: idle CPU, bytes received per hour (`--debug` and the About screen)
 
 ## 4. Win32 UI 🚧
 
