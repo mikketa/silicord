@@ -13,7 +13,8 @@ A native Discord client for Windows, written in C and x64 assembly. No embedded 
 > - messages with formatting, custom and animated emoji, GIFs, images, files, link previews, stickers, polls, reactions, and bots' buttons and menus
 > - replies, edits and deletes, uploads (plus button, drag and drop, pasting), the emoji, GIF and sticker picker, `@` `#` `:` and slash command suggestions
 > - pins, search, jumping to a message, the quick switcher (Ctrl+K) and Discord's keyboard shortcuts
-> - typing indicators, unread markers, notifications, the member list with statuses and role colors, and user profiles with their banner, badges, roles, avatar decoration and display name style
+> - typing indicators, unread markers, the mentions inbox, notifications with Discord's per-server and per-channel settings, the member list with statuses and role colors, and user profiles with their (animated) banner, badges, roles, avatar decoration and display name style
+> - a settings screen: status and custom status, developer mode, notification preferences
 >
 > Voice is not there yet. See the [roadmap](docs/ROADMAP.md).
 

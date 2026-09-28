@@ -60,16 +60,18 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Pasting pictures and files into the composer
 - [x] Slash commands: suggestions, subcommands and options, answers shown as in Discord
 - [x] Bots' buttons and select menus, components v2 text
+- [x] Mentions inbox, role names and `<t:...>` timestamps in messages
 - [x] Unread markers, mention badges, read sync with other devices
 - [x] Windows notifications for DMs, mentions and role mentions
 - [x] Profile popouts: banner, avatar decoration, display name fonts and effects, server tag, badges, mutual friends and servers, bio, message box
 - [x] Profile popouts: roles
-- [ ] Profile popouts: animated banners and decorations
+- [x] Profile popouts: animated avatars, banners and decorations (own APNG player)
 - [ ] Executable icon from `assets/logo.svg`
 
 ## 5. Later
 
 - [x] Animated GIFs and emoji
-- [ ] Settings screen, notification settings per server and channel
+- [x] Settings screen: status, custom status, developer mode, notifications, about
+- [x] Notification settings per server, category and channel, timed mutes
 - [ ] Themes
 - [ ] Voice (Opus + encryption), the biggest piece
