@@ -75,7 +75,7 @@ typedef struct {
     int mention_everyone;
 } msg_t;
 
-enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION, BATCH_PINS };
+enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION, BATCH_PINS, BATCH_SEARCH };
 
 typedef struct {
     int kind;
@@ -88,6 +88,9 @@ typedef struct {
     /* BATCH_REACTION: msgs[0] holds the message id and one reaction (count unused). */
     int delta;         /* +1 added, -1 removed */
     int mine;          /* by us */
+    /* BATCH_HISTORY around a message: its id, to jump to it. BATCH_SEARCH: total results. */
+    char around[24];
+    int total;
 } msg_batch_t;
 
 int msg_parse(json_t obj, msg_t *out);
@@ -102,6 +105,8 @@ msg_batch_t *msg_batch_one(json_t obj, int kind);
 void msg_batch_free(msg_batch_t *b);
 /* MESSAGE_REACTION_ADD / _REMOVE; `me` is our user id. */
 msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me);
+/* A search response: {total_results, messages: [[hit, context...], ...]}; keeps the hits, best first. */
+msg_batch_t *msg_batch_search(json_t root);
 /* The emoji of a reaction as the REST API wants it in a URL: "%F0%9F%91%8D" or "name:id". */
 void msg_reaction_path(const msg_reaction_t *r, sb_t *out);
 

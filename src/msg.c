@@ -561,6 +561,41 @@ msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me)
     return b;
 }
 
+msg_batch_t *msg_batch_search(json_t root)
+{
+    msg_batch_t *b = mem_alloc(sizeof *b);
+    json_t v, groups, group, hit;
+    json_iter_t it, git;
+    long long total = 0;
+
+    b->kind = BATCH_SEARCH;
+    if (json_get(root, "total_results", &v))
+        json_int(v, &total);
+    b->total = (int)total;
+    if (!json_get(root, "messages", &groups))
+        return b;
+    b->msgs = mem_alloc((json_count(groups) + 1) * sizeof *b->msgs);
+    json_iter(groups, &it);
+    while (json_next(&it, NULL, &group)) {
+        /* Each group is the hit, or the hit with messages around it: the hit is flagged. */
+        json_t pick = {0}, flag;
+        json_iter(group, &git);
+        while (json_next(&git, NULL, &hit)) {
+            if (!pick.p)
+                pick = hit;
+            if (json_get(hit, "hit", &flag) && json_type(flag) == JSON_TRUE) {
+                pick = hit;
+                break;
+            }
+        }
+        if (pick.p && msg_parse(pick, &b->msgs[b->n]))
+            b->n++;
+        else if (pick.p)
+            msg_free(&b->msgs[b->n]), b->msgs[b->n] = (msg_t){0};
+    }
+    return b;
+}
+
 static void pct(sb_t *out, const char *s, size_t n)
 {
     static const char hex[] = "0123456789ABCDEF";

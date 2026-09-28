@@ -146,6 +146,23 @@ static void test_reaction_event(void)
     msg_batch_free(b);
 }
 
+static void test_search(void)
+{
+    static const char res[] = "{\"total_results\":7,\"messages\":["
+                              "[{\"id\":\"5\",\"channel_id\":\"9\",\"content\":\"hello there\"}],"
+                              "[{\"id\":\"6\",\"content\":\"before\"},{\"id\":\"7\",\"content\":\"the hit\",\"hit\":true}]]}";
+    json_t v;
+    msg_batch_t *b;
+
+    json_parse(res, sizeof res - 1, &v);
+    b = msg_batch_search(v);
+    check(b->kind == BATCH_SEARCH && b->total == 7 && b->n == 2, "search results");
+    check(b->n == 2 && lstrcmpA(b->msgs[0].id, "5") == 0 && lstrcmpA(b->msgs[0].channel_id, "9") == 0 &&
+              lstrcmpA(b->msgs[1].id, "7") == 0 && str_eq(&b->msgs[1].text, "the hit"),
+          "the flagged hit is kept from each group");
+    msg_batch_free(b);
+}
+
 static void test_batch(void)
 {
     static const char arr[] = "[{\"id\":\"3\"},{\"id\":\"2\"},{\"nope\":1},{\"id\":\"1\"}]";
@@ -169,6 +186,7 @@ void entry(void)
     test_author_and_reply();
     test_parts();
     test_reaction_event();
+    test_search();
     test_batch();
     finish();
 }
