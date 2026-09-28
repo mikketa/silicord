@@ -2831,6 +2831,11 @@ static void on_batch(msg_batch_t *b)
             sb_free(&g_ui.msgs[i].text);
             g_ui.msgs[i].text = n->text;
             n->text = (sb_t){0};
+            /* The raw content too: editing again, copying and our mentions read it. */
+            sb_free(&g_ui.msgs[i].content);
+            g_ui.msgs[i].content = n->content;
+            n->content = (sb_t){0};
+            g_ui.msgs[i].mention_everyone = n->mention_everyone;
             g_ui.msgs[i].edited = n->edited;
             msg_free_extras(&g_ui.msgs[i]);
         } else if (n->nembeds) {
