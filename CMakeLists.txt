@@ -29,6 +29,7 @@ add_library(silicord_core STATIC
   src/crypto.c
   src/emoji.c
   src/emoji_data.c
+  src/inflate.c
   src/json.c
   src/md.c
   src/mem.c
@@ -90,6 +91,9 @@ add_test(NAME profile COMMAND profile_test)
 
 silicord_test(command_test)
 add_test(NAME command COMMAND command_test)
+
+silicord_test(inflate_test)
+add_test(NAME inflate COMMAND inflate_test)
 
 silicord_test(emoji_test)
 add_test(NAME emoji COMMAND emoji_test)
