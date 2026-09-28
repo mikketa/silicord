@@ -6521,6 +6521,50 @@ static int starts_ci(const char *s, const char *prefix)
     return n <= lstrlenA(s) && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, s, n, prefix, n) == CSTR_EQUAL;
 }
 
+/* Discord's own commands, done by the client before sending. */
+static const struct {
+    const char *name, *description;
+} k_builtin[] = {
+    {"shrug", "Appends \xC2\xAF\\_(\xE3\x83\x84)_/\xC2\xAF to your message."},
+    {"tableflip", "Appends (\xE2\x95\xAF\xC2\xB0\xE2\x96\xA1\xC2\xB0)\xE2\x95\xAF\xEF\xB8\xB5 \xE2\x94\xBB\xE2\x94\x81\xE2\x94\xBB to your message."},
+    {"unflip", "Appends \xE2\x94\xAC\xE2\x94\x80\xE2\x94\xAC\xE3\x83\x8E( \xC2\xBA _ \xC2\xBA\xE3\x83\x8E) to your message."},
+    {"me", "Displays text with emphasis."},
+    {"spoiler", "Marks your message as a spoiler."},
+};
+
+/* Rewrites "/shrug hi" and the like into the message Discord would send. Returns 0 for anything else. */
+static int builtin_rewrite(const char *s, size_t n, sb_t *out)
+{
+    static const char *const tails[] = {
+        "\xC2\xAF\\\\\\_(\xE3\x83\x84)\\_/\xC2\xAF", /* escaped so markdown keeps it */
+        "(\xE2\x95\xAF\xC2\xB0\xE2\x96\xA1\xC2\xB0)\xE2\x95\xAF\xEF\xB8\xB5 \xE2\x94\xBB\xE2\x94\x81\xE2\x94\xBB",
+        "\xE2\x94\xAC\xE2\x94\x80\xE2\x94\xAC\xE3\x83\x8E( \xC2\xBA _ \xC2\xBA\xE3\x83\x8E)",
+    };
+
+    for (int k = 0; k < (int)ARRAYSIZE(k_builtin); k++) {
+        size_t len = (size_t)lstrlenA(k_builtin[k].name), r;
+        if (n < len + 1 || (n > len + 1 && s[len + 1] != ' ') ||
+            CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, s + 1, (int)len, k_builtin[k].name, (int)len) != CSTR_EQUAL)
+            continue;
+        for (r = len + 1; r < n && s[r] == ' '; r++)
+            ;
+        if (k < 3) {
+            sb_addn(out, s + r, n - r);
+            if (n > r)
+                sb_add(out, " ");
+            sb_add(out, tails[k]);
+        } else {
+            if (n == r)
+                return 0;
+            sb_add(out, k == 3 ? "_" : "||");
+            sb_addn(out, s + r, n - r);
+            sb_add(out, k == 3 ? "_" : "||");
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static const char *cmd_scope(void)
 {
     const char *guild = open_guild_id();
@@ -6599,7 +6643,7 @@ static int ac_commands(const wchar_t *w, int end)
     commands_ensure();
     g_ui.ac_n = 0;
     if (!g_ui.cmd_index.len || !json_parse(g_ui.cmd_index.data, g_ui.cmd_index.len, &index))
-        return 1; /* loading: nothing to show yet */
+        json_parse("{}", 2, &index); /* loading: the built-in ones only */
     wide_to_utf8(w, (size_t)end, &s);
     for (sp = 1; sp < s.len && s.data[sp] != ' ' && s.data[sp] != '\n'; sp++)
         ;
@@ -6613,6 +6657,18 @@ static int ac_commands(const wchar_t *w, int end)
         json_iter_t it = {0};
         g_ui.ac_kind = AC_COMMAND;
         lstrcpynA(g_ui.ac_query, q + 1, sizeof g_ui.ac_query);
+        for (int k = 0; k < (int)ARRAYSIZE(k_builtin) && g_ui.ac_n < AC_MAX; k++) {
+            ac_item_t *b;
+            if (!starts_ci(k_builtin[k].name, q + 1))
+                continue;
+            b = &g_ui.ac[g_ui.ac_n++];
+            *b = (ac_item_t){0};
+            b->emoji = -1;
+            wsprintfA(b->label, "/%s", k_builtin[k].name);
+            wsprintfA(b->insert, "/%s ", k_builtin[k].name);
+            lstrcpynA(b->detail, k_builtin[k].description, sizeof b->detail);
+            lstrcpyA(b->app, "Built-in");
+        }
         while (g_ui.ac_n < AC_MAX && cmd_next(index, &it, &cmd)) {
             char name[40], label[48], insert[48];
             if (!json_get(cmd, "name", &v))
@@ -8446,7 +8502,13 @@ static void send_composer(void)
     while (b > a && (text.data[b - 1] == ' ' || text.data[b - 1] == '	'))
         b--;
     if (b > a || g_ui.nuploads) {
-        sb_t out = {0};
+        sb_t out = {0}, rewritten = {0};
+        if (text.data[a] == '/' && builtin_rewrite(text.data + a, b - a, &rewritten)) {
+            sb_free(&text);
+            text = rewritten;
+            a = 0;
+            b = text.len;
+        }
         text.data[b] = 0;
         if (text.data[a] == '/' && !g_ui.nuploads && g_ui.bar != BAR_EDIT) {
             sb_t trimmed = {0}, mentioned = {0};
