@@ -40,6 +40,18 @@ static void test_get(void)
     check(!json_str_eq(v, "READ"), "string prefix is not equal");
 }
 
+static void test_int_range(void)
+{
+    json_t v;
+    long long n;
+
+    check(parse("9223372036854775807", &v) && json_int(v, &n) && n == 9223372036854775807ll, "largest int");
+    check(parse("-9223372036854775808", &v) && json_int(v, &n) && n == -9223372036854775807ll - 1, "smallest int");
+    check(parse("9223372036854775808", &v) && !json_int(v, &n), "reject int above range");
+    check(parse("-9223372036854775809", &v) && !json_int(v, &n), "reject int below range");
+    check(parse("99999999999999999999999", &v) && !json_int(v, &n), "reject huge int");
+}
+
 static void test_iter(void)
 {
     json_t root, key, val;
@@ -91,6 +103,7 @@ void entry(void)
 {
     test_parse();
     test_get();
+    test_int_range();
     test_iter();
     test_str();
     finish();

@@ -203,7 +203,7 @@ int json_int(json_t v, long long *out)
 {
     const char *p = v.p;
     int neg = 0;
-    long long n = 0;
+    unsigned long long n = 0, max;
 
     if (json_type(v) != JSON_NUMBER)
         return 0;
@@ -211,9 +211,15 @@ int json_int(json_t v, long long *out)
         neg = 1;
         p++;
     }
-    for (; p < v.end && *p >= '0' && *p <= '9'; p++)
-        n = n * 10 + (*p - '0');
-    *out = neg ? -n : n;
+    /* Out of range is not an integer; the magnitude of LLONG_MIN is one more than LLONG_MAX. */
+    max = neg ? 9223372036854775808ull : 9223372036854775807ull;
+    for (; p < v.end && *p >= '0' && *p <= '9'; p++) {
+        unsigned d = (unsigned)(*p - '0');
+        if (n > (max - d) / 10)
+            return 0;
+        n = n * 10 + d;
+    }
+    *out = neg ? (long long)(0ull - n) : (long long)n;
     return 1;
 }
 
