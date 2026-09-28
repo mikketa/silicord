@@ -289,6 +289,16 @@ int gw_send(const sb_t *payload)
     return g_gw.ready && ws_send(&g_gw.ws, payload);
 }
 
+void gw_session_id(char *out, size_t size)
+{
+    size_t i = 0;
+
+    for (; i + 1 < size && g_gw.session_id[i]; i++)
+        out[i] = g_gw.session_id[i];
+    if (size)
+        out[i] = 0;
+}
+
 int gw_wait(unsigned ms)
 {
     init_once(&g_gw);

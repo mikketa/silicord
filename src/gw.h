@@ -31,6 +31,8 @@ typedef enum {
 gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *established);
 /* Sends a payload on the open connection (any thread). Returns 0 when not connected. */
 int gw_send(const sb_t *payload);
+/* The current session's id (empty before READY), for interactions. */
+void gw_session_id(char *out, size_t size);
 /* Waits up to `ms`; returns 1 if gw_stop() was called meanwhile. */
 int gw_wait(unsigned ms);
 /* Safe from any thread. Stays in effect, so later gw_run() calls return at once, until gw_reset(). */
