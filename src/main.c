@@ -23,6 +23,7 @@ static volatile LONG g_login_stop;
 static HANDLE g_session_thread;
 static volatile LONG g_session_id;   /* bumped to silence a session that is being stopped */
 static CRITICAL_SECTION g_open_lock;
+static CRITICAL_SECTION g_session_lock; /* orders stopping a session against its gateway reset and token save */
 static char g_open_channel[24];     /* live messages are forwarded for this channel only */
 
 static void log_line(const char *prefix, const char *text)
@@ -128,6 +129,7 @@ typedef struct {
     sb_t last_status;
     LONG id;
     char me[24];        /* our user id, known after READY */
+    HANDLE prev;        /* the previous session's thread, if it had not ended yet */
 } session_t;
 
 static int current(const session_t *s)
@@ -536,7 +538,25 @@ static DWORD WINAPI session_main(LPVOID arg)
     gw_events_t ev = {s, on_gw_status, on_ready, on_dispatch};
     sb_t name = {0}, text = {0};
     DWORD status;
-    int attempt = 0, resume = 0, established;
+    int attempt = 0, resume = 0, established, saved;
+
+    /*
+     * A session stopped in the middle of a network call ends on its own
+     * later: wait for it here (not on the UI thread) before taking the
+     * gateway, which both would share. Then reset it, unless we were
+     * stopped too in the meantime.
+     */
+    if (s->prev) {
+        WaitForSingleObject(s->prev, INFINITE);
+        CloseHandle(s->prev);
+        s->prev = NULL;
+    }
+    EnterCriticalSection(&g_session_lock);
+    if (current(s))
+        gw_reset();
+    LeaveCriticalSection(&g_session_lock);
+    if (!current(s))
+        goto end;
 
     /* Check the token; while offline, keep trying instead of giving up. */
     for (;;) {
@@ -547,10 +567,11 @@ static DWORD WINAPI session_main(LPVOID arg)
         if (gw_wait(backoff(attempt++)))
             goto end;
     }
+    if (!current(s))
+        goto end; /* stopped (logged out, perhaps) while checking */
     if (status == 401) {
         cred_delete();
-        if (current(s))
-            ui_post(UI_LOGIN_FAILED, ui_text("Discord rejected this token."));
+        ui_post(UI_LOGIN_FAILED, ui_text("Discord rejected this token."));
         goto end;
     }
     if (status != 200) {
@@ -560,7 +581,11 @@ static DWORD WINAPI session_main(LPVOID arg)
             ui_post(UI_DISCONNECTED, copy(text.data, text.len));
         goto end;
     }
-    if (!cred_save(s->token.data, s->token.len))
+    /* Under the lock: once app_logout has stopped us, the token must not be saved again. */
+    EnterCriticalSection(&g_session_lock);
+    saved = !current(s) || cred_save(s->token.data, s->token.len);
+    LeaveCriticalSection(&g_session_lock);
+    if (!saved)
         log_line("session: ", "could not save the token");
     if (current(s))
         ui_post(UI_ACCOUNT, copy(name.data ? name.data : "", name.len));
@@ -601,13 +626,23 @@ end:
     return 0;
 }
 
+/*
+ * Silences the session and stops its gateway. A thread stuck in a network
+ * call (a connection attempt cannot be interrupted) is kept in
+ * g_session_thread: the next session waits for it before using the gateway.
+ */
 static void stop_session(void)
 {
     if (!g_session_thread)
         return;
+    EnterCriticalSection(&g_session_lock);
     InterlockedIncrement(&g_session_id);
     gw_stop();
-    join(&g_session_thread);
+    LeaveCriticalSection(&g_session_lock);
+    if (WaitForSingleObject(g_session_thread, JOIN_TIMEOUT) == WAIT_OBJECT_0) {
+        CloseHandle(g_session_thread);
+        g_session_thread = NULL;
+    }
 }
 
 static void start_session(void)
@@ -615,7 +650,7 @@ static void start_session(void)
     session_t *s = mem_alloc(sizeof *s);
 
     stop_session();
-    gw_reset();
+    s->prev = g_session_thread;
     s->id = InterlockedIncrement(&g_session_id);
     sb_addn(&s->token, g_token.data, g_token.len);
     g_session_thread = CreateThread(NULL, 0, session_main, s, 0, NULL);
@@ -1857,6 +1892,7 @@ void entry(void)
     }
     g_login_wake = CreateEventW(NULL, TRUE, FALSE, NULL);
     InitializeCriticalSection(&g_open_lock);
+    InitializeCriticalSection(&g_session_lock);
 
     ShowWindow(ui_create(GetModuleHandleW(NULL)), SW_SHOWDEFAULT);
     if (cred_load(&g_token)) {
