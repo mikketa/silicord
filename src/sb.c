@@ -8,13 +8,24 @@ void sb_reserve(sb_t *sb, size_t extra)
 {
     size_t need = sb->len + extra + 1;
     size_t cap;
+    char *data;
 
     if (need <= sb->cap)
         return;
     cap = sb->cap ? sb->cap : 64;
     while (cap < need)
         cap *= 2;
-    sb->data = mem_realloc(sb->data, cap);
+    /*
+     * Not mem_realloc: a moved block would be freed with its contents, and
+     * strings built here hold the token (identify, Authorization headers).
+     */
+    data = mem_alloc(cap);
+    if (sb->data) {
+        memcpy(data, sb->data, sb->len + 1);
+        SecureZeroMemory(sb->data, sb->cap);
+        mem_free(sb->data);
+    }
+    sb->data = data;
     sb->cap = cap;
 }
 
