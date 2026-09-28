@@ -2963,26 +2963,28 @@ static int divider_h(const msg_t *m)
     return (m->grouped == 2 ? S(44) : m->first_new ? S(20) : 0) + (m->first_new && m->grouped == 1 ? S(8) : 0);
 }
 
-/* Plain substring search (no shlwapi). */
-static const char *find_str(const char *hay, const char *needle)
+/* Substring search (no shlwapi). CompareStringA reads all n bytes, so only where n are left. */
+static const char *find_in(const char *hay, const char *needle, DWORD flags)
 {
-    size_t n = (size_t)lstrlenA(needle);
+    size_t n = (size_t)lstrlenA(needle), left = (size_t)lstrlenA(hay);
 
-    for (; *hay; hay++)
-        if (CompareStringA(LOCALE_INVARIANT, 0, hay, (int)n, needle, (int)n) == CSTR_EQUAL)
+    if (!n)
+        return left ? hay : NULL;
+    for (; left >= n; hay++, left--)
+        if (CompareStringA(LOCALE_INVARIANT, flags, hay, (int)n, needle, (int)n) == CSTR_EQUAL)
             return hay;
     return NULL;
+}
+
+static const char *find_str(const char *hay, const char *needle)
+{
+    return find_in(hay, needle, 0);
 }
 
 /* Same, ignoring case. */
 static const char *find_str_ci(const char *hay, const char *needle)
 {
-    size_t n = (size_t)lstrlenA(needle);
-
-    for (; *hay; hay++)
-        if (CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, hay, (int)n, needle, (int)n) == CSTR_EQUAL)
-            return hay;
-    return NULL;
+    return find_in(hay, needle, NORM_IGNORECASE);
 }
 
 /* The red "NEW" line above the first unread message. */
