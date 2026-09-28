@@ -149,6 +149,21 @@ static int media(dave_session_t *from, dave_session_t *to)
     return ok;
 }
 
+/* A VP8 key frame: its first 10 bytes travel in the clear, the rest encrypted, and it decrypts back. */
+static int video(dave_session_t *from, dave_session_t *to)
+{
+    static const unsigned char vp8[] = {0x50, 0x1d, 0x00, 0x9d, 0x01, 0x2a, 0xb0, 0x00, 0x90, 0x00, 11, 12, 13, 14, 15, 16};
+    sb_t enc = {0}, dec = {0};
+    int ok = dave_session_encrypt_vp8(from, vp8, sizeof vp8, &enc) && enc.len > sizeof vp8 &&
+             ct_equal(enc.data, vp8, 10) && !ct_equal(enc.data + 10, vp8 + 10, 6) &&
+             dave_session_decrypt(to, from->self_id, (const unsigned char *)enc.data, enc.len, &dec, 2000) &&
+             dec.len == sizeof vp8 && ct_equal(dec.data, vp8, sizeof vp8);
+
+    sb_free(&enc);
+    sb_free(&dec);
+    return ok;
+}
+
 void entry(void)
 {
     static dave_session_t a, b, c;
@@ -193,6 +208,7 @@ void entry(void)
     check(same_code(&a, &b) && dave_authenticator(&a, code, sizeof code) && code[29] && !code[30],
           "same epoch authenticator");
     check(media(&a, &b) && media(&b, &a), "media both ways");
+    check(video(&a, &b) && video(&b, &a), "VP8 frames keep their header in the clear");
 
     /* C joins: B's commit wins; A follows it. */
     dave_on_select_protocol_ack(&c, 1);

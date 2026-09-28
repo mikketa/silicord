@@ -439,7 +439,8 @@ int dave_authenticator(const dave_session_t *s, char *out, size_t size)
     return s->established && dave_displayable_code(s->group.keys.authentication, 32, 30, 5, out, size);
 }
 
-int dave_session_encrypt(dave_session_t *s, const unsigned char *frame, size_t n, sb_t *out)
+static int encrypt_frame(dave_session_t *s, const unsigned char *frame, size_t n, const dave_range_t *ranges, int nranges,
+                         sb_t *out)
 {
     unsigned char key[16];
     unsigned long nonce;
@@ -452,9 +453,24 @@ int dave_session_encrypt(dave_session_t *s, const unsigned char *frame, size_t n
     if (!s->has_own)
         return 0;
     nonce = s->own_nonce++;
-    ok = dave_ratchet_key(&s->own, nonce >> 24, key) && dave_encrypt(key, nonce, frame, n, NULL, 0, out);
+    ok = dave_ratchet_key(&s->own, nonce >> 24, key) && dave_encrypt(key, nonce, frame, n, ranges, nranges, out);
     secure_wipe(key, sizeof key);
     return ok;
+}
+
+int dave_session_encrypt(dave_session_t *s, const unsigned char *frame, size_t n, sb_t *out)
+{
+    return encrypt_frame(s, frame, n, NULL, 0, out);
+}
+
+int dave_session_encrypt_vp8(dave_session_t *s, const unsigned char *frame, size_t n, sb_t *out)
+{
+    /* What the SFU reads: a key frame's tag, start code and size (10 bytes), else the tag's first byte. */
+    dave_range_t r = {0, (frame[0] & 1) == 0 ? 10 : 1};
+
+    if (r.length > n)
+        r.length = n;
+    return encrypt_frame(s, frame, n, &r, 1, out);
 }
 
 static int decrypt_with(dave_keyring_t *k, unsigned long long user, const unsigned char *frame, size_t n, sb_t *out)

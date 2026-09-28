@@ -68,6 +68,8 @@ void dave_on_binary(dave_session_t *s, const void *data, size_t n, unsigned long
 int dave_authenticator(const dave_session_t *s, char *out, size_t size);
 /* Our outgoing frame: encrypted under DAVE, or copied as is at version 0. */
 int dave_session_encrypt(dave_session_t *s, const unsigned char *frame, size_t n, sb_t *out);
+/* A VP8 frame: its first bytes (which the SFU reads) stay in the clear, authenticated. */
+int dave_session_encrypt_vp8(dave_session_t *s, const unsigned char *frame, size_t n, sb_t *out);
 /* An incoming frame from `user`. */
 int dave_session_decrypt(dave_session_t *s, unsigned long long user, const unsigned char *frame, size_t n, sb_t *out,
                          unsigned long long now_ms);
