@@ -9,11 +9,15 @@ project(silicord_host C)
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(ZLIB REQUIRED)
+option(WERROR "Treat warnings as errors" OFF)
 
 set(SANITIZE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
 add_compile_options(-std=c11 -g -O1 -fshort-wchar -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
                     -Wno-unknown-pragmas -Wno-missing-field-initializers ${SANITIZE})
 add_link_options(${SANITIZE})
+if(WERROR)
+  add_compile_options(-Werror)
+endif()
 # The core's headers use MSVC's __inline and assume WIN32_LEAN_AND_MEAN.
 add_compile_definitions(__inline=inline WIN32_LEAN_AND_MEAN _GNU_SOURCE)
 include_directories(shim ${ROOT}/src ${ROOT}/tests)
@@ -47,3 +51,11 @@ target_link_libraries(fuzz core ZLIB::ZLIB)
 # A short, fixed run with every test; longer ones by hand: fuzz 100000 json 42
 set(FUZZ_ITERATIONS 2000 CACHE STRING "Iterations of the fuzz test")
 add_test(NAME fuzz COMMAND fuzz ${FUZZ_ITERATIONS} all 1)
+
+# The QR encoder, decoded by an independent reader (pip install numpy zxing-cpp), as on Windows.
+add_executable(qr_test ${ROOT}/tests/qr_test.c shim/main.c)
+target_link_libraries(qr_test core)
+execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy, zxingcpp" RESULT_VARIABLE NO_DECODER OUTPUT_QUIET ERROR_QUIET)
+if(NOT NO_DECODER)
+  add_test(NAME qr COMMAND Python3::Interpreter ${ROOT}/tests/qr_check.py $<TARGET_FILE:qr_test>)
+endif()
