@@ -31,6 +31,7 @@ enum {
     UI_FONT,            /* wParam = display name font id, payload = the font file (NULL on failure) */
     UI_TYPING,          /* text = channel id, NUL, user id, NUL, display name (empty in DMs) */
     UI_FRIEND_RESULT,   /* text = outcome of a friend request */
+    UI_FORUM,           /* text = forum channel id, NUL, then the threads/search JSON (empty on failure) */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -75,6 +76,8 @@ void app_send_message(const char *channel_id, const char *text);
 void app_fetch_around(const char *channel_id, const char *message_id);
 /* Searches a server's messages (or a DM's); results come back as a BATCH_SEARCH batch. */
 void app_search(const char *guild_id, const char *dm_channel_id, const char *query);
+/* Loads a forum's recent posts; they come back as UI_FORUM. */
+void app_fetch_forum(const char *channel_id);
 /* Loads the channel's pinned messages; they come back as a BATCH_PINS batch. */
 void app_fetch_pins(const char *channel_id);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */

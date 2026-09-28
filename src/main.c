@@ -1307,6 +1307,31 @@ void app_search(const char *guild_id, const char *dm_channel_id, const char *que
     CloseHandle(CreateThread(NULL, 0, search_main, j, 0, NULL));
 }
 
+static DWORD WINAPI forum_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[160];
+    sb_t *p = mem_alloc(sizeof *p);
+
+    wsprintfA(path, "/channels/%s/threads/search?archived=false&sort_by=last_message_time&sort_order=desc&limit=25&offset=0",
+              j->channel);
+    http_request("GET", path, j->token.data, NULL, 0, &resp);
+    sb_add(p, j->channel);
+    sb_addn(p, "", 1);
+    if (resp.status == 200)
+        sb_addn(p, resp.body.data, resp.body.len);
+    ui_post(UI_FORUM, p);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_forum(const char *channel_id)
+{
+    CloseHandle(CreateThread(NULL, 0, forum_main, new_job(channel_id), 0, NULL));
+}
+
 void app_fetch_pins(const char *channel_id)
 {
     rest_job_t *j = new_job(channel_id);
