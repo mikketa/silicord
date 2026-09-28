@@ -47,6 +47,7 @@ add_library(silicord_core STATIC
   src/mls_path.c
   src/mls_schedule.c
   src/mls_tree.c
+  src/mixer.c
   src/opus.c
   src/opus_celt.c
   src/opus_math.c
@@ -80,6 +81,7 @@ add_executable(silicord
   src/img.c
   src/ra.c
   src/render.cpp
+  src/audio.c
   src/ui.c
   src/voice.c
   src/ws.c
@@ -91,7 +93,7 @@ target_compile_definitions(silicord PRIVATE
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0>
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_ICON="${CMAKE_SOURCE_DIR}/assets/silicord.ico">)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm)
 
 enable_testing()
 function(silicord_test name)
@@ -151,6 +153,8 @@ silicord_test(rtp_test)
 add_test(NAME rtp COMMAND rtp_test)
 silicord_test(opus_test)
 add_test(NAME opus COMMAND opus_test)
+silicord_test(mixer_test)
+add_test(NAME mixer COMMAND mixer_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)

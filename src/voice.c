@@ -290,7 +290,7 @@ static DWORD WINAPI udp_main(LPVOID arg)
                 }
             }
             if (ok && v->ev.frame)
-                v->ev.frame(v->ev.ctx, user, (const unsigned char *)opus.data, opus.len);
+                v->ev.frame(v->ev.ctx, user, h.seq, (const unsigned char *)opus.data, opus.len);
         }
     }
     sb_free(&media);

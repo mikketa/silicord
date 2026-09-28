@@ -226,6 +226,7 @@ typedef struct {
     int voice_state;           /* our own connection, VOICE_* */
     char voice_channel[24];
     char voice_name[100];      /* its channel name */
+    unsigned voice_speaking;   /* who spoke at the last check, one bit per member of our call */
     sb_t voice_status;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
@@ -380,6 +381,7 @@ static void rel_remove(const char *id);
 #define TIMER_ACK 1
 #define TIMER_FLASH 3
 #define TIMER_REACTORS 9
+#define TIMER_VOICE 10 /* refreshes who is speaking in our call */
 #define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
@@ -1088,6 +1090,10 @@ static void paint_voice_users(unsigned i, int y)
             r_image(img, x, y + S(4), S(22), S(22), S(11));
         else
             r_circle(x, y + S(4), S(22), ARGB(C_ITEM));
+        /* Speaking: a green ring, for the people in our own call. */
+        if (g_ui.voice_state == VOICE_CONNECTED && lstrcmpA(channel, g_ui.voice_channel) == 0 &&
+            app_voice_speaking(v->user))
+            r_round_outline(x - S(2), y + S(2), S(26), S(26), S(13), S(2), ARGB(C_GREEN));
         if (v->flags & VOICE_DEAF) {
             ix -= S(18);
             text_w(g_ui.f_icon, C_MUTED, rect(ix, y, S(18), S(VOICE_ROW)), L"\xE74F", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -4135,6 +4141,7 @@ static void on_click(int kind, int index)
         open_self();
         break;
     case HIT_VOICE_LEAVE:
+        KillTimer(g_ui.wnd, TIMER_VOICE);
         app_voice_leave();
         g_ui.voice_state = VOICE_OFF;
         g_ui.voice_channel[0] = 0;
@@ -4477,6 +4484,10 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
             sb_add(&g_ui.voice_status, p->data + 2);
             if (g_ui.voice_state == VOICE_OFF)
                 g_ui.voice_channel[0] = 0;
+            if (g_ui.voice_state == VOICE_CONNECTED)
+                SetTimer(g_ui.wnd, TIMER_VOICE, 100, NULL);
+            else
+                KillTimer(g_ui.wnd, TIMER_VOICE);
             clamp_scroll();
         }
         if (p) {
@@ -10652,6 +10663,18 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             KillTimer(wnd, TIMER_FLASH);
             g_ui.flash_id[0] = 0;
             redraw();
+            return 0;
+        }
+        if (wp == TIMER_VOICE) {
+            /* Repaint only when someone starts or stops speaking. */
+            unsigned mask = 0;
+            for (int k = 0, bit = 0; k < g_ui.nvoices && bit < 32; k++)
+                if (lstrcmpA(g_ui.voices[k].channel, g_ui.voice_channel) == 0)
+                    mask |= (unsigned)app_voice_speaking(g_ui.voices[k].user) << bit++;
+            if (mask != g_ui.voice_speaking) {
+                g_ui.voice_speaking = mask;
+                redraw();
+            }
             return 0;
         }
         if (wp == TIMER_TYPING) {

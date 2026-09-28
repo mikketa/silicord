@@ -20,8 +20,8 @@ typedef struct {
 typedef struct {
     void *ctx;
     void (*state)(void *ctx, int state, const char *text);
-    /* One decrypted Opus frame from `user`. */
-    void (*frame)(void *ctx, unsigned long long user, const unsigned char *opus, size_t n);
+    /* One decrypted Opus packet from `user`, with its RTP sequence number. */
+    void (*frame)(void *ctx, unsigned long long user, unsigned seq, const unsigned char *opus, size_t n);
     void (*speaking)(void *ctx, unsigned long long user, int on);
     /* A line for the --debug trace (opcodes, DAVE states, the Opus modes heard). */
     void (*log)(void *ctx, const char *text);

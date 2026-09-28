@@ -141,6 +141,9 @@ void app_add_friend(const char *username);
 /* Joins a server's voice channel (leaving any other); the connection reports back with UI_VOICE. */
 void app_voice_join(const char *guild_id, const char *channel_id);
 void app_voice_leave(void);
+/* Whether a member of our voice call is talking right now (any thread). */
+int app_voice_speaking(const char *user_id);
+void app_voice_deafen(int deafened);
 /* Our status: "online", "idle", "dnd" or "invisible". */
 /* This session's presence: status and custom status text (NULL or empty for none). */
 void app_set_status(const char *status, const char *custom);

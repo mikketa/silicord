@@ -13,6 +13,8 @@
 #include "ui.h"
 #include "utf.h"
 #include "voice.h"
+#include "audio.h"
+#include "mixer.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -330,11 +332,58 @@ static struct {
     voice_params_t p;
 } g_vc;
 
+/* What we hear: every speaker's packets through the mixer to the sound card. */
+static CRITICAL_SECTION g_mix_lock;
+static mixer_t g_mixer;
+
+static void voice_frame(void *ctx, unsigned long long user, unsigned seq, const unsigned char *opus, size_t n)
+{
+    (void)ctx;
+    EnterCriticalSection(&g_mix_lock);
+    mixer_push(&g_mixer, user, seq, opus, n);
+    LeaveCriticalSection(&g_mix_lock);
+}
+
+static void audio_play(void *ctx, float *out)
+{
+    (void)ctx;
+    EnterCriticalSection(&g_mix_lock);
+    mixer_pull(&g_mixer, out);
+    LeaveCriticalSection(&g_mix_lock);
+}
+
+int app_voice_speaking(const char *user_id)
+{
+    unsigned long long u = 0;
+    int on;
+
+    for (const char *c = user_id; *c >= '0' && *c <= '9'; c++)
+        u = u * 10 + (unsigned)(*c - '0');
+    EnterCriticalSection(&g_mix_lock);
+    on = mixer_speaking(&g_mixer, u);
+    LeaveCriticalSection(&g_mix_lock);
+    return on;
+}
+
+void app_voice_deafen(int deafened)
+{
+    EnterCriticalSection(&g_mix_lock);
+    g_mixer.deafened = deafened;
+    LeaveCriticalSection(&g_mix_lock);
+}
+
 static void voice_state_changed(void *ctx, int state, const char *text)
 {
     sb_t *p = mem_alloc(sizeof *p);
 
     (void)ctx;
+    if (state == VOICE_CONNECTED) {
+        audio_io_t io = {0};
+        io.play = audio_play;
+        audio_start(&io);
+    } else if (state != VOICE_CONNECTING) {
+        audio_stop();
+    }
     sb_i64(p, state);
     sb_addn(p, "", 1);
     sb_add(p, text);
@@ -383,6 +432,7 @@ static void voice_try_start(void)
 
     ev.state = voice_state_changed;
     ev.log = voice_log;
+    ev.frame = voice_frame;
     if (g_vc.active && g_vc.have_state && g_vc.have_server) {
         g_vc.have_server = 0;
         voice_start(&g_vc.p, &ev);
@@ -415,6 +465,11 @@ void app_voice_leave(void)
     g_vc.active = 0;
     LeaveCriticalSection(&g_voice_lock);
     voice_stop();
+    audio_stop();
+    EnterCriticalSection(&g_mix_lock);
+    mixer_free(&g_mixer);
+    mixer_init(&g_mixer);
+    LeaveCriticalSection(&g_mix_lock);
     if (guild[0])
         send_voice_state(guild, NULL);
 }
@@ -2137,6 +2192,8 @@ void entry(void)
     InitializeCriticalSection(&g_open_lock);
     InitializeCriticalSection(&g_session_lock);
     InitializeCriticalSection(&g_voice_lock);
+    InitializeCriticalSection(&g_mix_lock);
+    mixer_init(&g_mixer);
 
     ShowWindow(ui_create(GetModuleHandleW(NULL)), SW_SHOWDEFAULT);
     if (cred_load(&g_token)) {
