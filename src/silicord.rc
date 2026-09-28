@@ -1,0 +1,34 @@
+// Executable icon and version information, shown by Explorer and the taskbar.
+// SILICORD_ICON is the path of assets/silicord.ico, made from assets/logo.svg by tools/make_icon.py.
+#include <winver.h>
+
+#define IDI_SILICORD 1
+IDI_SILICORD ICON SILICORD_ICON
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION SILICORD_VERSION_RC
+PRODUCTVERSION SILICORD_VERSION_RC
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Silicord"
+            VALUE "FileVersion", SILICORD_VERSION
+            VALUE "InternalName", "silicord"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "silicord.exe"
+            VALUE "ProductName", "Silicord"
+            VALUE "ProductVersion", SILICORD_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
