@@ -39,6 +39,7 @@ add_library(silicord_core STATIC
   src/mem.c
   src/memberlist.c
   src/model.c
+  src/p256.c
   src/msg.c
   src/profile.c
   src/qr.c
@@ -111,6 +112,9 @@ add_test(NAME command COMMAND command_test)
 
 silicord_test(aes_test)
 add_test(NAME aes COMMAND aes_test)
+
+silicord_test(p256_test)
+add_test(NAME p256 COMMAND p256_test)
 
 silicord_test(sha2_test)
 add_test(NAME sha2 COMMAND sha2_test)
