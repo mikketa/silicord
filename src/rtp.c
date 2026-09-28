@@ -56,7 +56,7 @@ int rtp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, rt
     unsigned char iv[12] = {0};
     size_t head, ext = 0, at = payload->len;
 
-    if (n < 12 + 16 + 4 || (pkt[0] >> 6) != 2 || (pkt[1] >= 200 && pkt[1] <= 204))
+    if (n < 12 + 16 + 4 || (pkt[0] >> 6) != 2 || (pkt[1] >= 200 && pkt[1] <= 206))
         return 0;
     head = 12 + 4 * (size_t)(pkt[0] & 15);
     if (pkt[0] & 0x10) { /* the extension's profile and length stay clear */
@@ -68,6 +68,7 @@ int rtp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, rt
     if (n < head + 16 + 4)
         return 0;
     h->type = pkt[1] & 0x7F;
+    h->marker = pkt[1] >> 7;
     h->seq = get16(pkt + 2);
     h->timestamp = get32(pkt + 4);
     h->ssrc = get32(pkt + 8);
@@ -82,6 +83,35 @@ int rtp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, rt
     payload->len = at + n - head - 20 - ext;
     payload->data[payload->len] = 0;
     return 1;
+}
+
+int rtcp_seal(const unsigned char key[32], const unsigned char *pkt, size_t n, unsigned long nonce, sb_t *out)
+{
+    unsigned char iv[12] = {0}, *body;
+    int ok;
+
+    if (n < 8)
+        return 0;
+    put32(iv, nonce);
+    sb_reserve(out, n + 16 + 4);
+    body = (unsigned char *)out->data + out->len;
+    memcpy(body, pkt, 8);
+    ok = aes_gcm_seal(key, 32, iv, pkt, 8, pkt + 8, n - 8, body + 8, body + n, 16);
+    memcpy(body + n + 16, iv, 4);
+    if (ok) {
+        out->len += n + 16 + 4;
+        out->data[out->len] = 0;
+    }
+    return ok;
+}
+
+void rtcp_pli(unsigned sender_ssrc, unsigned media_ssrc, unsigned char out[12])
+{
+    out[0] = 0x81; /* version 2, feedback message type 1 */
+    out[1] = 206;  /* payload-specific feedback */
+    put16(out + 2, 2);
+    put32(out + 4, sender_ssrc);
+    put32(out + 8, media_ssrc);
 }
 
 void rtp_discovery_request(unsigned ssrc, unsigned char out[74])

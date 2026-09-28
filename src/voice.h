@@ -23,6 +23,10 @@ typedef struct {
     /* One decrypted Opus packet from `user`, with its RTP sequence number. */
     void (*frame)(void *ctx, unsigned long long user, unsigned seq, const unsigned char *opus, size_t n);
     void (*speaking)(void *ctx, unsigned long long user, int on);
+    /* Someone's camera or stream started or stopped. */
+    void (*video_state)(void *ctx, unsigned long long user, int on);
+    /* One decrypted VP8 frame of `user`'s video. */
+    void (*video)(void *ctx, unsigned long long user, const unsigned char *vp8, size_t n);
     /* A line for the --debug trace (opcodes, DAVE states, the Opus modes heard). */
     void (*log)(void *ctx, const char *text);
 } voice_events_t;

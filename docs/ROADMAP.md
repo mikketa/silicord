@@ -91,4 +91,5 @@ Everything is written here, from the cryptography to the codec: no third-party c
 - [x] Voice settings: input and output devices, volumes, a mic test, voice activity sensitivity or push to talk; per-user volume and mute
 - [x] Calls in direct messages: starting and joining them, the call above the conversation, incoming calls with a ringtone, declining
 - [x] VP8 decoder, bit-exact on the eighteen comprehensive test vectors of libvpx
-- [ ] Video and screen sharing
+- [x] Watching cameras in calls: VP8 over RTP (RFC 7741), DAVE, key frame requests, video tiles
+- [ ] Sending video: the camera, and screen sharing (Go Live)

@@ -35,6 +35,7 @@ enum {
     UI_GIFS,            /* text = the query, NUL, then a JSON array of GIF objects (empty on failure) */
     UI_COMMANDS,        /* text = the guild or channel id, NUL, then the application-command-index (empty on failure) */
     UI_VOICE,           /* text = the VOICE_* state as a digit, NUL, then a status line */
+    UI_VIDEO,           /* no payload: someone's video changed; see app_video_take() */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -161,6 +162,13 @@ void app_voice_prefs(const voice_prefs_t *p);
 int app_voice_mic_level(void);
 /* Starts or stops hearing yourself (not during a call); returns whether the test runs. */
 int app_voice_mic_test(int on);
+/*
+ * Someone's latest video picture in our call: calls copy() with it (BGRA)
+ * when it changed since *serial. Returns 0 without video from them, 1 when
+ * unchanged, 2 when copied.
+ */
+int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx, const unsigned *bgra, int w, int h),
+                   void *ctx);
 /* Someone's volume in calls, in percent (0 to 200; 0 mutes them for you). */
 void app_voice_user_volume(const char *user_id, int percent);
 /* Our status: "online", "idle", "dnd" or "invisible". */

@@ -55,6 +55,7 @@ add_library(silicord_core STATIC
   src/opus_silk.c
   src/opus_silk_tables.c
   src/vp8.c
+  src/vp8_rtp.c
   src/vp8_tables.c
   src/model.c
   src/p256.c
@@ -155,6 +156,8 @@ silicord_test(rtp_test)
 add_test(NAME rtp COMMAND rtp_test)
 silicord_test(opus_test)
 add_test(NAME opus COMMAND opus_test)
+silicord_test(vp8_rtp_test)
+add_test(NAME vp8_rtp COMMAND vp8_rtp_test)
 silicord_test(mixer_test)
 add_test(NAME mixer COMMAND mixer_test)
 

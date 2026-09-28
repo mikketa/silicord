@@ -1635,6 +1635,30 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
     return img;
 }
 
+extern "C" r_image_t *r_image_blank(int w, int h)
+{
+    r_image_t *img;
+
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192)
+        return NULL;
+    img = (r_image_t *)mem_alloc(sizeof *img);
+    img->w = (UINT)w;
+    img->h = (UINT)h;
+    img->pixels = (BYTE *)mem_alloc((size_t)w * (size_t)h * 4);
+    return img;
+}
+
+extern "C" unsigned *r_image_bits(r_image_t *img)
+{
+    return img ? (unsigned *)img->pixels : NULL;
+}
+
+extern "C" void r_image_size(const r_image_t *img, int *w, int *h)
+{
+    *w = img ? (int)img->w : 0;
+    *h = img ? (int)img->h : 0;
+}
+
 extern "C" void r_image_free(r_image_t *img)
 {
     if (!img)

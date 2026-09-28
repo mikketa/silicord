@@ -4,15 +4,19 @@
 #include "voice.h"
 #include "dave_session.h"
 #include "json.h"
+#include "mem.h"
 #include "rng.h"
 #include "rtp.h"
 #include "sb.h"
 #include "sc_asm.h"
 #include "sha2.h"
+#include "vp8_rtp.h"
 #include "ws.h"
 
 #define MAX_SPEAKERS 128
+#define MAX_VIDEOS 16
 #define KEEPALIVE_MS 5000
+#define PLI_MS 1000 /* at most one key frame request a second per video */
 
 enum {
     OP_IDENTIFY = 0,
@@ -23,7 +27,9 @@ enum {
     OP_SPEAKING = 5,
     OP_HELLO = 8,
     OP_CLIENTS_CONNECT = 11,
+    OP_VIDEO = 12,
     OP_CLIENT_DISCONNECT = 13,
+    OP_MEDIA_SINK_WANTS = 15,
     OP_PREPARE_TRANSITION = 21,
     OP_EXECUTE_TRANSITION = 22,
     OP_PREPARE_EPOCH = 24,
@@ -33,6 +39,14 @@ typedef struct {
     unsigned ssrc;
     unsigned long long user;
 } speaker_t;
+
+/* A remote video stream: its SSRCs, and its frame being rebuilt. */
+typedef struct {
+    unsigned ssrc, rtx_ssrc;
+    unsigned long long user;
+    unsigned long long pli_at;
+    vp8_rtp_t *rtp;
+} video_t;
 
 typedef struct {
     ws_t ws;
@@ -53,6 +67,8 @@ typedef struct {
     dave_session_t dave;
     speaker_t speakers[MAX_SPEAKERS];
     int nspeakers;
+    video_t videos[MAX_VIDEOS];
+    int nvideos;
 } voice_t;
 
 static voice_t g_voice;
@@ -180,7 +196,22 @@ static void send_identify(voice_t *v)
     sb_json_str(&m, v->p.session_id, sc_strlen(v->p.session_id));
     sb_add(&m, ",\"token\":");
     sb_json_str(&m, v->p.token, sc_strlen(v->p.token));
+    sb_add(&m, ",\"video\":true,\"streams\":[{\"type\":\"video\",\"rid\":\"100\",\"quality\":100}]");
     sb_add(&m, ",\"max_dave_protocol_version\":1}}");
+    send_text(v, &m);
+}
+
+/* Our video state: none yet, which the server needs before any video flows either way. */
+static void send_video_state(voice_t *v)
+{
+    sb_t m = {0};
+
+    sb_add(&m, "{\"op\":12,\"d\":{\"audio_ssrc\":");
+    sb_u64(&m, v->ssrc);
+    sb_add(&m, ",\"video_ssrc\":0,\"rtx_ssrc\":0,\"streams\":[]}}");
+    send_text(v, &m);
+    /* Everyone's video at the best quality. */
+    sb_add(&m, "{\"op\":15,\"d\":{\"any\":100}}");
     send_text(v, &m);
 }
 
@@ -247,6 +278,83 @@ static void set_speaker(voice_t *v, unsigned ssrc, unsigned long long user)
     v->speakers[i].user = user;
 }
 
+/* Forgets a user's video streams (under the lock). */
+static void drop_videos(voice_t *v, unsigned long long user)
+{
+    for (int i = v->nvideos; i-- > 0;)
+        if (v->videos[i].user == user) {
+            vp8_rtp_free(v->videos[i].rtp);
+            mem_free(v->videos[i].rtp);
+            v->videos[i] = v->videos[--v->nvideos];
+        }
+}
+
+static video_t *find_video(voice_t *v, unsigned ssrc, int *rtx)
+{
+    for (int i = 0; i < v->nvideos; i++) {
+        if (v->videos[i].ssrc == ssrc) {
+            *rtx = 0;
+            return &v->videos[i];
+        }
+        if (v->videos[i].rtx_ssrc == ssrc) {
+            *rtx = 1;
+            return &v->videos[i];
+        }
+    }
+    return NULL;
+}
+
+/* Asks a video's sender for a key frame, at most once a second. */
+static void request_key_frame(voice_t *v, video_t *vid)
+{
+    unsigned char pli[12];
+    sb_t pkt = {0};
+
+    if (now_ms() - vid->pli_at < PLI_MS)
+        return;
+    vid->pli_at = now_ms();
+    rtcp_pli(v->ssrc, vid->ssrc, pli);
+    if (rtcp_seal(v->key, pli, sizeof pli, v->nonce++, &pkt))
+        sendto(v->udp, pkt.data, (int)pkt.len, 0, (struct sockaddr *)&v->server, sizeof v->server);
+    sb_free(&pkt);
+}
+
+/* A video packet: into its frame; a finished frame is decrypted and handed on. */
+static void video_packet(voice_t *v, const rtp_header_t *h, const unsigned char *p, size_t n, sb_t *frame, sb_t *plain)
+{
+    video_t *vid;
+    int rtx, done = 0, ok = 0;
+    unsigned long long user = 0;
+    unsigned seq = h->seq;
+
+    EnterCriticalSection(&v->lock);
+    vid = find_video(v, h->ssrc, &rtx);
+    if (vid && rtx) { /* a retransmission: the original sequence number, then the payload */
+        if (n < 2)
+            vid = NULL;
+        else {
+            seq = (unsigned)p[0] << 8 | p[1];
+            p += 2;
+            n -= 2;
+        }
+    }
+    if (vid) {
+        user = vid->user;
+        done = vp8_rtp_push(vid->rtp, seq, h->timestamp, h->marker, p, n, frame);
+        if (vp8_rtp_lost(vid->rtp))
+            request_key_frame(v, vid);
+        if (done) {
+            sb_clear(plain);
+            ok = dave_session_decrypt(&v->dave, user, (const unsigned char *)frame->data, frame->len, plain, now_ms());
+            if (!ok)
+                request_key_frame(v, vid);
+        }
+    }
+    LeaveCriticalSection(&v->lock);
+    if (ok && plain->len && v->ev.video)
+        v->ev.video(v->ev.ctx, user, (const unsigned char *)plain->data, plain->len);
+}
+
 static DWORD WINAPI udp_main(LPVOID arg)
 {
     voice_t *v = arg;
@@ -255,7 +363,7 @@ static DWORD WINAPI udp_main(LPVOID arg)
     unsigned long counter = 0;
     unsigned seen[32] = {0};
     DWORD timeout = 250;
-    sb_t media = {0}, opus = {0};
+    sb_t media = {0}, opus = {0}, frame = {0}, plain = {0};
 
     setsockopt(v->udp, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
     while (WaitForSingleObject(v->stop, 0) == WAIT_TIMEOUT) {
@@ -273,8 +381,12 @@ static DWORD WINAPI udp_main(LPVOID arg)
             unsigned long long user;
             int ok;
             sb_clear(&media);
-            if (!rtp_open(v->key, pkt, (size_t)got, &h, &media) || h.type != RTP_OPUS)
+            if (!rtp_open(v->key, pkt, (size_t)got, &h, &media))
                 continue;
+            if (h.type != RTP_OPUS) {
+                video_packet(v, &h, (const unsigned char *)media.data, media.len, &frame, &plain);
+                continue;
+            }
             sb_clear(&opus);
             EnterCriticalSection(&v->lock);
             user = speaker_user(v, h.ssrc);
@@ -295,6 +407,8 @@ static DWORD WINAPI udp_main(LPVOID arg)
     }
     sb_free(&media);
     sb_free(&opus);
+    sb_free(&frame);
+    sb_free(&plain);
     return 0;
 }
 
@@ -337,7 +451,10 @@ static int handle(voice_t *v, const sb_t *msg)
         sb_json_str(&m, mine, sc_strlen(mine));
         sb_add(&m, ",\"port\":");
         sb_u64(&m, my_port);
-        sb_add(&m, ",\"mode\":\"aead_aes256_gcm_rtpsize\"}}}");
+        sb_add(&m, ",\"mode\":\"aead_aes256_gcm_rtpsize\"},\"codecs\":[");
+        sb_add(&m, "{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},");
+        sb_add(&m, "{\"name\":\"VP8\",\"type\":\"video\",\"priority\":1000,\"payload_type\":101,");
+        sb_add(&m, "\"rtx_payload_type\":102,\"encode\":true,\"decode\":true}]}}");
         send_text(v, &m);
         break;
     }
@@ -357,6 +474,12 @@ static int handle(voice_t *v, const sb_t *msg)
         LeaveCriticalSection(&v->lock);
         if (!v->have_key)
             return 0;
+        if (json_get(d, "video_codec", &j)) {
+            char codec[16];
+            json_raw(j, codec, sizeof codec);
+            vlog(v, codec[0] == 'V' && codec[1] == 'P' && codec[2] == '8' ? "video codec VP8" : "video codec not VP8", -1, -1);
+        }
+        send_video_state(v);
         v->udp_thread = CreateThread(NULL, 0, udp_main, v, 0, NULL);
         state(v, VOICE_CONNECTED, "Voice connected");
         break;
@@ -371,6 +494,37 @@ static int handle(voice_t *v, const sb_t *msg)
         }
         if (user && v->ev.speaking)
             v->ev.speaking(v->ev.ctx, user, json_num(d, "speaking") > 0);
+        break;
+    }
+    case OP_VIDEO: {
+        unsigned long long user = (unsigned long long)json_num(d, "user_id");
+        json_iter_t it;
+        json_t s;
+        int on = 0;
+        if (!user)
+            break;
+        EnterCriticalSection(&v->lock);
+        drop_videos(v, user);
+        if (json_get(d, "streams", &j)) {
+            json_iter(j, &it);
+            while (json_next(&it, NULL, &s)) {
+                long long ssrc = json_num(s, "ssrc"), rtx = json_num(s, "rtx_ssrc");
+                json_t a;
+                if (ssrc <= 0 || !(json_get(s, "active", &a) && json_type(a) == JSON_TRUE) || v->nvideos == MAX_VIDEOS)
+                    continue;
+                v->videos[v->nvideos].ssrc = (unsigned)ssrc;
+                v->videos[v->nvideos].rtx_ssrc = rtx > 0 ? (unsigned)rtx : (unsigned)ssrc + 1;
+                v->videos[v->nvideos].user = user;
+                v->videos[v->nvideos].pli_at = 0;
+                v->videos[v->nvideos].rtp = mem_alloc(sizeof(vp8_rtp_t));
+                v->nvideos++;
+                on = 1;
+            }
+        }
+        LeaveCriticalSection(&v->lock);
+        vlog(v, on ? "video on" : "video off", (long long)(user % 1000000), -1);
+        if (v->ev.video_state)
+            v->ev.video_state(v->ev.ctx, user, on);
         break;
     }
     case OP_CLIENTS_CONNECT: {
@@ -390,6 +544,7 @@ static int handle(voice_t *v, const sb_t *msg)
     case OP_CLIENT_DISCONNECT:
         EnterCriticalSection(&v->lock);
         dave_on_client_disconnect(&v->dave, (unsigned long long)json_num(d, "user_id"));
+        drop_videos(v, (unsigned long long)json_num(d, "user_id"));
         LeaveCriticalSection(&v->lock);
         break;
     case OP_PREPARE_TRANSITION:
@@ -476,6 +631,8 @@ static void cleanup(voice_t *v)
     secure_wipe(v->key, sizeof v->key);
     v->have_key = v->speaking = 0;
     v->nspeakers = 0;
+    while (v->nvideos)
+        drop_videos(v, v->videos[0].user);
     LeaveCriticalSection(&v->lock);
 }
 

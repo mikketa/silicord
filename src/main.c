@@ -17,6 +17,7 @@
 #include "mixer.h"
 #include "opus.h"
 #include "opus_math.h"
+#include "vp8.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -560,6 +561,127 @@ static void voice_state_changed(void *ctx, int state, const char *text)
     ui_post(UI_VOICE, p);
 }
 
+/* ---- Video from the call: one decoder per person, the latest picture kept as BGRA for the UI ---- */
+
+#define MAX_VIEWS 16
+
+static struct {
+    unsigned long long user;
+    vp8_decoder_t *dec;   /* the UDP thread's alone */
+    unsigned *bgra;       /* under g_video_lock */
+    int w, h;
+    unsigned serial;      /* bumped with each new picture */
+} g_views[MAX_VIEWS];
+static int g_nviews;
+static CRITICAL_SECTION g_video_lock;
+static volatile LONG g_video_posted;
+
+static int view_find(unsigned long long user)
+{
+    for (int i = 0; i < g_nviews; i++)
+        if (g_views[i].user == user)
+            return i;
+    return -1;
+}
+
+static unsigned char clamp8(int v)
+{
+    return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
+}
+
+/* BT.601 studio range, as VP8 video is. */
+static void i420_to_bgra(const vp8_image_t *img, unsigned *out)
+{
+    for (int y = 0; y < img->h; y++) {
+        const unsigned char *py = img->y + y * img->y_stride, *pu = img->u + (y >> 1) * img->uv_stride,
+                            *pv = img->v + (y >> 1) * img->uv_stride;
+        unsigned *o = out + (size_t)y * (size_t)img->w;
+        for (int x = 0; x < img->w; x++) {
+            int c = 298 * (py[x] - 16), d = pu[x >> 1] - 128, e = pv[x >> 1] - 128;
+            o[x] = 0xFF000000u | (unsigned)clamp8((c + 409 * e + 128) >> 8) << 16 |
+                   (unsigned)clamp8((c - 100 * d - 208 * e + 128) >> 8) << 8 | clamp8((c + 516 * d + 128) >> 8);
+        }
+    }
+}
+
+static void voice_video(void *ctx, unsigned long long user, const unsigned char *vp8, size_t n)
+{
+    vp8_image_t img;
+    int i, shown = 0;
+
+    (void)ctx;
+    /* Decoding under the lock: a view may be removed from another thread meanwhile. */
+    EnterCriticalSection(&g_video_lock);
+    i = view_find(user);
+    if (i < 0 && g_nviews < MAX_VIEWS) {
+        i = g_nviews++;
+        g_views[i].user = user;
+        g_views[i].dec = vp8_decoder_new();
+        g_views[i].bgra = NULL;
+        g_views[i].w = g_views[i].h = 0;
+    }
+    if (i >= 0 && vp8_decode(g_views[i].dec, vp8, n, &img) == 1) {
+        if (g_views[i].w != img.w || g_views[i].h != img.h) {
+            mem_free(g_views[i].bgra);
+            g_views[i].bgra = mem_alloc((size_t)img.w * (size_t)img.h * 4);
+            g_views[i].w = img.w;
+            g_views[i].h = img.h;
+        }
+        i420_to_bgra(&img, g_views[i].bgra);
+        g_views[i].serial++;
+        shown = 1;
+    }
+    LeaveCriticalSection(&g_video_lock);
+    if (shown && !InterlockedExchange(&g_video_posted, 1))
+        ui_post(UI_VIDEO, NULL);
+}
+
+static void view_remove(unsigned long long user)
+{
+    int i;
+
+    EnterCriticalSection(&g_video_lock);
+    if ((i = view_find(user)) >= 0) {
+        vp8_decoder_free(g_views[i].dec);
+        mem_free(g_views[i].bgra);
+        g_views[i] = g_views[--g_nviews];
+    }
+    LeaveCriticalSection(&g_video_lock);
+}
+
+static void voice_video_state(void *ctx, unsigned long long user, int on)
+{
+    (void)ctx;
+    if (!on)
+        view_remove(user);
+    ui_post(UI_VIDEO, NULL);
+}
+
+static void views_clear(void)
+{
+    while (g_nviews)
+        view_remove(g_views[0].user);
+}
+
+int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx, const unsigned *bgra, int w, int h),
+                   void *ctx)
+{
+    unsigned long long u = 0;
+    int i, fresh = 0;
+
+    for (const char *c = user_id; *c >= '0' && *c <= '9'; c++)
+        u = u * 10 + (unsigned)(*c - '0');
+    InterlockedExchange(&g_video_posted, 0);
+    EnterCriticalSection(&g_video_lock);
+    if ((i = view_find(u)) >= 0 && g_views[i].bgra && g_views[i].serial != *serial) {
+        *serial = g_views[i].serial;
+        copy(ctx, g_views[i].bgra, g_views[i].w, g_views[i].h);
+        fresh = 1;
+    }
+    LeaveCriticalSection(&g_video_lock);
+    return i >= 0 ? 1 + fresh : 0;
+}
+
 static void voice_log(void *ctx, const char *text)
 {
     (void)ctx;
@@ -609,6 +731,8 @@ static void voice_try_start(void)
     ev.state = voice_state_changed;
     ev.log = voice_log;
     ev.frame = voice_frame;
+    ev.video = voice_video;
+    ev.video_state = voice_video_state;
     if (g_vc.active && g_vc.have_state && g_vc.have_server) {
         g_vc.have_server = 0;
         voice_start(&g_vc.p, &ev);
@@ -669,6 +793,7 @@ void app_voice_leave(void)
     LeaveCriticalSection(&g_voice_lock);
     voice_stop();
     audio_mode(AUDIO_OFF);
+    views_clear();
     EnterCriticalSection(&g_mix_lock);
     mixer_free(&g_mixer);
     mixer_init(&g_mixer);
@@ -2418,6 +2543,7 @@ void entry(void)
     InitializeCriticalSection(&g_voice_lock);
     InitializeCriticalSection(&g_mix_lock);
     InitializeCriticalSection(&g_audio_lock);
+    InitializeCriticalSection(&g_video_lock);
     mixer_init(&g_mixer);
 
     ShowWindow(ui_create(GetModuleHandleW(NULL)), SW_SHOWDEFAULT);

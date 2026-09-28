@@ -114,6 +114,10 @@ r_image_t *r_image_decode(const void *data, size_t n, int max_px);
 /* Writes a bitmap (from the clipboard, say) to `path` as a PNG. Returns 0 on failure. */
 int r_bitmap_to_png(HBITMAP bmp, const wchar_t *path);
 void r_image_free(r_image_t *img);
+/* An image to fill in: w x h pixels, 0xAARRGGBB premultiplied (video frames are opaque). */
+r_image_t *r_image_blank(int w, int h);
+unsigned *r_image_bits(r_image_t *img);
+void r_image_size(const r_image_t *img, int *w, int *h);
 
 #ifdef __cplusplus
 }

@@ -235,6 +235,11 @@ typedef struct {
         int ringing;           /* we are being rung */
     } calls[16];               /* calls going on in our direct messages */
     int ncalls, ring_sound;
+    struct {
+        char user[24];
+        r_image_t *img;
+        unsigned serial;
+    } video[16];               /* the latest picture of each video in our call */
     RECT call_join, call_decline, call_leave, card_join, card_decline;
     char card_channel[24];     /* the call the incoming call card is about */
     voice_prefs_t vprefs;      /* this computer's voice settings */
@@ -1278,6 +1283,85 @@ static int call_h(void)
                : 0;
 }
 
+/* ---- Video tiles ---- */
+
+static void copy_picture(void *ctx, const unsigned *bgra, int w, int h)
+{
+    r_image_t **img = ctx;
+    int iw, ih;
+
+    r_image_size(*img, &iw, &ih);
+    if (iw != w || ih != h) {
+        r_image_free(*img);
+        *img = r_image_blank(w, h);
+    }
+    if (*img)
+        memcpy(r_image_bits(*img), bgra, (size_t)w * (size_t)h * 4);
+}
+
+/* Someone's current video picture, or NULL when they show none. */
+static r_image_t *video_picture(const char *user)
+{
+    int i, free_slot = -1;
+
+    for (i = 0; i < (int)ARRAYSIZE(g_ui.video); i++) {
+        if (lstrcmpA(g_ui.video[i].user, user) == 0)
+            break;
+        if (!g_ui.video[i].user[0] && free_slot < 0)
+            free_slot = i;
+    }
+    if (i == (int)ARRAYSIZE(g_ui.video)) {
+        if (free_slot < 0)
+            return NULL;
+        i = free_slot;
+        lstrcpynA(g_ui.video[i].user, user, sizeof g_ui.video[i].user);
+        g_ui.video[i].serial = 0;
+    }
+    if (!app_video_take(user, &g_ui.video[i].serial, copy_picture, &g_ui.video[i].img)) {
+        r_image_free(g_ui.video[i].img);
+        g_ui.video[i].img = NULL;
+        g_ui.video[i].user[0] = 0;
+        return NULL;
+    }
+    return g_ui.video[i].img;
+}
+
+/* A participant: their video letterboxed in the tile, or their avatar; name, mute state and speaking ring. */
+static void paint_tile(const voice_t *v, const char *name, const char *avatar, int x, int y, int w, int h, int speaking)
+{
+    r_image_t *pic = video_picture(v->user);
+    int d = (w < h ? w : h) / 2;
+
+    r_round(x, y, w, h, S(8), 0xFF111111);
+    if (pic) {
+        int pw, ph, fw = w, fh = h;
+        r_image_size(pic, &pw, &ph);
+        if ((long long)pw * h > (long long)ph * w)
+            fh = (int)((long long)w * ph / pw);
+        else
+            fw = (int)((long long)h * pw / ph);
+        r_image(pic, x + (w - fw) / 2, y + (h - fh) / 2, fw, fh, S(8));
+    } else {
+        r_image_t *img = avatar && avatar[0] ? user_avatar(v->user, avatar) : NULL;
+        if (img)
+            r_image(img, x + (w - d) / 2, y + (h - d) / 2, d, d, d / 2);
+        else
+            r_circle(x + (w - d) / 2, y + (h - d) / 2, d, ARGB(C_ITEM));
+    }
+    {
+        int tw = text_width(g_ui.f_small, name) + S(16), iy = y + h - S(28);
+        if (tw > w - S(16))
+            tw = w - S(16);
+        r_round(x + S(8), iy, tw + (v->flags & (VOICE_MUTE | VOICE_DEAF) ? S(20) : 0), S(20), S(4), 0xB0000000u);
+        text(g_ui.f_small, C_INK, rect(x + S(16), iy, tw - S(16), S(20)), name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (v->flags & (VOICE_MUTE | VOICE_DEAF))
+            text_w(g_ui.f_icon, C_MUTED, rect(x + S(8) + tw, iy, S(18), S(20)), v->flags & VOICE_DEAF ? L"\xE74F" : L"\xEC54", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    if (speaking)
+        r_round_outline(x, y, w, h, S(8), S(2), ARGB(C_GREEN));
+}
+
 static RECT call_button(int x, int y, int w, const char *label, unsigned color)
 {
     r_round(x, y, w, S(40), S(20), color);
@@ -1301,28 +1385,16 @@ static void paint_call(int x0, int w)
     fill(x0, y, w, h, C_RAIL);
     for (int i = 0; i < g_ui.nvoices; i++)
         n += !g_ui.voices[i].guild[0] && lstrcmpA(g_ui.voices[i].channel, c->id) == 0;
-    x = x0 + (w - (n ? n * S(88) - S(16) : 0)) / 2;
+    x = x0 + (w - (n ? n * S(196) - S(12) : 0)) / 2;
     for (int i = 0; i < g_ui.nvoices; i++) {
         voice_t *v = &g_ui.voices[i];
         const char *avatar, *name;
-        r_image_t *img;
         if (v->guild[0] || lstrcmpA(v->channel, c->id) != 0)
             continue;
         name = call_user(v->user, c->id, &avatar);
-        img = avatar[0] ? user_avatar(v->user, avatar) : NULL;
-        if (img)
-            r_image(img, x, y + S(28), S(72), S(72), S(36));
-        else
-            r_circle(x, y + S(28), S(72), ARGB(C_ITEM));
-        if (in_call(c->id) && g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user))
-            r_round_outline(x - S(4), y + S(24), S(80), S(80), S(40), S(3), ARGB(C_GREEN));
-        if (v->flags & (VOICE_MUTE | VOICE_DEAF)) {
-            r_circle(x + S(50), y + S(78), S(24), CALL_RED);
-            text_w(g_ui.f_icon, C_INK, rect(x + S(50), y + S(78), S(24), S(24)), v->flags & VOICE_DEAF ? L"\xE74F" : L"\xEC54", -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        text(g_ui.f_small, C_MUTED, rect(x - S(8), y + S(106), S(88), S(20)), name, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        x += S(88);
+        paint_tile(v, name, avatar, x, y + S(16), S(184), S(112),
+                   in_call(c->id) && g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user));
+        x += S(196);
     }
     if (!n)
         text(g_ui.f_body, C_MUTED, rect(x0, y + S(40), w, S(60)), ring ? "Incoming call" : "Calling\xE2\x80\xA6",
@@ -3717,6 +3789,39 @@ static void paint_messages(RECT rc, const char *name)
     }
 }
 
+/* The members of the voice channel we are in, as tiles of 16:9 filling the view. */
+static void paint_voice_grid(RECT rc, int x0, int w, const char *channel)
+{
+    int n = 0, cols = 1, rows, tw, th, top = S(HEADER_H) + S(16), avail_h = rc.bottom - top - S(16), k = 0;
+
+    fill(x0, S(HEADER_H), w, rc.bottom - S(HEADER_H), C_RAIL);
+    for (int i = 0; i < g_ui.nvoices; i++)
+        n += lstrcmpA(g_ui.voices[i].channel, channel) == 0;
+    if (!n)
+        return;
+    while (cols * cols < n)
+        cols++;
+    rows = (n + cols - 1) / cols;
+    tw = (w - S(32) - (cols - 1) * S(8)) / cols;
+    th = tw * 9 / 16;
+    if (rows * th + (rows - 1) * S(8) > avail_h) {
+        th = (avail_h - (rows - 1) * S(8)) / rows;
+        tw = th * 16 / 9;
+    }
+    for (int i = 0; i < g_ui.nvoices; i++) {
+        voice_t *v = &g_ui.voices[i];
+        int r = k / cols, col = k % cols, in_row = r == rows - 1 ? n - r * cols : cols;
+        int row_w = in_row * tw + (in_row - 1) * S(8), x, y;
+        if (lstrcmpA(v->channel, channel) != 0)
+            continue;
+        x = x0 + (w - row_w) / 2 + col * (tw + S(8));
+        y = top + (avail_h - (rows * th + (rows - 1) * S(8))) / 2 + r * (th + S(8));
+        paint_tile(v, v->name.len ? v->name.data : "\xE2\x80\xA6", v->avatar, x, y, tw, th,
+                   g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user));
+        k++;
+    }
+}
+
 static void paint_main(RECT rc)
 {
     int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0;
@@ -3755,6 +3860,10 @@ static void paint_main(RECT rc)
             }
         }
 
+        if (voice && in_call(c->id)) {
+            paint_voice_grid(rc, x0, w, c->id);
+            return;
+        }
         if (voice) {
             paint_welcome(x0 + S(8), rc.bottom - S(24) - S(WELCOME_H), w, name, 1);
             return;
@@ -4845,6 +4954,10 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
             sb_free(p);
             mem_free(p);
         }
+        redraw();
+        return;
+    }
+    if (msg == UI_VIDEO) {
         redraw();
         return;
     }
@@ -11523,7 +11636,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_VOICE) {
+        if (msg >= UI_QR && msg <= UI_VIDEO) {
             on_worker(msg, wp, lp);
             return 0;
         }
