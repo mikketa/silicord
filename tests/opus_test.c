@@ -141,11 +141,59 @@ static void encoder(void)
     check(sig > 100 * err, "the tone survives within 20 dB");
 }
 
+static float tone(unsigned t)
+{
+    float s = (float)t / 48000.f;
+    return 0.2f * (float)om_sin(2 * OM_PI * 440 * s) + 0.05f * (float)om_sin(2 * OM_PI * 1320 * s);
+}
+
+/* Lost frames: the first repeats the tone's period; a long run stays bounded; the stream recovers. */
+static void concealment(void)
+{
+    static opus_encoder_t enc;
+    static opus_decoder_t dec;
+    static float in[960], out[5760];
+    unsigned char packet[1276];
+    double sig = 0, err = 0, after_sig = 0, after_err = 0;
+    float peak = 0;
+    int ok = 1;
+
+    opus_encoder_init(&enc);
+    opus_decoder_init(&dec, 1);
+    for (int f = 0; f < 60; f++) {
+        int n, got, lost = f == 30 || (f >= 40 && f < 50);
+        for (int i = 0; i < 960; i++)
+            in[i] = tone((unsigned)(f * 960 + i));
+        n = opus_encode(&enc, in, packet);
+        got = lost ? opus_decode(&dec, NULL, 0, out, 960) : opus_decode(&dec, packet, (size_t)n, out, 0);
+        ok &= got == 960;
+        for (int i = 0; i < 960; i++) {
+            /* The decoder runs one overlap (120 samples) late. */
+            double want = f * 960 + i >= 120 ? tone((unsigned)(f * 960 + i - 120)) : 0, d = out[i] - want;
+            if (f == 30) {
+                sig += want * want;
+                err += d * d;
+            }
+            if (f >= 52) {
+                after_sig += want * want;
+                after_err += d * d;
+            }
+            if (lost && (out[i] > peak || -out[i] > peak))
+                peak = out[i] > 0 ? out[i] : -out[i];
+        }
+    }
+    check(ok, "lost frames produce audio");
+    check(sig > 4 * err, "a single loss continues the tone within 6 dB");
+    check(peak < 0.5f, "ten losses in a row stay bounded");
+    check(after_sig > 100 * after_err, "decoding recovers after the losses");
+}
+
 void entry(void)
 {
     framing();
     range_decoder();
     range_round_trip();
     encoder();
+    concealment();
     finish();
 }

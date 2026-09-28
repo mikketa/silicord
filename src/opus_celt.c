@@ -1294,19 +1294,322 @@ void celt_reset(celt_decoder_t *st)
         st->old_log_e[i] = st->old_log_e2[i] = -28.f;
 }
 
-/* Output of a lost frame: for now the memory decays to silence (a fuller concealment belongs to the Opus layer). */
+/* ---- Loss concealment (not normative; this follows the reference decoder) ---- */
+
+#define LPC_ORDER 24
+#define PLC_PITCH_LAG_MAX 720
+#define PLC_PITCH_LAG_MIN 100
+
+/* Levinson-Durbin: prediction coefficients from an autocorrelation. */
+static void lpc_from_ac(float *lpc, const float *ac, int p)
+{
+    float error = ac[0];
+
+    for (int i = 0; i < p; i++)
+        lpc[i] = 0;
+    if (ac[0] == 0)
+        return;
+    for (int i = 0; i < p; i++) {
+        float rr = 0, r;
+        for (int j = 0; j < i; j++)
+            rr += lpc[j] * ac[i - j];
+        rr += ac[i + 1];
+        r = -rr / error;
+        lpc[i] = r;
+        for (int j = 0; j < (i + 1) >> 1; j++) {
+            float t1 = lpc[j], t2 = lpc[i - 1 - j];
+            lpc[j] = t1 + r * t2;
+            lpc[i - 1 - j] = t2 + r * t1;
+        }
+        error -= r * r * error;
+        if (error < .001f * ac[0])
+            break;
+    }
+}
+
+/* Autocorrelation of `n` samples, windowed at both ends when `window` is set (into `xx`, n floats). */
+static void autocorr(const float *x, float *ac, const float *window, int overlap, int lag, int n, float *xx)
+{
+    const float *p = x;
+
+    if (window) {
+        for (int i = 0; i < n; i++)
+            xx[i] = x[i];
+        for (int i = 0; i < overlap; i++) {
+            xx[i] = x[i] * window[i];
+            xx[n - i - 1] = x[n - i - 1] * window[i];
+        }
+        p = xx;
+    }
+    for (int k = 0; k <= lag; k++) {
+        float d = 0;
+        for (int i = k; i < n; i++)
+            d += p[i] * p[i - k];
+        ac[k] = d;
+    }
+}
+
+/* y = x through 1 + sum num[j] z^-(j+1); x[-ord..-1] is the history. Not in place. */
+static void fir(const float *x, const float *num, float *y, int n, int ord)
+{
+    for (int i = 0; i < n; i++) {
+        float sum = x[i];
+        for (int j = 0; j < ord; j++)
+            sum += num[j] * x[i - 1 - j];
+        y[i] = sum;
+    }
+}
+
+/* In place through 1 / (1 + sum den[j] z^-(j+1)); mem[0] is the latest past output. */
+static void iir(float *x, const float *den, int n, int ord, float *mem)
+{
+    for (int i = 0; i < n; i++) {
+        float sum = x[i];
+        for (int j = 0; j < ord; j++)
+            sum -= den[j] * mem[j];
+        for (int j = ord - 1; j >= 1; j--)
+            mem[j] = mem[j - 1];
+        mem[0] = sum;
+        x[i] = sum;
+    }
+}
+
+static void find_best_pitch(const float *xcorr, const float *y, int len, int max_pitch, int *best)
+{
+    float syy = 1, best_num[2] = {-1, -1}, best_den[2] = {0, 0};
+
+    best[0] = 0;
+    best[1] = 1;
+    for (int j = 0; j < len; j++)
+        syy += y[j] * y[j];
+    for (int i = 0; i < max_pitch; i++) {
+        if (xcorr[i] > 0) {
+            float c = xcorr[i] * 1e-12f, num = c * c;
+            if (num * best_den[1] > best_num[1] * syy) {
+                if (num * best_den[0] > best_num[0] * syy) {
+                    best_num[1] = best_num[0];
+                    best_den[1] = best_den[0];
+                    best[1] = best[0];
+                    best_num[0] = num;
+                    best_den[0] = syy;
+                    best[0] = i;
+                } else {
+                    best_num[1] = num;
+                    best_den[1] = syy;
+                    best[1] = i;
+                }
+            }
+        }
+        syy += y[i + len] * y[i + len] - y[i] * y[i];
+        if (syy < 1)
+            syy = 1;
+    }
+}
+
+/* The pitch period of the recent output: a whitened half-rate copy, searched at 1/4 then 1/2 of the rate. */
+static int plc_pitch(celt_decoder_t *st)
+{
+    enum { LEN = CELT_BUFFER - PLC_PITCH_LAG_MAX, MAXP = PLC_PITCH_LAG_MAX - PLC_PITCH_LAG_MIN };
+    celt_scratch_t *t = &st->tmp;
+    float *lp = t->plc[0], *xcorr = t->plc[1], *x4 = t->plc[2], *y4 = t->plc[2] + 512, *x;
+    float ac[5], lpc[4], lpc2[5], mem[5] = {0}, g = 1.f;
+    int best[2], offset = 0;
+
+    for (int i = 0; i < CELT_BUFFER >> 1; i++) {
+        lp[i] = 0;
+        for (int c = 0; c < st->channels; c++) {
+            const float *s = st->mem[c];
+            lp[i] += .25f * ((i ? s[2 * i - 1] : 0) + s[2 * i + 1]) + .5f * s[2 * i];
+        }
+    }
+    autocorr(lp, ac, NULL, 0, 4, CELT_BUFFER >> 1, NULL);
+    ac[0] *= 1.0001f;
+    for (int i = 1; i <= 4; i++)
+        ac[i] -= ac[i] * (.008f * (float)i) * (.008f * (float)i);
+    lpc_from_ac(lpc, ac, 4);
+    for (int i = 0; i < 4; i++) {
+        g *= .9f;
+        lpc[i] *= g;
+    }
+    /* Whitening, plus a zero at z = -0.8. */
+    lpc2[0] = lpc[0] + .8f;
+    lpc2[1] = lpc[1] + .8f * lpc[0];
+    lpc2[2] = lpc[2] + .8f * lpc[1];
+    lpc2[3] = lpc[3] + .8f * lpc[2];
+    lpc2[4] = .8f * lpc[3];
+    for (int i = 0; i < CELT_BUFFER >> 1; i++) {
+        float sum = lp[i];
+        for (int j = 0; j < 5; j++)
+            sum += lpc2[j] * mem[j];
+        for (int j = 4; j >= 1; j--)
+            mem[j] = mem[j - 1];
+        mem[0] = lp[i];
+        lp[i] = sum;
+    }
+
+    /* x: the latest LEN/2 samples, compared with the buffer at MAXP/2 lags. */
+    x = lp + (PLC_PITCH_LAG_MAX >> 1);
+    for (int j = 0; j < LEN >> 2; j++)
+        x4[j] = x[2 * j];
+    for (int j = 0; j < (LEN + MAXP) >> 2; j++)
+        y4[j] = lp[2 * j];
+    for (int i = 0; i < MAXP >> 2; i++) {
+        float sum = 0;
+        for (int j = 0; j < LEN >> 2; j++)
+            sum += x4[j] * y4[i + j];
+        xcorr[i] = sum;
+    }
+    find_best_pitch(xcorr, y4, LEN >> 2, MAXP >> 2, best);
+    for (int i = 0; i < MAXP >> 1; i++) {
+        float sum = 0;
+        xcorr[i] = 0;
+        if (imax(i - 2 * best[0], 2 * best[0] - i) > 2 && imax(i - 2 * best[1], 2 * best[1] - i) > 2)
+            continue;
+        for (int j = 0; j < LEN >> 1; j++)
+            sum += x[j] * lp[i + j];
+        xcorr[i] = sum > -1 ? sum : -1;
+    }
+    find_best_pitch(xcorr, lp, LEN >> 1, MAXP >> 1, best);
+    if (best[0] > 0 && best[0] < (MAXP >> 1) - 1) {
+        float a = xcorr[best[0] - 1], b = xcorr[best[0]], c = xcorr[best[0] + 1];
+        if (c - a > .7f * (b - a))
+            offset = 1;
+        else if (a - c > .7f * (b - c))
+            offset = -1;
+    }
+    return PLC_PITCH_LAG_MAX - (2 * best[0] - offset);
+}
+
+/*
+ * A lost frame. The first four in a row repeat the last pitch period of the
+ * LPC excitation, decaying as the signal did; later ones, and hybrid mode,
+ * are noise shaped by the band energies as they fade to the background.
+ */
 static void conceal(celt_decoder_t *st, float *pcm, int n)
 {
-    int cc = st->channels;
+    celt_scratch_t *t = &st->tmp;
+    int cc = st->channels, lm = 0;
 
+    while (SHORT_MDCT << lm < n)
+        lm++;
+    if (st->loss_count >= 5 || st->start != 0) {
+        float *freq = t->freq, fade = st->loss_count == 0 ? 1.5f : .5f;
+        unsigned seed = st->rng;
+        for (int c = 0; c < cc; c++)
+            for (int i = st->start; i < st->end; i++) {
+                float *e = &st->old_band_e[c * CELT_BANDS + i], bg = st->background_log_e[c * CELT_BANDS + i];
+                *e = *e - fade > bg ? *e - fade : bg;
+            }
+        memset(freq, 0, sizeof t->freq);
+        for (int c = 0; c < cc; c++)
+            for (int i = st->start; i < st->end; i++) {
+                int off = c * n + (k_ebands[i] << lm), w = (k_ebands[i + 1] - k_ebands[i]) << lm;
+                float lg = st->old_band_e[c * CELT_BANDS + i] + k_e_means[i];
+                for (int j = 0; j < w; j++) {
+                    seed = lcg_rand(seed);
+                    freq[off + j] = (float)((int)seed >> 20);
+                }
+                renormalise(freq + off, w, om_exp2(lg > 32.f ? 32.f : lg));
+            }
+        st->rng = seed;
+        for (int c = 0; c < cc; c++) {
+            float *out = st->mem[c] + CELT_BUFFER - n, *overlap = st->mem[c] + CELT_BUFFER, *buf = t->syn;
+            memmove(st->mem[c], st->mem[c] + n, sizeof(float) * (size_t)(CELT_BUFFER - n));
+            memset(buf, 0, sizeof(float) * CELT_OVERLAP);
+            imdct(t, &freq[c * n], buf, lm, 1);
+            for (int j = 0; j < CELT_OVERLAP; j++)
+                out[j] = buf[j] + overlap[j];
+            for (int j = CELT_OVERLAP; j < n; j++)
+                out[j] = buf[j];
+            for (int j = 0; j < CELT_OVERLAP; j++)
+                overlap[j] = buf[n + j];
+        }
+    } else {
+        float fade = 1.f;
+        int pitch, exc_len;
+        if (st->loss_count == 0) {
+            st->last_pitch_index = pitch = plc_pitch(st);
+        } else {
+            pitch = st->last_pitch_index;
+            fade = .8f;
+        }
+        exc_len = imin(2 * pitch, MAX_PERIOD);
+        for (int c = 0; c < cc; c++) {
+            float *buf = st->mem[c], *exc = t->plc[0] + LPC_ORDER, *etmp = t->plc[2], *lpc = st->lpc[c];
+            float decay, atten, s1 = 0, s2 = 0, mem[LPC_ORDER];
+            int offset = MAX_PERIOD - pitch, len = n + CELT_OVERLAP;
+
+            for (int i = 0; i < MAX_PERIOD + LPC_ORDER; i++)
+                exc[i - LPC_ORDER] = buf[CELT_BUFFER - MAX_PERIOD - LPC_ORDER + i];
+            if (st->loss_count == 0) {
+                float ac[LPC_ORDER + 1];
+                autocorr(exc, ac, g_window, CELT_OVERLAP, LPC_ORDER, MAX_PERIOD, t->plc[2]);
+                ac[0] *= 1.0001f; /* a -40 dB noise floor */
+                for (int i = 1; i <= LPC_ORDER; i++)
+                    ac[i] -= ac[i] * (.008f * (float)i) * (.008f * (float)i);
+                lpc_from_ac(lpc, ac, LPC_ORDER);
+            }
+            /* The excitation of the last two periods, and how fast it decays. */
+            fir(exc + MAX_PERIOD - exc_len, lpc, t->plc[1], exc_len, LPC_ORDER);
+            memcpy(exc + MAX_PERIOD - exc_len, t->plc[1], sizeof(float) * (size_t)exc_len);
+            {
+                float e1 = 1, e2 = 1;
+                int half = exc_len >> 1;
+                for (int i = 0; i < half; i++) {
+                    e1 += exc[MAX_PERIOD - half + i] * exc[MAX_PERIOD - half + i];
+                    e2 += exc[MAX_PERIOD - 2 * half + i] * exc[MAX_PERIOD - 2 * half + i];
+                }
+                decay = om_sqrt((e1 < e2 ? e1 : e2) / e2);
+            }
+
+            /* Room for the frame, then the periodic extension through the frame and its overlap. */
+            memmove(buf, buf + n, sizeof(float) * (size_t)(CELT_BUFFER - n));
+            atten = fade * decay;
+            for (int i = 0, j = 0; i < len; i++, j++) {
+                float s;
+                if (j >= pitch) {
+                    j -= pitch;
+                    atten *= decay;
+                }
+                buf[CELT_BUFFER - n + i] = atten * exc[offset + j];
+                s = buf[CELT_BUFFER - MAX_PERIOD - n + offset + j];
+                s1 += s * s;
+            }
+            for (int i = 0; i < LPC_ORDER; i++)
+                mem[i] = buf[CELT_BUFFER - n - 1 - i];
+            iir(buf + CELT_BUFFER - n, lpc, len, LPC_ORDER, mem);
+
+            /* Never more energy than the audio it copies. */
+            for (int i = 0; i < len; i++)
+                s2 += buf[CELT_BUFFER - n + i] * buf[CELT_BUFFER - n + i];
+            if (!(s1 > .2f * s2)) {
+                memset(buf + CELT_BUFFER - n, 0, sizeof(float) * (size_t)len);
+            } else if (s1 < s2) {
+                float ratio = om_sqrt((s1 + 1) / (s2 + 1));
+                for (int i = 0; i < CELT_OVERLAP; i++)
+                    buf[CELT_BUFFER - n + i] *= 1.f - g_window[i] * (1.f - ratio);
+                for (int i = CELT_OVERLAP; i < len; i++)
+                    buf[CELT_BUFFER - n + i] *= ratio;
+            }
+
+            /* The overlap becomes the MDCT tail of the pre-filtered extension, which the next frame's
+               overlap-add and post-filter continue. */
+            comb_filter(etmp, buf + CELT_BUFFER, st->postfilter_period, st->postfilter_period, CELT_OVERLAP,
+                        -st->postfilter_gain, -st->postfilter_gain, st->postfilter_tapset, st->postfilter_tapset);
+            for (int i = 0; i < CELT_OVERLAP / 2; i++) {
+                float v = g_window[i] * etmp[CELT_OVERLAP - 1 - i] + g_window[CELT_OVERLAP - 1 - i] * etmp[i];
+                buf[CELT_BUFFER + i] = g_window[CELT_OVERLAP - 1 - i] * v;
+                buf[CELT_BUFFER + CELT_OVERLAP - 1 - i] = g_window[i] * v;
+            }
+        }
+    }
     for (int c = 0; c < cc; c++) {
-        float *mem = st->mem[c], m = st->preemph_mem[c];
-        memmove(mem, mem + n, sizeof *mem * (size_t)(CELT_BUFFER - n + CELT_OVERLAP));
+        const float *syn = st->mem[c] + CELT_BUFFER - n;
+        float m = st->preemph_mem[c];
         for (int j = 0; j < n; j++) {
-            float s = st->mem[c][CELT_BUFFER - n + j] = 0;
-            float tmp = s + m;
-            m = 0.85000610f * tmp;
-            pcm[j * cc + c] = tmp * (1.f / SIG_SCALE);
+            float s = syn[j] + m;
+            m = 0.85000610f * s;
+            pcm[j * cc + c] = s * (1.f / SIG_SCALE);
         }
         st->preemph_mem[c] = m;
     }

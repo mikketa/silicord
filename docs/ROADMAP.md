@@ -87,7 +87,7 @@ Everything is written here, from the cryptography to the codec: no third-party c
 - [x] Opus encoder (CELT, 64 kbit/s mono)
 - [x] Joining and leaving voice channels, playback with a jitter buffer, the microphone with a level gate, mute and deafen, speaking rings
 - [ ] Tested against Discord's voice servers
-- [ ] Better loss concealment in CELT
+- [x] Loss concealment in CELT: pitch repetition through the LPC excitation, then shaped noise
 - [ ] Input and output device choice, push to talk, per-user volume in the UI
 - [ ] Calls in direct messages
 - [ ] Video and screen sharing

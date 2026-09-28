@@ -17,6 +17,7 @@ typedef struct {
     float norm[2 * 800], lowband[176];
     float syn[960 + CELT_OVERLAP];
     float z[2 * 480], f[2 * 480], f2[960];
+    float plc[3][1024 + 24]; /* loss concealment */
 } celt_scratch_t;
 
 typedef struct {
@@ -24,7 +25,8 @@ typedef struct {
     int stream_channels; /* coded in the packet */
     int start, end;      /* coded bands: 17..21 in hybrid mode, up to 13..21 by bandwidth */
     unsigned rng;        /* the range coder's final state, for conformance checks */
-    int loss_count;
+    int loss_count, last_pitch_index;
+    float lpc[2][24]; /* the excitation filter of the concealment */
     int postfilter_period, postfilter_period_old;
     float postfilter_gain, postfilter_gain_old;
     int postfilter_tapset, postfilter_tapset_old;
