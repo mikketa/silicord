@@ -40,6 +40,31 @@ static int build(json_t index, const char *name, const char *args, sb_t *out, ch
     return cmd_find(index, name, sc_strlen(name), &cmd) && cmd_build(cmd, args, sc_strlen(args), out, err, 128);
 }
 
+/* Names are up to 32 characters of any script: 64 bytes of Cyrillic here. */
+#define CYR32 "\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4" \
+              "\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4\xD0\xB4"
+
+static void test_long_names(void)
+{
+    static const char index_json[] =
+        "{\"application_commands\":[{\"id\":\"1\",\"version\":\"2\",\"type\":1,\"name\":\"" CYR32 "\","
+        "\"options\":[{\"type\":1,\"name\":\"" CYR32 "\",\"options\":["
+        "{\"type\":3,\"description\":\"no name\"},{\"type\":3,\"name\":\"" CYR32 "\",\"required\":true}]}]}]}";
+    json_t index, check_json;
+    sb_t out = {0};
+    char err[128];
+
+    json_parse(index_json, sizeof index_json - 1, &index);
+    check(build(index, CYR32, CYR32 " " CYR32 ":hi", &out, err), "long unicode names are found and filled by name");
+    check(contains(&out, "\"name\":\"" CYR32 "\",\"type\":1") &&
+              contains(&out, "\"type\":1,\"name\":\"" CYR32 "\",\"options\":[{\"type\":3,\"name\":\"" CYR32 "\",\"value\":\"hi\"}]"),
+          "long unicode names are sent whole");
+    check(json_parse(out.data, out.len, &check_json), "the interaction data is valid JSON");
+    check(build(index, CYR32, CYR32 " hi", &out, err) && contains(&out, "\"value\":\"hi\""),
+          "an option without a name is skipped");
+    sb_free(&out);
+}
+
 void entry(void)
 {
     json_t index, cmd, opts, v;
@@ -83,6 +108,7 @@ void entry(void)
     check(!cmd_leaf(cmd, "user ", 5, &opts, &used) && json_count(opts) == 1, "leaf lists subcommands to pick");
     check(cmd_leaf(cmd, "user set wh", 11, &opts, &used) && used == 8 && json_count(opts) == 2,
           "leaf finds the options after subcommands");
+    test_long_names();
     sb_free(&out);
     finish();
 }

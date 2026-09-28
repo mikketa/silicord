@@ -19,15 +19,35 @@ static int same_ci(const char *a, const char *s, size_t n)
     return k == n && !a[k];
 }
 
-/* A string value equals the n bytes at s, ignoring ASCII case. */
+/* The length of a string value's raw contents (escapes not decoded), 0 if it is not a string. */
+static size_t name_len(json_t v)
+{
+    return json_type(v) == JSON_STRING ? (size_t)(v.end - v.p) - 2 : 0;
+}
+
+/*
+ * A string value equals the n bytes at s, ignoring ASCII case. Compared in place:
+ * names can be 32 characters of any script, over 100 bytes of UTF-8.
+ */
 static int name_is(json_t v, const char *s, size_t n)
 {
-    char buf[112];
-
-    if (json_type(v) != JSON_STRING)
+    if (json_type(v) != JSON_STRING || name_len(v) != n)
         return 0;
-    json_raw(v, buf, sizeof buf);
-    return same_ci(buf, s, n);
+    for (size_t k = 0; k < n; k++)
+        if (lower((unsigned char)v.p[1 + k]) != lower((unsigned char)s[k]))
+            return 0;
+    return 1;
+}
+
+/* Appends obj[key] as a JSON string, as received; "" when it is missing or not a string. */
+static void add_str(sb_t *out, json_t obj, const char *key)
+{
+    json_t v;
+
+    if (json_get(obj, key, &v) && json_type(v) == JSON_STRING)
+        sb_addn(out, v.p, (size_t)(v.end - v.p));
+    else
+        sb_add(out, "\"\"");
 }
 
 static int get_type(json_t obj)
@@ -164,10 +184,24 @@ static void trim(const char *s, size_t *a, size_t *b)
 static void fail(char *err, size_t errn, const char *what, json_t opt)
 {
     char name[40] = "";
+    size_t n;
     json_t v;
 
     if (json_get(opt, "name", &v))
         json_raw(v, name, sizeof name);
+    /* A long name is cut: drop a character left incomplete at the end. */
+    n = (size_t)lstrlenA(name);
+    if (n == sizeof name - 1) {
+        size_t lead = n;
+        while (lead > 0 && ((unsigned char)name[lead - 1] & 0xC0) == 0x80)
+            lead--;
+        if (lead > 0 && (unsigned char)name[lead - 1] >= 0xC0) {
+            unsigned char c = (unsigned char)name[lead - 1];
+            size_t want = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
+            if (n - (lead - 1) < want)
+                name[lead - 1] = 0;
+        }
+    }
     if (errn > 96)
         wsprintfA(err, what, name);
 }
@@ -266,21 +300,21 @@ static int build_leaf(json_t list, const char *s, size_t n, sb_t *out, char *err
 
     if (list.p) {
         json_iter(list, &it);
+        /* An option without a name cannot be typed, nor sent back. */
         while (count < MAX_OPTS && json_next(&it, NULL, &o))
-            opts[count++] = o;
+            if (json_get(o, "name", &v) && json_type(v) == JSON_STRING)
+                opts[count++] = o;
     }
     /* "name:" at the start of a word begins that option's value. */
     for (size_t i = 0; i < n; i++) {
         if (i && s[i - 1] != ' ')
             continue;
         for (int k = 0; k < count; k++) {
-            char name[40];
             size_t len;
             if (given[k] || !json_get(opts[k], "name", &v))
                 continue;
-            json_raw(v, name, sizeof name);
-            len = (size_t)lstrlenA(name);
-            if (len && i + len < n && s[i + len] == ':' && same_ci(name, s + i, len)) {
+            len = name_len(v);
+            if (len && i + len < n && s[i + len] == ':' && name_is(v, s + i, len)) {
                 given[k] = 1;
                 mark[k] = i;
                 from[k] = i + len + 1;
@@ -319,7 +353,6 @@ static int build_leaf(json_t list, const char *s, size_t n, sb_t *out, char *err
     }
     sb_add(out, "[");
     for (int k = 0; k < count; k++) {
-        char name[40];
         if (!given[k] || to[k] == from[k]) {
             if (is_true_field(opts[k], "required")) {
                 fail(err, errn, "Missing required option \"%s\"", opts[k]);
@@ -328,15 +361,14 @@ static int build_leaf(json_t list, const char *s, size_t n, sb_t *out, char *err
             continue;
         }
         json_get(opts[k], "name", &v);
-        json_raw(v, name, sizeof name);
         if (!first)
             sb_add(out, ",");
         first = 0;
         sb_add(out, "{\"type\":");
         sb_i64(out, get_type(opts[k]));
-        sb_add(out, ",\"name\":\"");
-        sb_add(out, name);
-        sb_add(out, "\",\"value\":");
+        sb_add(out, ",\"name\":");
+        sb_addn(out, v.p, (size_t)(v.end - v.p)); /* the JSON string as received, escapes and all */
+        sb_add(out, ",\"value\":");
         if (!add_value(out, opts[k], s + from[k], to[k] - from[k])) {
             fail(err, errn, get_type(opts[k]) == OPT_ATTACHMENT ? "Attachments aren't supported (\"%s\")"
                                                                  : "Invalid value for \"%s\"",
@@ -351,11 +383,10 @@ static int build_leaf(json_t list, const char *s, size_t n, sb_t *out, char *err
 
 int cmd_build(json_t cmd, const char *args, size_t n, sb_t *out, char *err, size_t errn)
 {
-    json_t leaf, path[2], v;
+    json_t leaf, path[2];
     size_t used;
     int depth;
     sb_t opts = {0};
-    char buf[40];
 
     if (errn)
         err[0] = 0;
@@ -368,31 +399,20 @@ int cmd_build(json_t cmd, const char *args, size_t n, sb_t *out, char *err, size
         sb_free(&opts);
         return 0;
     }
-    sb_add(out, "{\"version\":\"");
-    if (json_get(cmd, "version", &v)) {
-        json_raw(v, buf, sizeof buf);
-        sb_add(out, buf);
-    }
-    sb_add(out, "\",\"id\":\"");
-    if (json_get(cmd, "id", &v)) {
-        json_raw(v, buf, sizeof buf);
-        sb_add(out, buf);
-    }
-    sb_add(out, "\",\"name\":\"");
-    if (json_get(cmd, "name", &v)) {
-        json_raw(v, buf, sizeof buf);
-        sb_add(out, buf);
-    }
-    sb_add(out, "\",\"type\":1,\"options\":");
+    sb_add(out, "{\"version\":");
+    add_str(out, cmd, "version");
+    sb_add(out, ",\"id\":");
+    add_str(out, cmd, "id");
+    sb_add(out, ",\"name\":");
+    add_str(out, cmd, "name");
+    sb_add(out, ",\"type\":1,\"options\":");
     /* Subcommands wrap the leaf's options: [{type, name, options: [...]}]. */
     for (int d = 0; d < depth; d++) {
-        json_get(path[d], "name", &v);
-        json_raw(v, buf, sizeof buf);
         sb_add(out, "[{\"type\":");
         sb_i64(out, get_type(path[d]));
-        sb_add(out, ",\"name\":\"");
-        sb_add(out, buf);
-        sb_add(out, "\",\"options\":");
+        sb_add(out, ",\"name\":");
+        add_str(out, path[d], "name");
+        sb_add(out, ",\"options\":");
     }
     sb_addn(out, opts.data, opts.len);
     for (int d = 0; d < depth; d++)
