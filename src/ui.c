@@ -2356,7 +2356,70 @@ static void maybe_load_older(void)
     }
 }
 
-/* Replaces <#id> with #name using the channel list. */
+/* Discord's <t:unix:style> in the user's locale: t, T, d, D, f (default), F, or R for "3 hours ago". */
+static void format_timestamp(long long secs, char style, sb_t *out)
+{
+    unsigned long long t = (unsigned long long)(secs * 10000000ll + 116444736000000000ll);
+    FILETIME ft, local;
+    SYSTEMTIME st;
+    wchar_t date[80], clock[32], text[128];
+
+    if (style == 'R') {
+        static const struct {
+            long long secs;
+            const char *unit;
+        } units[] = {{31536000, "year"}, {2592000, "month"}, {86400, "day"}, {3600, "hour"}, {60, "minute"}};
+        long long diff = secs - now_ms() / 1000, abs = diff < 0 ? -diff : diff;
+        char buf[64];
+        if (abs < 60) {
+            sb_add(out, diff < 0 ? "a few seconds ago" : "in a few seconds");
+            return;
+        }
+        for (int k = 0; k < (int)ARRAYSIZE(units); k++)
+            if (abs >= units[k].secs) {
+                int n = (int)(abs / units[k].secs);
+                wsprintfA(buf, diff < 0 ? "%d %s%s ago" : "in %d %s%s", n, units[k].unit, n == 1 ? "" : "s");
+                sb_add(out, buf);
+                return;
+            }
+    }
+    ft.dwLowDateTime = (DWORD)t;
+    ft.dwHighDateTime = (DWORD)(t >> 32);
+    FileTimeToLocalFileTime(&ft, &local);
+    FileTimeToSystemTime(&local, &st);
+    date[0] = clock[0] = 0;
+    if (style != 't' && style != 'T')
+        GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, style == 'd' ? DATE_SHORTDATE : DATE_LONGDATE, &st, NULL, date,
+                        ARRAYSIZE(date), NULL);
+    if (style != 'd' && style != 'D')
+        GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, style == 'T' ? 0 : TIME_NOSECONDS, &st, NULL, clock, ARRAYSIZE(clock));
+    wsprintfW(text, L"%s%s%s", date, date[0] && clock[0] ? L" " : L"", clock);
+    wide_to_utf8(text, (size_t)lstrlenW(text), out);
+}
+
+static int ts_style(char c)
+{
+    for (const char *p = "tTdDfFR"; *p; p++)
+        if (*p == c)
+            return 1;
+    return 0;
+}
+
+/* Appends the name of role `id` in the open server; 0 if unknown. */
+static int role_name(const char *id, sb_t *out)
+{
+    model_role_t r;
+    unsigned cursor = 0;
+
+    while (g_ui.model && g_ui.guild >= 0 && model_role_next(g_ui.model, g_ui.guild, &cursor, &r))
+        if (lstrcmpA(r.id, id) == 0) {
+            sb_addn(out, r.name, (size_t)r.name_len);
+            return 1;
+        }
+    return 0;
+}
+
+/* Replaces <#id>, <@&id> and <t:...> with channel names, role names and dates. */
 static void resolve_channels(msg_t *m)
 {
     sb_t out = {0};
@@ -2365,6 +2428,41 @@ static void resolve_channels(msg_t *m)
     int changed = 0;
 
     while (i < n) {
+        if (s[i] == '<' && i + 3 < n && s[i + 1] == '@' && s[i + 2] == '&') {
+            size_t j = i + 3;
+            while (j < n && s[j] >= '0' && s[j] <= '9')
+                j++;
+            if (j < n && s[j] == '>' && j - i - 3 < 24) {
+                char id[24];
+                lstrcpynA(id, s + i + 3, (int)(j - i - 2));
+                sb_add(&out, MD_MENTION_OPEN "@");
+                if (!role_name(id, &out))
+                    sb_add(&out, "unknown-role");
+                sb_add(&out, MD_MENTION_CLOSE);
+                i = j + 1;
+                changed = 1;
+                continue;
+            }
+        }
+        if (s[i] == '<' && i + 3 < n && s[i + 1] == 't' && s[i + 2] == ':') {
+            size_t j = i + 3;
+            long long secs = 0;
+            int neg = j < n && s[j] == '-';
+            char style = 'f';
+            j += neg;
+            while (j < n && s[j] >= '0' && s[j] <= '9' && j - i < 20)
+                secs = secs * 10 + (s[j++] - '0');
+            if (j + 2 < n && s[j] == ':' && s[j + 2] == '>' && ts_style(s[j + 1])) {
+                style = s[j + 1];
+                j += 2;
+            }
+            if (j < n && s[j] == '>' && j > i + 3 + neg) {
+                format_timestamp(neg ? -secs : secs, style, &out);
+                i = j + 1;
+                changed = 1;
+                continue;
+            }
+        }
         if (s[i] == '<' && i + 2 < n && s[i + 1] == '#') {
             size_t j = i + 2;
             while (j < n && s[j] >= '0' && s[j] <= '9')
