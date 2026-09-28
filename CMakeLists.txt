@@ -44,6 +44,7 @@ add_library(silicord_core STATIC
   src/rt.c
   src/sb.c
   src/search.c
+  src/stats.c
   src/utf.c
   asm/str.asm
 )
@@ -78,6 +79,9 @@ function(silicord_test name)
   target_link_options(${name} PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
   target_link_libraries(${name} PRIVATE silicord_core kernel32 ${ARGN})
 endfunction()
+
+silicord_test(stats_test)
+add_test(NAME stats COMMAND stats_test)
 
 silicord_test(str_test)
 add_test(NAME str COMMAND str_test)
