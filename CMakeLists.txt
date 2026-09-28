@@ -78,6 +78,9 @@ function(silicord_test name)
   target_link_libraries(${name} PRIVATE silicord_core kernel32 ${ARGN})
 endfunction()
 
+silicord_test(str_test)
+add_test(NAME str COMMAND str_test)
+
 silicord_test(json_test)
 add_test(NAME json COMMAND json_test)
 
