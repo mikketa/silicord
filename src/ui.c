@@ -3827,15 +3827,15 @@ static void go_to_channel(int i)
     if (!g_ui.model || i < 0 || (unsigned)i >= g_ui.model->nchannels)
         return;
     g = model_channel_guild(g_ui.model, (unsigned)i);
+    /* Set first so switching servers opens i, not the channel last seen there (which it would mark read). */
+    if (g >= 0)
+        g_ui.last_channel[g] = i;
+    else
+        g_ui.last_dm = i;
     if (g != g_ui.guild)
         select_guild(g);
-    if (g_ui.channel != i) {
-        if (g >= 0)
-            g_ui.last_channel[g] = i;
-        else
-            g_ui.last_dm = i;
+    if (g_ui.channel != i)
         open_channel(i);
-    }
     redraw();
 }
 
