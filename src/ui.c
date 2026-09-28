@@ -651,6 +651,20 @@ static r_image_t *user_avatar(const char *id, const char *hash)
     return image_get(key, path, S(40));
 }
 
+/* An animated avatar ("a_" hash) moves while `animate`, as Discord does on hover; otherwise its still image. */
+static r_image_t *user_avatar_anim(const char *id, const char *hash, int animate)
+{
+    char key[96], path[160];
+    r_image_t *img;
+
+    if (!animate || hash[0] != 'a' || hash[1] != '_')
+        return user_avatar(id, hash);
+    wsprintfA(key, "ag:%s:%s", id, hash);
+    wsprintfA(path, "/avatars/%s/%s.gif?size=64", id, hash);
+    img = image_get(key, path, S(40));
+    return img ? img : user_avatar(id, hash); /* the still one until the GIF arrives */
+}
+
 static r_image_t *dm_icon(const channel_t *c)
 {
     char key[96], path[160];
@@ -2885,7 +2899,9 @@ static void paint_message(int i, int x0, int y, int w)
             text(g_ui.f_small, C_MUTED, rect(tx, ny, tw, S(20)), m->reply.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             ny += S(22);
         }
-        img = m->author_id[0] ? user_avatar(m->author_id, m->avatar) : NULL;
+        img = m->author_id[0] ? user_avatar_anim(m->author_id, m->avatar,
+                                                 g_ui.hover_msg >= 0 && m == &g_ui.msgs[g_ui.hover_msg])
+                              : NULL;
         if (img)
             r_image(img, x0 + S(16), ny, S(40), S(40), S(20));
         else
@@ -4410,10 +4426,12 @@ static r_image_t *pop_avatar(const profile_t *p)
     if (!p || !p->avatar[0])
         return user_avatar(g_ui.pop_user, g_ui.pop_avatar);
     wsprintfA(key, "A:%s:%s:%s", p->id, p->member_avatar ? p->guild_id : "", p->avatar);
+    /* Popouts play animated avatars and banners, as Discord does. */
     if (p->member_avatar)
-        wsprintfA(path, "/guilds/%s/users/%s/avatars/%s.png?size=256", p->guild_id, p->id, p->avatar);
+        wsprintfA(path, "/guilds/%s/users/%s/avatars/%s.%s?size=256", p->guild_id, p->id, p->avatar,
+                  p->avatar[0] == 'a' && p->avatar[1] == '_' ? "gif" : "png");
     else
-        wsprintfA(path, "/avatars/%s/%s.png?size=256", p->id, p->avatar);
+        wsprintfA(path, "/avatars/%s/%s.%s?size=256", p->id, p->avatar, p->avatar[0] == 'a' && p->avatar[1] == '_' ? "gif" : "png");
     return image_get(key, path, S(POP_AVATAR));
 }
 
@@ -4425,9 +4443,10 @@ static r_image_t *pop_banner(const profile_t *p)
         return NULL;
     wsprintfA(key, "b:%s:%s", p->id, p->banner);
     if (p->member_banner)
-        wsprintfA(path, "/guilds/%s/users/%s/banners/%s.png?size=600", p->guild_id, p->id, p->banner);
+        wsprintfA(path, "/guilds/%s/users/%s/banners/%s.%s?size=600", p->guild_id, p->id, p->banner,
+                  p->banner[0] == 'a' && p->banner[1] == '_' ? "gif" : "png");
     else
-        wsprintfA(path, "/banners/%s/%s.png?size=600", p->id, p->banner);
+        wsprintfA(path, "/banners/%s/%s.%s?size=600", p->id, p->banner, p->banner[0] == 'a' && p->banner[1] == '_' ? "gif" : "png");
     return image_get(key, path, S(POP_W));
 }
 
@@ -5687,7 +5706,7 @@ static void paint_members(RECT rc)
                 mem_free(wt);
             } else if (it->valid) {
                 int offline = it->status == ML_OFFLINE || it->status == ML_UNKNOWN;
-                r_image_t *img = user_avatar(it->id, it->avatar);
+                r_image_t *img = user_avatar_anim(it->id, it->avatar, g_ui.ml_hover == i);
                 unsigned color = model_role_color(g_ui.model, g_ui.guild, it->roles.data ? it->roles.data : "");
                 unsigned ink = color ? 0xFF000000u | color : ARGB(C_INK);
                 int ay = y + (h - S(32)) / 2, tx = x0 + S(56), tw = S(MEMBERS_W) - S(64);
