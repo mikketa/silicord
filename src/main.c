@@ -16,6 +16,7 @@
 #include "audio.h"
 #include "mixer.h"
 #include "opus.h"
+#include "opus_math.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -337,10 +338,55 @@ static struct {
 static CRITICAL_SECTION g_mix_lock;
 static mixer_t g_mixer;
 
+/* The voice settings, set on the UI thread and read on the audio thread. */
+static voice_prefs_t g_prefs = {0, 0, 100, 100, -50, 0, 0};
+
+/* Each person's volume in calls (under g_mix_lock), kept across their leaving and coming back. */
+static struct {
+    unsigned long long user;
+    float volume;
+} g_volumes[64];
+static int g_nvolumes;
+
+static unsigned long long parse_id(const char *s)
+{
+    unsigned long long u = 0;
+
+    for (; *s >= '0' && *s <= '9'; s++)
+        u = u * 10 + (unsigned)(*s - '0');
+    return u;
+}
+
+static float user_volume(unsigned long long user)
+{
+    for (int i = 0; i < g_nvolumes; i++)
+        if (g_volumes[i].user == user)
+            return g_volumes[i].volume;
+    return 1.f;
+}
+
+void app_voice_user_volume(const char *user_id, int percent)
+{
+    unsigned long long u = parse_id(user_id);
+    int i;
+
+    EnterCriticalSection(&g_mix_lock);
+    for (i = 0; i < g_nvolumes && g_volumes[i].user != u; i++)
+        ;
+    if (i < (int)ARRAYSIZE(g_volumes)) {
+        g_volumes[i].user = u;
+        g_volumes[i].volume = (float)percent / 100.f;
+        if (i == g_nvolumes)
+            g_nvolumes++;
+    }
+    LeaveCriticalSection(&g_mix_lock);
+}
+
 static void voice_frame(void *ctx, unsigned long long user, unsigned seq, const unsigned char *opus, size_t n)
 {
     (void)ctx;
     EnterCriticalSection(&g_mix_lock);
+    mixer_set_volume(&g_mixer, user, user_volume(user));
     mixer_push(&g_mixer, user, seq, opus, n);
     LeaveCriticalSection(&g_mix_lock);
 }
@@ -349,38 +395,55 @@ static void audio_play(void *ctx, float *out)
 {
     (void)ctx;
     EnterCriticalSection(&g_mix_lock);
+    g_mixer.gain = (float)g_prefs.out_volume / 100.f;
     mixer_pull(&g_mixer, out);
     LeaveCriticalSection(&g_mix_lock);
 }
 
 int app_voice_speaking(const char *user_id)
 {
-    unsigned long long u = 0;
+    unsigned long long u = parse_id(user_id);
     int on;
 
-    for (const char *c = user_id; *c >= '0' && *c <= '9'; c++)
-        u = u * 10 + (unsigned)(*c - '0');
     EnterCriticalSection(&g_mix_lock);
     on = mixer_speaking(&g_mixer, u);
     LeaveCriticalSection(&g_mix_lock);
     return on;
 }
 
-/* What we say: the microphone, gated by a simple level detector, encoded and sent. */
-#define MIC_THRESHOLD 0.004f /* RMS of about -48 dBFS */
-#define MIC_HANG 15          /* keep sending 300 ms after the last loud block */
+/* What we say: the microphone at its volume, opened by voice activity or push to talk, encoded and sent. */
+#define MIC_HANG 15 /* voice activity keeps sending 300 ms after the last loud block */
+#define PTT_HANG 2  /* push to talk sends 20 ms more after the key is released */
+
+enum { AUDIO_OFF, AUDIO_CALL, AUDIO_TEST };
 
 static opus_encoder_t g_encoder;
-static volatile LONG g_muted, g_deafened;
-static int g_mic_hang;
+static volatile LONG g_muted, g_deafened, g_mic_db = -100;
+static int g_mic_hang, g_audio_mode;
+static CRITICAL_SECTION g_audio_lock; /* starting and stopping the sound card, from the UI and voice threads */
+static float g_mic[960], g_echo[960];
+
+/* The microphone block at its volume, into g_mic; its level goes to g_mic_db. */
+static void mic_level(const float *in)
+{
+    float gain = (float)g_prefs.in_volume / 100.f, sum = 0, db;
+
+    for (int i = 0; i < 960; i++) {
+        float s = in[i] * gain;
+        g_mic[i] = s > 1.f ? 1.f : s < -1.f ? -1.f : s;
+        sum += g_mic[i] * g_mic[i];
+    }
+    db = sum > 0 ? 3.0103f * om_log2(sum / 960) : -100.f; /* 10 log10 of the mean square */
+    InterlockedExchange(&g_mic_db, (LONG)(db < -100.f ? -100.f : db));
+}
 
 static void audio_capture(void *ctx, const float *in)
 {
     unsigned char packet[1276];
-    float sum = 0;
     int n;
 
     (void)ctx;
+    mic_level(in);
     if (g_muted || g_deafened) {
         if (g_mic_hang) {
             g_mic_hang = 0;
@@ -388,13 +451,15 @@ static void audio_capture(void *ctx, const float *in)
         }
         return;
     }
-    for (int i = 0; i < 960; i++)
-        sum += in[i] * in[i];
-    if (sum / 960 > MIC_THRESHOLD * MIC_THRESHOLD)
+    if (g_prefs.push_to_talk) {
+        if (g_prefs.ptt_key && GetAsyncKeyState(g_prefs.ptt_key) < 0)
+            g_mic_hang = PTT_HANG;
+    } else if (g_mic_db > g_prefs.sensitivity) {
         g_mic_hang = MIC_HANG;
+    }
     if (!g_mic_hang)
         return;
-    n = opus_encode(&g_encoder, in, packet);
+    n = opus_encode(&g_encoder, g_mic, packet);
     if (n)
         voice_send(packet, (size_t)n);
     if (--g_mic_hang == 0)
@@ -414,20 +479,79 @@ void app_voice_mute(int muted)
     InterlockedExchange(&g_muted, muted);
 }
 
+/* The microphone test: what it hears, played back. */
+static void test_capture(void *ctx, const float *in)
+{
+    (void)ctx;
+    mic_level(in);
+    EnterCriticalSection(&g_mix_lock);
+    CopyMemory(g_echo, g_mic, sizeof g_echo);
+    LeaveCriticalSection(&g_mix_lock);
+}
+
+static void test_play(void *ctx, float *out)
+{
+    float gain = (float)g_prefs.out_volume / 100.f;
+
+    (void)ctx;
+    EnterCriticalSection(&g_mix_lock);
+    for (int i = 0; i < 960; i++)
+        out[2 * i] = out[2 * i + 1] = g_echo[i] * gain;
+    LeaveCriticalSection(&g_mix_lock);
+}
+
+/* Opens the sound card for a call or the test with the chosen devices, or closes it. */
+static void audio_mode(int mode)
+{
+    audio_io_t io = {0};
+
+    io.play = mode == AUDIO_TEST ? test_play : audio_play;
+    io.capture = mode == AUDIO_TEST ? test_capture : audio_capture;
+    io.out_device = (unsigned)g_prefs.out_device;
+    io.in_device = (unsigned)g_prefs.in_device;
+    EnterCriticalSection(&g_audio_lock);
+    InterlockedExchange(&g_mic_db, -100);
+    ZeroMemory(g_echo, sizeof g_echo);
+    if (mode == AUDIO_OFF)
+        audio_stop();
+    g_audio_mode = mode != AUDIO_OFF && audio_start(&io) ? mode : AUDIO_OFF;
+    LeaveCriticalSection(&g_audio_lock);
+}
+
+void app_voice_prefs(const voice_prefs_t *p)
+{
+    int devices = p->in_device != g_prefs.in_device || p->out_device != g_prefs.out_device;
+
+    g_prefs = *p;
+    if (devices && g_audio_mode != AUDIO_OFF)
+        audio_mode(g_audio_mode);
+}
+
+int app_voice_mic_level(void)
+{
+    return g_audio_mode != AUDIO_OFF ? (int)g_mic_db : -100;
+}
+
+int app_voice_mic_test(int on)
+{
+    if (on && g_audio_mode == AUDIO_OFF)
+        audio_mode(AUDIO_TEST);
+    else if (!on && g_audio_mode == AUDIO_TEST)
+        audio_mode(AUDIO_OFF);
+    return g_audio_mode == AUDIO_TEST;
+}
+
 static void voice_state_changed(void *ctx, int state, const char *text)
 {
     sb_t *p = mem_alloc(sizeof *p);
 
     (void)ctx;
     if (state == VOICE_CONNECTED) {
-        audio_io_t io = {0};
-        io.play = audio_play;
-        io.capture = audio_capture;
         opus_encoder_init(&g_encoder);
         g_mic_hang = 0;
-        audio_start(&io);
+        audio_mode(AUDIO_CALL);
     } else if (state != VOICE_CONNECTING) {
-        audio_stop();
+        audio_mode(AUDIO_OFF);
     }
     sb_i64(p, state);
     sb_addn(p, "", 1);
@@ -497,6 +621,7 @@ void app_voice_join(const char *guild_id, const char *channel_id)
     lstrcpynA(g_vc.channel, channel_id, sizeof g_vc.channel);
     LeaveCriticalSection(&g_voice_lock);
     voice_stop();
+    app_voice_mic_test(0);
     if (old[0] && lstrcmpA(old, guild_id) != 0)
         send_voice_state(old, NULL);
     send_voice_state(guild_id, channel_id);
@@ -533,7 +658,7 @@ void app_voice_leave(void)
     g_vc.active = 0;
     LeaveCriticalSection(&g_voice_lock);
     voice_stop();
-    audio_stop();
+    audio_mode(AUDIO_OFF);
     EnterCriticalSection(&g_mix_lock);
     mixer_free(&g_mixer);
     mixer_init(&g_mixer);
@@ -2261,6 +2386,7 @@ void entry(void)
     InitializeCriticalSection(&g_session_lock);
     InitializeCriticalSection(&g_voice_lock);
     InitializeCriticalSection(&g_mix_lock);
+    InitializeCriticalSection(&g_audio_lock);
     mixer_init(&g_mixer);
 
     ShowWindow(ui_create(GetModuleHandleW(NULL)), SW_SHOWDEFAULT);

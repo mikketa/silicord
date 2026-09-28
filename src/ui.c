@@ -23,6 +23,7 @@
 #include "qr.h"
 #include "utf.h"
 #include "voice.h"
+#include "audio.h"
 
 /* Palette (GDI COLORREF and GDI+ ARGB). */
 #define RGBX(r, g, b) RGB(r, g, b), (0xFF000000u | ((r) << 16) | ((g) << 8) | (b))
@@ -228,6 +229,17 @@ typedef struct {
     char voice_name[100];      /* its channel name */
     unsigned voice_speaking;   /* who spoke at the last check, one bit per member of our call */
     int voice_muted, voice_deafened;
+    voice_prefs_t vprefs;      /* this computer's voice settings */
+    wchar_t dev_in[16][AUDIO_NAME], dev_out[16][AUDIO_NAME];
+    int ndev_in, ndev_out;
+    int set_drag;              /* the settings slider being dragged, or 0 */
+    int set_record;            /* waiting for the push to talk key */
+    int mic_test, mic_db;      /* the microphone test runs; the meter's last level */
+    struct {
+        char user[24];
+        short volume, muted;
+    } uvol[64];                /* people's volumes in calls */
+    int nuvol;
     sb_t voice_status;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
@@ -383,6 +395,7 @@ static void rel_remove(const char *id);
 #define TIMER_FLASH 3
 #define TIMER_REACTORS 9
 #define TIMER_VOICE 10 /* refreshes who is speaking in our call */
+#define TIMER_MIC 11   /* the microphone meter in the voice settings */
 #define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
@@ -1747,6 +1760,9 @@ static void paint_settings(RECT rc);
 static void settings_open(void);
 static void settings_close(void);
 static void settings_click(int x, int y);
+static void settings_set_key(int vk);
+static void slider_drag(int id, int x);
+static int run_menu(HMENU menu);
 static int settings_hit(int x, int y);
 static void place_settings_edit(void);
 static void prefs_load(void);
@@ -8712,11 +8728,13 @@ static void qs_open(void)
 
 /* ---- User settings screen ---- */
 
-enum { SET_ACCOUNT, SET_NOTIFICATIONS, SET_ADVANCED, SET_ABOUT, SET_PAGES };
+enum { SET_ACCOUNT, SET_VOICE, SET_NOTIFICATIONS, SET_ADVANCED, SET_ABOUT, SET_PAGES };
 enum {
     SH_PAGE = 0,        /* + page */
     SH_CLOSE = 10, SH_LOGOUT, SH_SAVE, SH_CLEAR, SH_NOTIFY, SH_TITLE, SH_DEVELOPER, SH_SOURCE,
     SH_STATUS = 20,     /* + index in k_status_codes */
+    SH_IN_VOL = 30, SH_OUT_VOL, SH_SENS, /* sliders */
+    SH_IN_DEV, SH_OUT_DEV, SH_MIC_TEST, SH_MODE_VOICE, SH_MODE_PTT, SH_PTT_KEY,
 };
 #define SET_NAV_W 260
 #define SET_ROW 72
@@ -8730,22 +8748,116 @@ static void prefs_path(wchar_t *out)
 }
 
 /* Settings of this computer only, beside the image cache. */
+static void list_devices(void)
+{
+    g_ui.ndev_in = audio_devices(1, g_ui.dev_in, 16);
+    g_ui.ndev_out = audio_devices(0, g_ui.dev_out, 16);
+}
+
+/* Devices are saved by name: their numbers change as they come and go. */
+static int device_by_name(wchar_t (*names)[AUDIO_NAME], int n, const wchar_t *name)
+{
+    for (int i = 0; name[0] && i < n; i++)
+        if (lstrcmpW(names[i], name) == 0)
+            return i + 1;
+    return 0;
+}
+
+static void write_int(const wchar_t *section, const wchar_t *key, int v, const wchar_t *path)
+{
+    wchar_t s[16];
+
+    wsprintfW(s, L"%d", v);
+    WritePrivateProfileStringW(section, key, s, path);
+}
+
+static int uvol_find(const char *user)
+{
+    for (int i = 0; i < g_ui.nuvol; i++)
+        if (lstrcmpA(g_ui.uvol[i].user, user) == 0)
+            return i;
+    return -1;
+}
+
+/* Someone's volume in calls, sent to the mixer and saved. */
+static void uvol_set(const char *user, int volume, int muted)
+{
+    wchar_t path[MAX_PATH + 16], key[24], val[16];
+    int i = uvol_find(user);
+
+    if (i < 0 && g_ui.nuvol < (int)ARRAYSIZE(g_ui.uvol))
+        i = g_ui.nuvol++;
+    if (i < 0)
+        return;
+    lstrcpynA(g_ui.uvol[i].user, user, sizeof g_ui.uvol[i].user);
+    g_ui.uvol[i].volume = (short)volume;
+    g_ui.uvol[i].muted = (short)muted;
+    app_voice_user_volume(user, muted ? 0 : volume);
+    prefs_path(path);
+    MultiByteToWideChar(CP_UTF8, 0, user, -1, key, ARRAYSIZE(key));
+    wsprintfW(val, muted ? L"%d m" : L"%d", volume);
+    WritePrivateProfileStringW(L"user_volume", key, volume == 100 && !muted ? NULL : val, path);
+}
+
 static void prefs_load(void)
 {
-    wchar_t path[MAX_PATH + 16];
+    wchar_t path[MAX_PATH + 16], name[AUDIO_NAME];
+    static wchar_t vols[8192];
+    voice_prefs_t *v = &g_ui.vprefs;
 
     prefs_path(path);
     g_ui.pref_notify = GetPrivateProfileIntW(L"app", L"notifications", 1, path) != 0;
     g_ui.pref_title = GetPrivateProfileIntW(L"app", L"title_count", 1, path) != 0;
+    list_devices();
+    GetPrivateProfileStringW(L"voice", L"input_device", L"", name, AUDIO_NAME, path);
+    v->in_device = device_by_name(g_ui.dev_in, g_ui.ndev_in, name);
+    GetPrivateProfileStringW(L"voice", L"output_device", L"", name, AUDIO_NAME, path);
+    v->out_device = device_by_name(g_ui.dev_out, g_ui.ndev_out, name);
+    v->in_volume = (int)GetPrivateProfileIntW(L"voice", L"input_volume", 100, path);
+    v->out_volume = (int)GetPrivateProfileIntW(L"voice", L"output_volume", 100, path);
+    v->sensitivity = (int)GetPrivateProfileIntW(L"voice", L"sensitivity", -50, path);
+    v->push_to_talk = GetPrivateProfileIntW(L"voice", L"push_to_talk", 0, path) != 0;
+    v->ptt_key = (int)GetPrivateProfileIntW(L"voice", L"push_to_talk_key", 0, path);
+    app_voice_prefs(v);
+    /* user_volume: "id=percent", with " m" when muted */
+    g_ui.nuvol = 0;
+    for (const wchar_t *p = vols, *end = vols + GetPrivateProfileSectionW(L"user_volume", vols, ARRAYSIZE(vols), path);
+         p < end && *p; p += lstrlenW(p) + 1) {
+        const wchar_t *eq = p;
+        char user[24];
+        int volume = 0, k = 0;
+        while (*eq && *eq != '=')
+            eq++;
+        if (!*eq || eq - p >= 24 || g_ui.nuvol >= (int)ARRAYSIZE(g_ui.uvol))
+            continue;
+        for (const wchar_t *c = p; c < eq; c++)
+            user[k++] = (char)*c;
+        user[k] = 0;
+        for (eq++; *eq >= '0' && *eq <= '9'; eq++)
+            volume = volume * 10 + (*eq - '0');
+        lstrcpynA(g_ui.uvol[g_ui.nuvol].user, user, 24);
+        g_ui.uvol[g_ui.nuvol].volume = (short)(volume > 200 ? 200 : volume);
+        g_ui.uvol[g_ui.nuvol].muted = *eq == ' ' && eq[1] == 'm';
+        app_voice_user_volume(user, g_ui.uvol[g_ui.nuvol].muted ? 0 : g_ui.uvol[g_ui.nuvol].volume);
+        g_ui.nuvol++;
+    }
 }
 
 static void prefs_save(void)
 {
     wchar_t path[MAX_PATH + 16];
+    const voice_prefs_t *v = &g_ui.vprefs;
 
     prefs_path(path);
     WritePrivateProfileStringW(L"app", L"notifications", g_ui.pref_notify ? L"1" : L"0", path);
     WritePrivateProfileStringW(L"app", L"title_count", g_ui.pref_title ? L"1" : L"0", path);
+    WritePrivateProfileStringW(L"voice", L"input_device", v->in_device ? g_ui.dev_in[v->in_device - 1] : L"", path);
+    WritePrivateProfileStringW(L"voice", L"output_device", v->out_device ? g_ui.dev_out[v->out_device - 1] : L"", path);
+    write_int(L"voice", L"input_volume", v->in_volume, path);
+    write_int(L"voice", L"output_volume", v->out_volume, path);
+    write_int(L"voice", L"sensitivity", v->sensitivity, path);
+    write_int(L"voice", L"push_to_talk", v->push_to_talk, path);
+    write_int(L"voice", L"push_to_talk_key", v->ptt_key, path);
 }
 
 static int developer_mode(void)
@@ -8822,6 +8934,72 @@ static void paint_button(int x, int y, int w, const char *label, int id, int pri
     set_hit(x, y, w, S(38), id);
 }
 
+/* A box showing the current choice, opening a menu. */
+static void paint_dropdown(int x, int y, int w, const wchar_t *label, int id)
+{
+    r_round(x, y, w, S(40), S(6), g_ui.settings_hover == id ? 0xFF262626 : 0xFF1E1E1E);
+    text_w(g_ui.f_body, C_INK, rect(x + S(12), y, w - S(48), S(40)), label, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text_w(g_ui.f_icon, C_MUTED, rect(x + w - S(36), y, S(24), S(40)), L"\xE70D", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    set_hit(x, y, w, S(40), id);
+}
+
+/* A horizontal slider; `meter`, when above min, shows a level along the track (green past the value). */
+static void paint_slider(int x, int y, int w, int value, int min, int max, int meter, int id)
+{
+    int ty = y + S(10), kx = x + (int)((long long)(value - min) * w / (max - min));
+
+    r_round(x, ty, w, S(8), S(4), 0xFF3A3A3A);
+    if (meter > min) {
+        int mx = x + (int)((long long)(meter - min) * w / (max - min));
+        r_round(x, ty, mx - x, S(8), S(4), meter > value ? ARGB(C_GREEN) : 0xFF6A6A6A);
+    } else if (meter <= -1000) {
+        r_round(x, ty, kx - x, S(8), S(4), ARGB(C_AMBER));
+    }
+    r_round(kx - S(5), y + S(2), S(10), S(24), S(3), g_ui.settings_hover == id || g_ui.set_drag == id ? 0xFFFFFFFFu : 0xFFE0E0E0u);
+    set_hit(x - S(8), y, w + S(16), S(28), id);
+}
+
+/* A choice among a few, as a round radio button. */
+static int paint_radio(int x, int y, int w, const char *label, int on, int id)
+{
+    if (g_ui.settings_hover == id || on)
+        r_round(x, y, w, S(40), S(6), on ? ARGB(C_SELECT) : ARGB(C_HOVER));
+    r_round_outline(x + S(12), y + S(10), S(20), S(20), S(10), S(2), on ? ARGB(C_AMBER) : ARGB(C_MUTED));
+    if (on)
+        r_circle(x + S(17), y + S(15), S(10), ARGB(C_AMBER));
+    text(g_ui.f_body, on ? C_INK : C_MUTED, rect(x + S(44), y, w - S(56), S(40)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    set_hit(x, y, w, S(40), id);
+    return y + S(44);
+}
+
+static void key_name(int vk, wchar_t *out, int n)
+{
+    UINT sc;
+
+    switch (vk) {
+    case 0:
+        lstrcpynW(out, L"No keybind set", n);
+        return;
+    case VK_XBUTTON1:
+        lstrcpynW(out, L"Mouse 4", n);
+        return;
+    case VK_XBUTTON2:
+        lstrcpynW(out, L"Mouse 5", n);
+        return;
+    case VK_MBUTTON:
+        lstrcpynW(out, L"Middle Mouse", n);
+        return;
+    }
+    sc = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
+    switch (vk) { /* the keys whose scan codes need the extended bit to be named apart from the keypad */
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
+    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN: case VK_RCONTROL: case VK_RMENU: case VK_DIVIDE:
+        sc |= 0x100;
+    }
+    if (!GetKeyNameTextW((LONG)(sc << 16), out, n))
+        wsprintfW(out, L"Key %d", vk);
+}
+
 /* A setting with its explanation and a switch on the right. */
 static int paint_toggle(int x, int y, int w, const char *title, const char *desc, int on, int id)
 {
@@ -8838,7 +9016,7 @@ static int paint_toggle(int x, int y, int w, const char *title, const char *desc
 
 static void paint_settings(RECT rc)
 {
-    static const char *const pages[] = {"My Account", "Notifications", "Advanced", "About"};
+    static const char *const pages[] = {"My Account", "Voice & Video", "Notifications", "Advanced", "About"};
     int nav = S(SET_NAV_W), x = settings_content_x(), w = settings_content_w(rc), y;
 
     g_ui.nset_hits = 0;
@@ -8849,9 +9027,11 @@ static void paint_settings(RECT rc)
     y = S(56);
     for (int k = 0; k < SET_PAGES; k++) {
         int sel = g_ui.settings_page == k, hov = g_ui.settings_hover == SH_PAGE + k;
-        if (k == 0 || k == SET_ABOUT) {
-            text(g_ui.f_cat, C_FAINT, rect(S(28), y, nav - S(40), S(28)), k == 0 ? "USER SETTINGS" : "SILICORD",
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (k == 0 || k == SET_VOICE || k == SET_ABOUT) {
+            if (k)
+                y += S(12);
+            text(g_ui.f_cat, C_FAINT, rect(S(28), y, nav - S(40), S(28)),
+                 k == 0 ? "USER SETTINGS" : k == SET_VOICE ? "APP SETTINGS" : "SILICORD", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             y += S(30);
         }
         if (sel || hov)
@@ -8860,8 +9040,6 @@ static void paint_settings(RECT rc)
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         set_hit(S(16), y, nav - S(32), S(34), SH_PAGE + k);
         y += S(38);
-        if (k == SET_ADVANCED)
-            y += S(12);
     }
     fill(S(28), y + S(8), nav - S(56), 1, C_LINE);
     y += S(20);
@@ -8922,6 +9100,78 @@ static void paint_settings(RECT rc)
         }
         paint_button(x + w - S(204), y + S(1), S(96), "Save", SH_SAVE, 1);
         paint_button(x + w - S(100), y + S(1), S(96), "Clear", SH_CLEAR, 0);
+        break;
+    }
+    case SET_VOICE: {
+        const voice_prefs_t *v = &g_ui.vprefs;
+        int col = (w - S(24)) / 2, x2 = x + col + S(24), level = app_voice_mic_level();
+        wchar_t label[64];
+        char line[40];
+        text(g_ui.f_cat, C_FAINT, rect(x, y, col, S(20)), "INPUT DEVICE", DT_LEFT | DT_SINGLELINE);
+        text(g_ui.f_cat, C_FAINT, rect(x2, y, col, S(20)), "OUTPUT DEVICE", DT_LEFT | DT_SINGLELINE);
+        y += S(26);
+        paint_dropdown(x, y, col, v->in_device ? g_ui.dev_in[v->in_device - 1] : L"Default", SH_IN_DEV);
+        paint_dropdown(x2, y, col, v->out_device ? g_ui.dev_out[v->out_device - 1] : L"Default", SH_OUT_DEV);
+        y += S(64);
+        text(g_ui.f_cat, C_FAINT, rect(x, y, col, S(20)), "INPUT VOLUME", DT_LEFT | DT_SINGLELINE);
+        text(g_ui.f_cat, C_FAINT, rect(x2, y, col, S(20)), "OUTPUT VOLUME", DT_LEFT | DT_SINGLELINE);
+        wsprintfA(line, "%d%%", v->in_volume);
+        text(g_ui.f_small, C_MUTED, rect(x, y, col, S(20)), line, DT_RIGHT | DT_SINGLELINE);
+        wsprintfA(line, "%d%%", v->out_volume);
+        text(g_ui.f_small, C_MUTED, rect(x2, y, col, S(20)), line, DT_RIGHT | DT_SINGLELINE);
+        y += S(28);
+        paint_slider(x, y, col, v->in_volume, 0, 200, -1000, SH_IN_VOL);
+        paint_slider(x2, y, col, v->out_volume, 0, 200, -1000, SH_OUT_VOL);
+        y += S(52);
+
+        text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "MIC TEST", DT_LEFT | DT_SINGLELINE);
+        y += S(24);
+        text(g_ui.f_small, C_MUTED, rect(x, y, w, S(20)),
+             g_ui.voice_state == VOICE_CONNECTED ? "Your microphone, as your call hears it." :
+                                                   "Say something and you will hear it back.", DT_LEFT | DT_SINGLELINE);
+        y += S(28);
+        if (g_ui.voice_state != VOICE_CONNECTED)
+            paint_button(x, y, S(140), g_ui.mic_test ? "Stop Testing" : "Let's Check", SH_MIC_TEST, !g_ui.mic_test);
+        {
+            int mx = g_ui.voice_state != VOICE_CONNECTED ? x + S(160) : x, mw = x + w - mx, lit = (level + 100) * mw / 100;
+            r_round(mx, y + S(15), mw, S(8), S(4), 0xFF3A3A3A);
+            if (level > -100)
+                r_round(mx, y + S(15), lit, S(8), S(4), ARGB(C_GREEN));
+        }
+        y += S(64);
+
+        text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "INPUT MODE", DT_LEFT | DT_SINGLELINE);
+        y += S(26);
+        y = paint_radio(x, y, w, "Voice Activity", !v->push_to_talk, SH_MODE_VOICE);
+        y = paint_radio(x, y, w, "Push to Talk", v->push_to_talk, SH_MODE_PTT);
+        y += S(16);
+        if (v->push_to_talk) {
+            text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "SHORTCUT", DT_LEFT | DT_SINGLELINE);
+            y += S(26);
+            if (g_ui.set_record)
+                lstrcpyW(label, L"Press a key or a mouse button\x2026");
+            else
+                key_name(v->ptt_key, label, ARRAYSIZE(label));
+            r_round(x, y, col, S(40), S(6), 0xFF1E1E1E);
+            if (g_ui.set_record)
+                r_round_outline(x, y, col, S(40), S(6), 1, ARGB(C_AMBER));
+            text_w(g_ui.f_body, g_ui.set_record ? C_AMBER : C_INK, rect(x + S(12), y, col - S(24), S(40)), label, -1,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            set_hit(x, y, col, S(40), SH_PTT_KEY);
+            paint_button(x + col + S(12), y + S(1), S(160), g_ui.set_record ? "Stop Recording" : "Record Keybind", SH_PTT_KEY, 0);
+            y += S(52);
+            text(g_ui.f_small, C_MUTED, rect(x, y, w, S(20)), "Works while Silicord is in the background.",
+                 DT_LEFT | DT_SINGLELINE);
+        } else {
+            text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "INPUT SENSITIVITY", DT_LEFT | DT_SINGLELINE);
+            wsprintfA(line, "%d dB", v->sensitivity);
+            text(g_ui.f_small, C_MUTED, rect(x, y, w, S(20)), line, DT_RIGHT | DT_SINGLELINE);
+            y += S(28);
+            paint_slider(x, y, w, v->sensitivity, -100, 0, level, SH_SENS);
+            y += S(40);
+            text(g_ui.f_small, C_MUTED, rect(x, y, w, S(20)),
+                 "The microphone opens when its level passes the mark (green on the meter).", DT_LEFT | DT_SINGLELINE);
+        }
         break;
     }
     case SET_NOTIFICATIONS:
@@ -9003,6 +9253,9 @@ static void settings_open(void)
 static void settings_close(void)
 {
     g_ui.settings_open = 0;
+    g_ui.set_record = 0;
+    g_ui.mic_test = app_voice_mic_test(0);
+    KillTimer(g_ui.wnd, TIMER_MIC);
     place_settings_edit();
     place_composer();
     place_friend_input();
@@ -9033,16 +9286,81 @@ static void save_custom_status(int clear)
     sb_free(&fields);
 }
 
+/* A slider follows the mouse: its value from the x position in its track. */
+static void slider_drag(int id, int x)
+{
+    voice_prefs_t *v = &g_ui.vprefs;
+    int min = id == SH_SENS ? -100 : 0, max = id == SH_SENS ? 0 : 200, value;
+
+    for (int k = 0; k < g_ui.nset_hits; k++) {
+        RECT r = g_ui.set_hits[k].r;
+        int left = r.left + S(8), w = r.right - r.left - S(16);
+        if (g_ui.set_hits[k].id != id || w <= 0)
+            continue;
+        value = min + (int)((long long)(x - left) * (max - min) / w);
+        value = value < min ? min : value > max ? max : value;
+        /* volumes snap to 100% */
+        if (id != SH_SENS && value > 95 && value < 105)
+            value = 100;
+        *(id == SH_IN_VOL ? &v->in_volume : id == SH_OUT_VOL ? &v->out_volume : &v->sensitivity) = value;
+        app_voice_prefs(v);
+        redraw();
+        return;
+    }
+}
+
+/* A device menu under its box: Default, then what Windows has. */
+static void pick_device(int input)
+{
+    HMENU menu = CreatePopupMenu();
+    int n, cur, cmd;
+    wchar_t (*names)[AUDIO_NAME];
+
+    list_devices();
+    n = input ? g_ui.ndev_in : g_ui.ndev_out;
+    names = input ? g_ui.dev_in : g_ui.dev_out;
+    cur = input ? g_ui.vprefs.in_device : g_ui.vprefs.out_device;
+    if (cur > n)
+        cur = 0;
+    AppendMenuW(menu, MF_STRING | (cur == 0 ? MF_CHECKED : 0), 1, L"Default");
+    for (int i = 0; i < n; i++)
+        AppendMenuW(menu, MF_STRING | (cur == i + 1 ? MF_CHECKED : 0), (UINT_PTR)(i + 2), names[i]);
+    cmd = run_menu(menu);
+    if (cmd > 0) {
+        *(input ? &g_ui.vprefs.in_device : &g_ui.vprefs.out_device) = cmd - 1;
+        app_voice_prefs(&g_ui.vprefs);
+        prefs_save();
+    }
+}
+
+static void settings_set_key(int vk)
+{
+    g_ui.vprefs.ptt_key = vk;
+    app_voice_prefs(&g_ui.vprefs);
+    prefs_save();
+}
+
 static void settings_click(int x, int y)
 {
     int id = settings_hit(x, y);
 
-    if (id < 0)
+    if (id != SH_PTT_KEY)
+        g_ui.set_record = 0;
+    if (id < 0) {
+        redraw();
         return;
+    }
     if (id >= SH_PAGE && id < SH_PAGE + SET_PAGES) {
         g_ui.settings_page = id - SH_PAGE;
         g_ui.settings_edit_y = -1;
         place_settings_edit();
+        if (g_ui.settings_page == SET_VOICE) {
+            list_devices();
+            SetTimer(g_ui.wnd, TIMER_MIC, 50, NULL);
+        } else {
+            g_ui.mic_test = app_voice_mic_test(0);
+            KillTimer(g_ui.wnd, TIMER_MIC);
+        }
     } else if (id >= SH_STATUS && id < SH_STATUS + 4) {
         char fields[48];
         const char *custom = g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "";
@@ -9084,6 +9402,22 @@ static void settings_click(int x, int y)
         case SH_SOURCE:
             open_url("https://github.com/mikketa/silicord");
             break;
+        case SH_IN_DEV:
+        case SH_OUT_DEV:
+            pick_device(id == SH_IN_DEV);
+            break;
+        case SH_MIC_TEST:
+            g_ui.mic_test = app_voice_mic_test(!g_ui.mic_test);
+            break;
+        case SH_MODE_VOICE:
+        case SH_MODE_PTT:
+            g_ui.vprefs.push_to_talk = id == SH_MODE_PTT;
+            app_voice_prefs(&g_ui.vprefs);
+            prefs_save();
+            break;
+        case SH_PTT_KEY:
+            g_ui.set_record = !g_ui.set_record;
+            break;
         }
     }
     redraw();
@@ -9111,11 +9445,14 @@ enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
     CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD, CM_THREAD,
+    CM_USER_MUTE,
+    CM_USER_VOLUME = 90, /* + index in k_user_volumes */
     CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
     CM_NOTIFY = 120,     /* + NOTIFY_* */
 };
 
 static const int k_mute_minutes[] = {15, 60, 180, 480, 1440, 0};
+static const int k_user_volumes[] = {200, 150, 125, 100, 75, 50, 25, 10};
 static const wchar_t *const k_mute_names[] = {L"For 15 Minutes", L"For 1 Hour", L"For 3 Hours", L"For 8 Hours",
                                               L"For 24 Hours", L"Until I turn it back on"};
 
@@ -9466,10 +9803,12 @@ static void guild_menu(int g)
     redraw();
 }
 
-static void user_menu(const char *user_id, const char *name, const char *avatar, int x, int y)
+/* `voice`: someone in a voice channel, whose volume can be set. */
+static void user_menu(const char *user_id, const char *name, const char *avatar, int x, int y, int voice)
 {
     HMENU menu = CreatePopupMenu();
-    int cmd, self = g_ui.model && lstrcmpA(user_id, g_ui.model->user_id) == 0;
+    int cmd, self = g_ui.model && lstrcmpA(user_id, g_ui.model->user_id) == 0, u = uvol_find(user_id);
+    int volume = u >= 0 ? g_ui.uvol[u].volume : 100, muted = u >= 0 && g_ui.uvol[u].muted;
     char id[24], nm[80], av[48];
 
     lstrcpynA(id, user_id, sizeof id);
@@ -9478,6 +9817,17 @@ static void user_menu(const char *user_id, const char *name, const char *avatar,
     AppendMenuW(menu, MF_STRING, CM_PROFILE, L"Profile");
     if (!self)
         AppendMenuW(menu, MF_STRING, CM_MESSAGE, L"Message");
+    if (voice && !self) {
+        HMENU vol = CreatePopupMenu();
+        for (int k = 0; k < (int)ARRAYSIZE(k_user_volumes); k++) {
+            wchar_t label[16];
+            wsprintfW(label, L"%d%%", k_user_volumes[k]);
+            AppendMenuW(vol, MF_STRING | (volume == k_user_volumes[k] ? MF_CHECKED : 0), (UINT_PTR)(CM_USER_VOLUME + k), label);
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING | (muted ? MF_CHECKED : 0), CM_USER_MUTE, L"Mute");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)vol, L"User Volume");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, CM_COPY_USERNAME, L"Copy Name");
     if (developer_mode())
@@ -9503,7 +9853,35 @@ static void user_menu(const char *user_id, const char *name, const char *avatar,
     case CM_COPY_USER_ID:
         copy_text(id);
         break;
+    case CM_USER_MUTE:
+        uvol_set(id, volume, !muted);
+        break;
+    default:
+        if (cmd >= CM_USER_VOLUME && cmd < CM_USER_VOLUME + (int)ARRAYSIZE(k_user_volumes))
+            uvol_set(id, k_user_volumes[cmd - CM_USER_VOLUME], muted);
+        break;
     }
+}
+
+/* The person listed under a voice channel at (x, y), or -1. */
+static int voice_user_at(int x, int y)
+{
+    unsigned first, count;
+    int kind, index, ry = S(HEADER_H) + S(8) - g_ui.side_scroll, row, n = 0;
+
+    hit_test(x, y, &kind, &index);
+    if (kind != HIT_CHANNEL || !is_voice_type(chan(index)->type) || !side_range(&first, &count))
+        return -1;
+    for (unsigned i = first; i < (unsigned)index; i++)
+        if (!empty_category(first, count, i) && (chan((int)i)->type == CH_CATEGORY || !hidden(first, i)))
+            ry += row_height(i);
+    if (y < ry + S(ROW_H))
+        return -1;
+    row = (y - ry - S(ROW_H)) / S(VOICE_ROW);
+    for (int k = 0; k < g_ui.nvoices; k++)
+        if (lstrcmpA(g_ui.voices[k].channel, chan(index)->id) == 0 && n++ == row)
+            return k;
+    return -1;
 }
 
 /* Right click anywhere in the main window. */
@@ -9517,11 +9895,16 @@ static void on_right_click(int x, int y)
     picker_close();
     if ((i = ml_hit(x, y, &top)) >= 0) {
         const ml_item_t *it = &g_ui.ml.items[i];
-        user_menu(it->id, it->name.data, it->avatar, main_right() - S(POP_W) - S(8), top);
+        user_menu(it->id, it->name.data, it->avatar, main_right() - S(POP_W) - S(8), top, 0);
         return;
     }
     if (author_hit(x, y, &i, &ax, &ay)) {
-        user_menu(g_ui.msgs[i].author_id, author_name(&g_ui.msgs[i]), g_ui.msgs[i].avatar, ax, ay);
+        user_menu(g_ui.msgs[i].author_id, author_name(&g_ui.msgs[i]), g_ui.msgs[i].avatar, ax, ay, 0);
+        return;
+    }
+    if ((i = voice_user_at(x, y)) >= 0) {
+        voice_t *v = &g_ui.voices[i];
+        user_menu(v->user, v->name.data, v->avatar, S(RAIL_W + SIDE_W) + S(8), y, 1);
         return;
     }
     if ((i = message_at(x, y, NULL)) >= 0 && !g_ui.msgs[i].system) {
@@ -10381,8 +10764,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
         if (g_ui.settings_open) {
-            if (wp == VK_ESCAPE)
+            if (g_ui.set_record) {
+                if (wp != VK_ESCAPE)
+                    settings_set_key((int)wp);
+                g_ui.set_record = 0;
+                redraw();
+            } else if (wp == VK_ESCAPE) {
                 settings_close();
+            }
             return 0;
         }
         if (wp == 'K' && GetKeyState(VK_CONTROL) < 0) {
@@ -10465,9 +10854,33 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         }
         break;
+    case WM_LBUTTONDOWN:
+        if (g_ui.view == VIEW_APP && g_ui.settings_open) {
+            int id = settings_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (id == SH_IN_VOL || id == SH_OUT_VOL || id == SH_SENS) {
+                g_ui.set_drag = id;
+                SetCapture(wnd);
+                slider_drag(id, GET_X_LPARAM(lp));
+            }
+            return 0;
+        }
+        break;
+    case WM_XBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        if (g_ui.view == VIEW_APP && g_ui.settings_open && g_ui.set_record) {
+            settings_set_key(msg == WM_MBUTTONDOWN ? VK_MBUTTON : HIWORD(wp) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2);
+            g_ui.set_record = 0;
+            redraw();
+            return msg == WM_XBUTTONDOWN ? TRUE : 0;
+        }
+        break;
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, wnd, 0};
         TrackMouseEvent(&tme);
+        if (g_ui.set_drag) {
+            slider_drag(g_ui.set_drag, GET_X_LPARAM(lp));
+            return 0;
+        }
         if (g_ui.view == VIEW_APP && g_ui.settings_open) {
             int h = settings_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             if (h != g_ui.settings_hover) {
@@ -10487,6 +10900,13 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_LBUTTONUP:
+        if (g_ui.set_drag) {
+            g_ui.set_drag = 0;
+            ReleaseCapture();
+            prefs_save();
+            redraw();
+            return 0;
+        }
         if (g_ui.view == VIEW_APP && g_ui.settings_open) {
             settings_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
@@ -10694,6 +11114,16 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             KillTimer(wnd, TIMER_FLASH);
             g_ui.flash_id[0] = 0;
             redraw();
+            return 0;
+        }
+        if (wp == TIMER_MIC) {
+            int db = app_voice_mic_level();
+            if (!g_ui.settings_open || g_ui.settings_page != SET_VOICE) {
+                KillTimer(wnd, TIMER_MIC);
+            } else if (db != g_ui.mic_db) {
+                g_ui.mic_db = db;
+                redraw();
+            }
             return 0;
         }
         if (wp == TIMER_VOICE) {

@@ -88,6 +88,6 @@ Everything is written here, from the cryptography to the codec: no third-party c
 - [x] Joining and leaving voice channels, playback with a jitter buffer, the microphone with a level gate, mute and deafen, speaking rings
 - [ ] Tested against Discord's voice servers
 - [x] Loss concealment in CELT: pitch repetition through the LPC excitation, then shaped noise
-- [ ] Input and output device choice, push to talk, per-user volume in the UI
+- [x] Voice settings: input and output devices, volumes, a mic test, voice activity sensitivity or push to talk; per-user volume and mute
 - [ ] Calls in direct messages
 - [ ] Video and screen sharing

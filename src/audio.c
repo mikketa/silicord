@@ -66,7 +66,10 @@ static void open_input(audio_t *a)
 {
     WAVEFORMATEX f = {WAVE_FORMAT_PCM, 1, 48000, 48000 * 2, 2, 16, 0};
 
-    if (waveInOpen(&a->in, WAVE_MAPPER, &f, (DWORD_PTR)a->in_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) {
+    /* A device that went away falls back to the default one. */
+    if ((!a->io.in_device ||
+         waveInOpen(&a->in, a->io.in_device - 1, &f, (DWORD_PTR)a->in_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) &&
+        waveInOpen(&a->in, WAVE_MAPPER, &f, (DWORD_PTR)a->in_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) {
         a->in = NULL;
         return;
     }
@@ -90,7 +93,9 @@ int audio_start(const audio_io_t *io)
     a->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
     a->out_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     a->in_event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (waveOutOpen(&a->out, WAVE_MAPPER, &f, (DWORD_PTR)a->out_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) {
+    if ((!io->out_device ||
+         waveOutOpen(&a->out, io->out_device - 1, &f, (DWORD_PTR)a->out_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) &&
+        waveOutOpen(&a->out, WAVE_MAPPER, &f, (DWORD_PTR)a->out_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) {
         a->out = NULL;
         audio_stop();
         return 0;
@@ -136,4 +141,24 @@ void audio_stop(void)
         CloseHandle(a->in_event);
         a->stop = a->out_event = a->in_event = NULL;
     }
+}
+
+int audio_devices(int input, wchar_t (*names)[AUDIO_NAME], int max)
+{
+    UINT n = input ? waveInGetNumDevs() : waveOutGetNumDevs();
+    int k = 0;
+
+    for (UINT i = 0; i < n && k < max; i++, k++) {
+        names[k][0] = 0;
+        if (input) {
+            WAVEINCAPSW caps;
+            if (waveInGetDevCapsW(i, &caps, sizeof caps) == MMSYSERR_NOERROR)
+                lstrcpynW(names[k], caps.szPname, AUDIO_NAME);
+        } else {
+            WAVEOUTCAPSW caps;
+            if (waveOutGetDevCapsW(i, &caps, sizeof caps) == MMSYSERR_NOERROR)
+                lstrcpynW(names[k], caps.szPname, AUDIO_NAME);
+        }
+    }
+    return k;
 }

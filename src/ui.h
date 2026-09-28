@@ -147,6 +147,20 @@ void app_voice_deafen(int deafened);
 void app_voice_mute(int muted);
 /* Mutes and deafens (deafened also mutes), and tells the others. */
 void app_voice_set(int muted, int deafened);
+/* This computer's voice settings. */
+typedef struct {
+    int in_device, out_device; /* 0 for the Windows default, else a device index + 1 */
+    int in_volume, out_volume; /* percent, 0 to 200 */
+    int sensitivity;           /* the level in dBFS that opens the microphone in voice activity mode */
+    int push_to_talk, ptt_key; /* push to talk instead, on a virtual key */
+} voice_prefs_t;
+void app_voice_prefs(const voice_prefs_t *p);
+/* The microphone's level in dBFS while it is open, else -100. */
+int app_voice_mic_level(void);
+/* Starts or stops hearing yourself (not during a call); returns whether the test runs. */
+int app_voice_mic_test(int on);
+/* Someone's volume in calls, in percent (0 to 200; 0 mutes them for you). */
+void app_voice_user_volume(const char *user_id, int percent);
 /* Our status: "online", "idle", "dnd" or "invisible". */
 /* This session's presence: status and custom status text (NULL or empty for none). */
 void app_set_status(const char *status, const char *custom);
