@@ -283,6 +283,8 @@ typedef struct {
     int npick, pick_scroll, pick_hover, pick_content;
     int picker_tab;            /* TAB_EMOJI, TAB_GIFS or TAB_STICKERS */
     sb_t gif_json;             /* last GIF answer */
+    char qs_forward[24];       /* the switcher picks where to forward this message, when set */
+    char qs_forward_from[24];
     sb_t cmd_index;            /* slash commands of cmd_key's server or DM */
     char cmd_key[24];
     int cmd_loading;
@@ -7761,7 +7763,7 @@ static void qs_rebuild(void)
             QS_ADD(QS_DM, (int)i);
     if (q[0]) {
         for (unsigned g = 0; g < m->nguilds; g++) {
-            if (ci_contains(model_str(m, m->guilds[g].name), q))
+            if (!g_ui.qs_forward[0] && ci_contains(model_str(m, m->guilds[g].name), q))
                 QS_ADD(QS_GUILD, (int)g);
             for (unsigned c = m->guilds[g].first; c < m->guilds[g].first + m->guilds[g].count; c++)
                 if (m->channels[c].type != CH_CATEGORY && !is_voice_type(m->channels[c].type) &&
@@ -7780,6 +7782,7 @@ static void qs_close(void)
         return;
     g_ui.qs = NULL;
     g_ui.qs_edit = NULL;
+    g_ui.qs_forward[0] = 0;
     DestroyWindow(w);
     SetFocus(g_ui.composer);
     redraw();
@@ -7789,6 +7792,15 @@ static void qs_go(int i)
 {
     int kind = g_ui.qs_kind[i], index = g_ui.qs_index[i];
 
+    if (g_ui.qs_forward[0] && kind != QS_GUILD) {
+        char id[24], from[24];
+        int c = model_find_channel(g_ui.model, g_ui.qs_forward_from), g = c >= 0 ? model_channel_guild(g_ui.model, (unsigned)c) : -1;
+        lstrcpynA(id, g_ui.qs_forward, sizeof id);
+        lstrcpynA(from, g_ui.qs_forward_from, sizeof from);
+        app_forward(chan(index)->id, from, g >= 0 ? g_ui.model->guilds[g].id : NULL, id);
+        qs_close();
+        return;
+    }
     qs_close();
     if (kind == QS_GUILD)
         select_guild(index);
@@ -7809,7 +7821,8 @@ static void qs_paint(void)
     r_fill(0, 0, w, h, 0xFF000000u);
     r_round(0, 0, w, h, S(10), 0xFF151515);
     r_round_outline(0, 0, w, h, S(10), 1, 0xFF2A2A2A);
-    text(g_ui.f_h, C_INK, rect(S(20), S(12), w - S(40), S(24)), "Where would you like to go?", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_h, C_INK, rect(S(20), S(12), w - S(40), S(24)), g_ui.qs_forward[0] ? "Forward To" : "Where would you like to go?",
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     r_round(S(20), S(44), w - S(40), S(40), S(6), 0xFF0B0B0B);
     if (!g_ui.nqs)
         text(g_ui.f_body, C_MUTED, rect(0, y, w, S(QS_ROW)), "No results", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -7931,6 +7944,19 @@ static LRESULT CALLBACK qs_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     }
     return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* The switcher, picking where message `id` of the open channel goes. */
+static void forward_open(const char *id)
+{
+    qs_close();
+    qs_open();
+    if (!g_ui.qs)
+        return;
+    lstrcpynA(g_ui.qs_forward, id, sizeof g_ui.qs_forward);
+    lstrcpynA(g_ui.qs_forward_from, g_ui.msgs_channel, sizeof g_ui.qs_forward_from);
+    SendMessageW(g_ui.qs_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search for a channel or a conversation");
+    InvalidateRect(g_ui.qs, NULL, FALSE);
 }
 
 static void qs_open(void)
@@ -8347,7 +8373,7 @@ static LRESULT CALLBACK settings_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM l
 enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
-    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES,
+    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD,
     CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
     CM_NOTIFY = 120,     /* + NOTIFY_* */
 };
@@ -8452,6 +8478,7 @@ static void message_menu(int i)
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (m->content.len)
         AppendMenuW(menu, MF_STRING, CM_COPY_TEXT, L"Copy Text");
+    AppendMenuW(menu, MF_STRING, CM_FORWARD, L"Forward");
     AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Message Link");
     if (developer_mode())
         AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
@@ -8481,6 +8508,9 @@ static void message_menu(int i)
         break;
     case CM_COPY_LINK:
         copy_link(open_guild_id(), g_ui.msgs_channel, m->id);
+        break;
+    case CM_FORWARD:
+        forward_open(m->id);
         break;
     case CM_COPY_ID:
         copy_text(m->id);
