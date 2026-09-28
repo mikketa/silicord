@@ -27,7 +27,8 @@ static const char k_ready[] =
     "{\"id\":\"11\",\"last_message_id\":\"400\",\"mention_count\":2},"
     "{\"id\":\"14\",\"last_message_id\":\"300\"},"
     "{\"id\":\"21\",\"last_message_id\":\"850\",\"mention_count\":1}]},"
-    "\"user_settings\":{\"guild_folders\":[{\"id\":42,\"name\":\"Pals\",\"color\":255,\"guild_ids\":[\"1\"]}]},"
+    "\"user_settings\":{\"status\":\"dnd\",\"developer_mode\":true,"
+    "\"custom_status\":{\"text\":\"busy\",\"emoji_name\":\"ð¥\"},\"guild_folders\":[{\"id\":42,\"name\":\"Pals\",\"color\":255,\"guild_ids\":[\"1\"]}]},"
     "\"user_guild_settings\":{\"entries\":[{\"guild_id\":\"1\",\"muted\":false,"
     "\"channel_overrides\":[{\"channel_id\":\"14\",\"muted\":true}]}]}"
     "}";
@@ -51,6 +52,18 @@ static int index_in_guild(const model_t *m, const char *id)
 {
     int i = model_find_channel(m, id);
     return i < 0 ? -1 : i - (int)m->guilds[0].first;
+}
+
+static void test_user_settings(const model_t *m)
+{
+    model_t *a;
+
+    check(lstrcmpA(m->status, "dnd") == 0 && m->developer_mode, "status and developer mode from READY");
+    check(lstrcmpA(model_str(m, m->custom_status), "ð¥ busy") == 0, "custom status with its emoji");
+    a = apply(m, "USER_SETTINGS_UPDATE", "{\"status\":\"idle\",\"custom_status\":null}");
+    check(a && lstrcmpA(a->status, "idle") == 0 && !a->custom_status && a->developer_mode,
+          "settings updates change only what they carry");
+    model_free(a);
 }
 
 static void test_notify(const model_t *m)
@@ -291,6 +304,7 @@ void entry(void)
     test_roles(m);
     test_emojis(m);
     test_notify(m);
+    test_user_settings(m);
     test_threads(m);
     model_free(m);
     finish();

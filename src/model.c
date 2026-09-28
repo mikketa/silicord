@@ -1048,6 +1048,37 @@ int model_notify(const model_t *m, unsigned i)
 }
 
 
+/* ---- User settings ---- */
+
+/* Status, custom status and developer mode from user_settings (or a USER_SETTINGS_UPDATE). */
+static void read_user_settings(model_t *m, json_t s)
+{
+    json_t v, custom;
+
+    if (json_get(s, "status", &v) && json_type(v) == JSON_STRING)
+        json_raw(v, m->status, sizeof m->status);
+    if (json_get(s, "developer_mode", &v))
+        m->developer_mode = is_true(v);
+    if (json_get(s, "custom_status", &custom)) {
+        sb_t text = {0};
+        m->custom_status = 0;
+        if (json_type(custom) == JSON_OBJECT) {
+            if (json_get(custom, "emoji_name", &v) && json_type(v) == JSON_STRING && json_str(v, &text))
+                sb_add(&text, " ");
+            if (json_get(custom, "text", &v) && json_type(v) == JSON_STRING)
+                json_str(v, &text);
+            while (text.len && text.data[text.len - 1] == ' ')
+                text.data[--text.len] = 0;
+            if (text.len) {
+                m->custom_status = (unsigned)m->strings.len;
+                sb_addn(&m->strings, text.data, text.len + 1);
+            }
+        }
+        sb_free(&text);
+    }
+}
+
+
 /* ---- READY ---- */
 
 model_t *model_from_ready(json_t d)
@@ -1102,6 +1133,8 @@ model_t *model_from_ready(json_t d)
     add_dms(m, &cap, d);
     apply_read_state(m, d);
     apply_mutes(m, d);
+    if (json_get(d, "user_settings", &v) && json_type(v) == JSON_OBJECT)
+        read_user_settings(m, v);
     return m;
 }
 
@@ -1127,6 +1160,9 @@ static model_t *clone_empty(const model_t *m, unsigned extra_guilds)
     copy_id(n->user_avatar, m->user_avatar, sizeof n->user_avatar);
     n->user_name = m->user_name;
     n->premium = m->premium;
+    copy_id(n->status, m->status, sizeof n->status);
+    n->custom_status = m->custom_status;
+    n->developer_mode = m->developer_mode;
     n->guilds = mem_alloc((m->nguilds + extra_guilds + 1) * sizeof *n->guilds);
     n->folders = mem_alloc((m->nfolders + 1) * sizeof *n->folders);
     for (unsigned f = 0; f < m->nfolders; f++)
@@ -1432,6 +1468,18 @@ static model_t *apply_settings(const model_t *m, json_t d)
     return n;
 }
 
+static model_t *apply_user_settings(const model_t *m, json_t d)
+{
+    unsigned cap = 0;
+    model_t *n = clone_empty(m, 0);
+
+    for (unsigned g = 0; g < m->nguilds; g++)
+        copy_guild(n, &cap, m, g, NULL);
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    read_user_settings(n, d);
+    return n;
+}
+
 model_t *model_apply(const model_t *m, const char *event, json_t d)
 {
     if (str_eq(event, "THREAD_CREATE") || str_eq(event, "THREAD_UPDATE")) {
@@ -1448,6 +1496,8 @@ model_t *model_apply(const model_t *m, const char *event, json_t d)
     }
     if (str_eq(event, "THREAD_DELETE"))
         return apply_channel(m, d, 1);
+    if (str_eq(event, "USER_SETTINGS_UPDATE"))
+        return apply_user_settings(m, d);
     if (str_eq(event, "USER_GUILD_SETTINGS_UPDATE"))
         return apply_settings(m, d);
     if (str_eq(event, "GUILD_EMOJIS_UPDATE"))

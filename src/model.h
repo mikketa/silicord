@@ -87,6 +87,10 @@ typedef struct {
     char user_avatar[40];
     unsigned user_name;
     int premium;        /* Nitro tier, 0 without: stickers of other servers need it */
+    /* User settings, synced with the other clients. */
+    char status[16];    /* "online", "idle", "dnd" or "invisible" */
+    unsigned custom_status; /* its text, emoji first; 0 if none */
+    int developer_mode; /* "Copy ID" in the menus */
     folder_t *folders;
     unsigned nfolders;
 } model_t;
@@ -98,7 +102,7 @@ void model_free(model_t *m);
 /*
  * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, THREAD_CREATE/UPDATE/DELETE
  * for threads we are in, GUILD_CREATE/UPDATE/DELETE,
- * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_EMOJIS_UPDATE, GUILD_MEMBER_UPDATE for
+ * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_EMOJIS_UPDATE, USER_SETTINGS_UPDATE, GUILD_MEMBER_UPDATE for
  * us). Returns a new model, or NULL when nothing changed.
  * `m` is left untouched; read state carries over by channel id.
  */
