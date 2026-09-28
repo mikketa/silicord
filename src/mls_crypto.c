@@ -9,23 +9,32 @@
 #include "tls.h"
 
 /* opaque label<V> = "MLS 1.0 " + label */
-static void add_label(sb_t *out, const char *label)
+static void add_label_n(sb_t *out, const void *label, size_t n)
 {
-    size_t n = sc_strlen(label);
-
     tls_varint(out, 8 + n);
     sb_addn(out, "MLS 1.0 ", 8);
     sb_addn(out, label, n);
 }
 
+static void add_label(sb_t *out, const char *label)
+{
+    add_label_n(out, label, sc_strlen(label));
+}
+
 int mls_expand_with_label(const unsigned char *secret, size_t sn, const char *label, const void *ctx, size_t cn,
                           unsigned char *out, size_t len)
+{
+    return mls_expand_with_label_n(secret, sn, label, sc_strlen(label), ctx, cn, out, len);
+}
+
+int mls_expand_with_label_n(const unsigned char *secret, size_t sn, const void *label, size_t ln, const void *ctx,
+                            size_t cn, unsigned char *out, size_t len)
 {
     sb_t info = {0};
     int ok;
 
     tls_u16(&info, (unsigned)len);
-    add_label(&info, label);
+    add_label_n(&info, label, ln);
     tls_vec(&info, ctx, cn);
     ok = hkdf256_expand_n(secret, sn, info.data, info.len, out, len);
     sb_free(&info);

@@ -10,6 +10,9 @@
 /* ExpandWithLabel(secret, label, context, len); `secret` of any size (DAVE's ratchets start from 16 bytes). */
 int mls_expand_with_label(const unsigned char *secret, size_t sn, const char *label, const void *ctx, size_t cn,
                           unsigned char *out, size_t len);
+/* The same with a label of any bytes (the exporter's labels are arbitrary). */
+int mls_expand_with_label_n(const unsigned char *secret, size_t sn, const void *label, size_t ln, const void *ctx,
+                            size_t cn, unsigned char *out, size_t len);
 /* DeriveSecret: ExpandWithLabel(secret, label, "", 32). */
 int mls_derive_secret(const unsigned char secret[32], const char *label, unsigned char out[32]);
 /* DeriveTreeSecret: the context is the generation as a uint32. */
