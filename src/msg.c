@@ -796,6 +796,7 @@ int msg_parse(json_t obj, msg_t *out)
     }
     out->edited = json_get(obj, "edited_timestamp", &v) && json_type(v) == JSON_STRING;
     out->mention_everyone = json_get(obj, "mention_everyone", &v) && json_type(v) == JSON_TRUE;
+    out->pinned = json_get(obj, "pinned", &v) && json_type(v) == JSON_TRUE;
     (void)add_line;
 
     if (type == TYPE_RECIPIENT_ADD || type == TYPE_RECIPIENT_REMOVE) {

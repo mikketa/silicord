@@ -87,6 +87,7 @@ typedef struct {
     int system;      /* join notices and other non-user messages */
     int deleted;
     int edited;
+    int pinned;
     msg_file_t *files;
     int nfiles;
     msg_embed_t *embeds;
