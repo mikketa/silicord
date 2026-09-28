@@ -15,6 +15,7 @@
 #include "voice.h"
 #include "audio.h"
 #include "mixer.h"
+#include "opus.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -365,11 +366,52 @@ int app_voice_speaking(const char *user_id)
     return on;
 }
 
+/* What we say: the microphone, gated by a simple level detector, encoded and sent. */
+#define MIC_THRESHOLD 0.004f /* RMS of about -48 dBFS */
+#define MIC_HANG 15          /* keep sending 300 ms after the last loud block */
+
+static opus_encoder_t g_encoder;
+static volatile LONG g_muted, g_deafened;
+static int g_mic_hang;
+
+static void audio_capture(void *ctx, const float *in)
+{
+    unsigned char packet[1276];
+    float sum = 0;
+    int n;
+
+    (void)ctx;
+    if (g_muted || g_deafened) {
+        if (g_mic_hang) {
+            g_mic_hang = 0;
+            voice_quiet();
+        }
+        return;
+    }
+    for (int i = 0; i < 960; i++)
+        sum += in[i] * in[i];
+    if (sum / 960 > MIC_THRESHOLD * MIC_THRESHOLD)
+        g_mic_hang = MIC_HANG;
+    if (!g_mic_hang)
+        return;
+    n = opus_encode(&g_encoder, in, packet);
+    if (n)
+        voice_send(packet, (size_t)n);
+    if (--g_mic_hang == 0)
+        voice_quiet();
+}
+
 void app_voice_deafen(int deafened)
 {
+    InterlockedExchange(&g_deafened, deafened);
     EnterCriticalSection(&g_mix_lock);
     g_mixer.deafened = deafened;
     LeaveCriticalSection(&g_mix_lock);
+}
+
+void app_voice_mute(int muted)
+{
+    InterlockedExchange(&g_muted, muted);
 }
 
 static void voice_state_changed(void *ctx, int state, const char *text)
@@ -380,6 +422,9 @@ static void voice_state_changed(void *ctx, int state, const char *text)
     if (state == VOICE_CONNECTED) {
         audio_io_t io = {0};
         io.play = audio_play;
+        io.capture = audio_capture;
+        opus_encoder_init(&g_encoder);
+        g_mic_hang = 0;
         audio_start(&io);
     } else if (state != VOICE_CONNECTING) {
         audio_stop();
@@ -420,7 +465,8 @@ static void send_voice_state(const char *guild, const char *channel)
     } else {
         sb_add(&m, "null");
     }
-    sb_add(&m, ",\"self_mute\":false,\"self_deaf\":false}}");
+    sb_add(&m, g_muted || g_deafened ? ",\"self_mute\":true" : ",\"self_mute\":false");
+    sb_add(&m, g_deafened ? ",\"self_deaf\":true}}" : ",\"self_deaf\":false}}");
     gw_send(&m);
     sb_free(&m);
 }
@@ -454,6 +500,28 @@ void app_voice_join(const char *guild_id, const char *channel_id)
     if (old[0] && lstrcmpA(old, guild_id) != 0)
         send_voice_state(old, NULL);
     send_voice_state(guild_id, channel_id);
+}
+
+/* Tells the others our new mute and deafen state. */
+static void voice_state_update(void)
+{
+    char guild[24] = "", channel[24] = "";
+
+    EnterCriticalSection(&g_voice_lock);
+    if (g_vc.active) {
+        lstrcpynA(guild, g_vc.guild, sizeof guild);
+        lstrcpynA(channel, g_vc.channel, sizeof channel);
+    }
+    LeaveCriticalSection(&g_voice_lock);
+    if (guild[0])
+        send_voice_state(guild, channel);
+}
+
+void app_voice_set(int muted, int deafened)
+{
+    app_voice_mute(muted);
+    app_voice_deafen(deafened);
+    voice_state_update();
 }
 
 void app_voice_leave(void)

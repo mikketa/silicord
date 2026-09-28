@@ -70,7 +70,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF };
 
 typedef struct {
     char key[96];
@@ -227,6 +227,7 @@ typedef struct {
     char voice_channel[24];
     char voice_name[100];      /* its channel name */
     unsigned voice_speaking;   /* who spoke at the last check, one bit per member of our call */
+    int voice_muted, voice_deafened;
     sb_t voice_status;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
@@ -1195,6 +1196,10 @@ static void hit_test(int x, int y, int *kind, int *index)
             int vy = rc.bottom - S(PANEL_H) - voice_bar_h() + (voice_bar_h() - S(32)) / 2;
             if (y >= vy && y < vy + S(32) && x >= right - S(32) && x < right)
                 *kind = HIT_VOICE_LEAVE;
+            else if (y >= vy && y < vy + S(32) && x >= right - S(68) && x < right - S(36))
+                *kind = HIT_VOICE_DEAF;
+            else if (y >= vy && y < vy + S(32) && x >= right - S(104) && x < right - S(72))
+                *kind = HIT_VOICE_MUTE;
             return;
         }
         if (y >= rc.bottom - S(PANEL_H)) {
@@ -1615,7 +1620,7 @@ static void paint_voice_bar(RECT rc)
     cy = y + (h - S(32)) / 2;
     fill(x0, y, S(SIDE_W), h, C_PANEL);
     fill(x0 + S(8), y, S(SIDE_W) - S(16), 1, C_LINE);
-    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(52), S(20)),
+    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(124), S(20)),
          g_ui.voice_state == VOICE_CONNECTED ? "Voice Connected" : str_or_empty(&g_ui.voice_status),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     /* The channel, and the end-to-end encryption code others can compare. */
@@ -1626,8 +1631,22 @@ static void paint_voice_bar(RECT rc)
         lstrcatA(line, code);
         lstrcatA(line, "\xE2\x80\xA6");
     }
-    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(52), S(18)), line,
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(124), S(18)), line,
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    /* Mute and deafen: the icon shows the state, red when on. */
+    {
+        struct {
+            int hit, on, dx;
+            const wchar_t *icon;
+        } b[2] = {{HIT_VOICE_MUTE, g_ui.voice_muted || g_ui.voice_deafened, 104, g_ui.voice_muted || g_ui.voice_deafened ? L"\xEC54" : L"\xE720"},
+                  {HIT_VOICE_DEAF, g_ui.voice_deafened, 68, g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6"}};
+        for (int k = 0; k < 2; k++) {
+            if (g_ui.hover_kind == b[k].hit)
+                r_round(right - S(b[k].dx), cy, S(32), S(32), S(6), ARGB(C_SELECT));
+            r_text(g_ui.f_icon, b[k].on ? C_BADGE : ARGB(g_ui.hover_kind == b[k].hit ? C_INK : C_MUTED),
+                   right - S(b[k].dx), cy, S(32), S(32), b[k].icon, -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
+        }
+    }
     if (g_ui.hover_kind == HIT_VOICE_LEAVE)
         r_round(right - S(32), cy, S(32), S(32), S(6), ARGB(C_SELECT));
     text_w(g_ui.f_icon, g_ui.hover_kind == HIT_VOICE_LEAVE ? C_INK : C_MUTED, rect(right - S(32), cy, S(32), S(32)),
@@ -4139,6 +4158,18 @@ static void on_click(int kind, int index)
         break;
     case HIT_SELF:
         open_self();
+        break;
+    case HIT_VOICE_MUTE:
+        g_ui.voice_muted = !(g_ui.voice_muted || g_ui.voice_deafened);
+        if (!g_ui.voice_muted)
+            g_ui.voice_deafened = 0;
+        app_voice_set(g_ui.voice_muted, g_ui.voice_deafened);
+        redraw();
+        break;
+    case HIT_VOICE_DEAF:
+        g_ui.voice_deafened = !g_ui.voice_deafened;
+        app_voice_set(g_ui.voice_muted, g_ui.voice_deafened);
+        redraw();
         break;
     case HIT_VOICE_LEAVE:
         KillTimer(g_ui.wnd, TIMER_VOICE);

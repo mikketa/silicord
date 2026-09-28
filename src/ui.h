@@ -144,6 +144,9 @@ void app_voice_leave(void);
 /* Whether a member of our voice call is talking right now (any thread). */
 int app_voice_speaking(const char *user_id);
 void app_voice_deafen(int deafened);
+void app_voice_mute(int muted);
+/* Mutes and deafens (deafened also mutes), and tells the others. */
+void app_voice_set(int muted, int deafened);
 /* Our status: "online", "idle", "dnd" or "invisible". */
 /* This session's presence: status and custom status text (NULL or empty for none). */
 void app_set_status(const char *status, const char *custom);
