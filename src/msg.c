@@ -802,12 +802,12 @@ int msg_parse(json_t obj, msg_t *out)
         /* "added Bob to the group.", "removed Bob from the group.", or "left the group." */
         json_iter_t mit;
         json_t who, id;
-        sb_t name = {0};
+        sb_t whom = {0};
         char aid[24] = "";
         int self = 0;
         json_iter(mentions, &mit);
         if (json_next(&mit, NULL, &who)) {
-            user_name(who, &name);
+            user_name(who, &whom);
             if (json_get(who, "id", &id))
                 json_raw(id, aid, sizeof aid);
             self = aid[0] && str_same(aid, out->author_id);
@@ -818,23 +818,20 @@ int msg_parse(json_t obj, msg_t *out)
             sb_add(&out->text, "left the group.");
         } else {
             sb_add(&out->text, type == TYPE_RECIPIENT_ADD ? "added " : "removed ");
-            sb_addn(&out->text, name.data ? name.data : "someone", name.data ? name.len : 7);
+            sb_addn(&out->text, whom.data ? whom.data : "someone", whom.data ? whom.len : 7);
             sb_add(&out->text, type == TYPE_RECIPIENT_ADD ? " to the group." : " from the group.");
         }
-        sb_free(&name);
+        sb_free(&whom);
     } else if (type == TYPE_CALL) {
         out->system = 1;
         sb_clear(&out->text);
         sb_add(&out->text, "started a call.");
     } else if (type == TYPE_CHANNEL_NAME || type == TYPE_THREAD_CREATED) {
         /* The content is the new name. */
-        sb_t name = {0};
-        sb_addn(&name, out->content.data ? out->content.data : "", out->content.len);
         out->system = 1;
         sb_clear(&out->text);
         sb_add(&out->text, type == TYPE_CHANNEL_NAME ? "changed the channel name: " : "started a thread: ");
-        sb_addn(&out->text, name.data ? name.data : "", name.len);
-        sb_free(&name);
+        sb_addn(&out->text, out->content.data ? out->content.data : "", out->content.len);
     } else if (type == TYPE_CHANNEL_ICON) {
         out->system = 1;
         sb_clear(&out->text);

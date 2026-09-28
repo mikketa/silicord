@@ -393,7 +393,7 @@ static void parse_blocks(md_doc_t *doc, const char *s, size_t n, int quoted)
 
     while (i < n) {
         size_t end = i, from;
-        int kind = MD_PARA, level, number;
+        int kind = MD_PARA, level = 0, number = -1;
 
         while (end < n && s[end] != '\n')
             end++;
