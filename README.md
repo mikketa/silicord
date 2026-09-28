@@ -85,7 +85,7 @@ src/     C sources (Win32, no CRT)
 asm/     x64 assembly routines (NASM, Win64 ABI)
 tests/   unit tests (same no-CRT setup); tests/host: Linux build with sanitizers and a fuzzer
 assets/  logo, icon and banners
-tools/   make_icon.py: assets/silicord.ico from assets/logo.svg
+tools/   generators: the icon (make_icon.py), Discord's emoji names (make_emoji_aliases.py)
 docs/    roadmap and architecture
 ```
 

@@ -40,6 +40,9 @@ fix(http): retry once on connection reset
 - Anything fed by Discord (JSON, markdown, images) must survive any input: add a unit test, and run the host tests and a fuzzer run (`tests/host`, see the README) before sending a change to the core.
 - Formatting into fixed buffers (`wsprintfA`, `lstrcpynA`) needs a precision or a size that fits the worst case: names are up to 32 or 100 characters of up to 4 bytes each.
 
-## Assets
+## Generated files
 
-`assets/silicord.ico` is generated: after changing `assets/logo.svg`, run `python tools/make_icon.py` and commit both.
+Two files are generated; commit them with their source:
+
+- `assets/silicord.ico`, from `assets/logo.svg`: `python tools/make_icon.py`
+- `src/emoji_alias.c`, Discord's emoji names that `src/emoji_data.c` lacks: `python tools/make_emoji_aliases.py` (downloads a pinned, checksummed package)
