@@ -8857,7 +8857,7 @@ static void guild_menu(int g)
         copy_text(id);
         break;
     case CM_LEAVE: {
-        wchar_t text[200];
+        wchar_t text[256]; /* 99 characters of text and up to 120 of the name */
         wchar_t *name = utf8_to_wide(model_str(g_ui.model, gd->name), lstrlenA(model_str(g_ui.model, gd->name)));
         wsprintfW(text, L"Are you sure you want to leave %.120s? You won't be able to rejoin this server unless you are re-invited.", name);
         mem_free(name);
