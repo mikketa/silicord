@@ -33,6 +33,22 @@ typedef struct {
 } msg_embed_t;
 
 typedef struct {
+    int id;
+    sb_t text;           /* with its emoji, if any, in front */
+    int count;
+    int me;
+} msg_answer_t;
+
+typedef struct {
+    sb_t question;
+    msg_answer_t *answers;
+    int nanswers;
+    int multi;           /* several answers allowed */
+    int final;
+    long long expiry_ms; /* Unix ms, 0 if none */
+} msg_poll_t;
+
+typedef struct {
     char emoji_id[24];   /* custom emoji, empty for a unicode one */
     sb_t emoji;          /* the unicode emoji, or the custom emoji's name */
     int count;
@@ -59,6 +75,7 @@ typedef struct {
     int nembeds;
     msg_reaction_t *reactions;
     int nreactions;
+    msg_poll_t *poll;    /* NULL if the message has none */
     char sticker_id[24];
     int sticker_format;  /* 1 png, 2 apng, 3 lottie, 4 gif */
     sb_t sticker_name;
@@ -75,7 +92,8 @@ typedef struct {
     int mention_everyone;
 } msg_t;
 
-enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION, BATCH_PINS, BATCH_SEARCH };
+enum { BATCH_HISTORY, BATCH_OLDER, BATCH_NEW, BATCH_UPDATE, BATCH_DELETE, BATCH_REACTION, BATCH_PINS, BATCH_SEARCH,
+       BATCH_POLL_VOTE };
 
 typedef struct {
     int kind;
@@ -98,6 +116,7 @@ void msg_free(msg_t *m);
 /* Frees files, embeds, reactions and the sticker, leaving author, text and reply. */
 void msg_free_extras(msg_t *m);
 void msg_embed_free(msg_embed_t *e);
+void msg_poll_free(msg_poll_t *p);
 
 /* The REST API returns newest first; the batch is reversed to oldest first. */
 msg_batch_t *msg_batch_from_array(json_t arr, int kind, const char *channel_id, int limit);
@@ -107,6 +126,8 @@ void msg_batch_free(msg_batch_t *b);
 msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me);
 /* A search response: {total_results, messages: [[hit, context...], ...]}; keeps the hits, best first. */
 msg_batch_t *msg_batch_search(json_t root);
+/* MESSAGE_POLL_VOTE_ADD / _REMOVE: msgs[0].id is the message, `total` the answer id. */
+msg_batch_t *msg_batch_poll_vote(json_t d, int delta, const char *me);
 /* The emoji of a reaction as the REST API wants it in a URL: "%F0%9F%91%8D" or "name:id". */
 void msg_reaction_path(const msg_reaction_t *r, sb_t *out);
 

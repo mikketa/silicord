@@ -146,6 +146,27 @@ static void test_reaction_event(void)
     msg_batch_free(b);
 }
 
+static void test_poll(void)
+{
+    msg_t m;
+
+    check(parse("{\"id\":\"1\",\"content\":\"\",\"poll\":{\"question\":{\"text\":\"Best?\"},\"allow_multiselect\":false,"
+                "\"expiry\":\"2026-09-29T12:00:00.000000+00:00\",\"answers\":["
+                "{\"answer_id\":1,\"poll_media\":{\"text\":\"Cats\",\"emoji\":{\"id\":null,\"name\":\"\xF0\x9F\x90\xB1\"}}},"
+                "{\"answer_id\":2,\"poll_media\":{\"text\":\"Dogs\"}}],"
+                "\"results\":{\"is_finalized\":false,\"answer_counts\":[{\"id\":1,\"count\":3,\"me_voted\":true},"
+                "{\"id\":2,\"count\":1,\"me_voted\":false}]}}}", &m) &&
+              m.poll && !m.system,
+          "poll parses");
+    check(m.poll && str_eq(&m.poll->question, "Best?") && m.poll->nanswers == 2 && !m.poll->multi && !m.poll->final,
+          "poll question and answers");
+    check(m.poll && m.poll->nanswers == 2 && str_eq(&m.poll->answers[0].text, "\xF0\x9F\x90\xB1 Cats") &&
+              m.poll->answers[0].count == 3 && m.poll->answers[0].me && m.poll->answers[1].count == 1,
+          "poll results and our vote");
+    check(m.poll && m.poll->expiry_ms == 1790683200000ll, "poll expiry");
+    msg_free(&m);
+}
+
 static void test_search(void)
 {
     static const char res[] = "{\"total_results\":7,\"messages\":["
@@ -186,6 +207,7 @@ void entry(void)
     test_author_and_reply();
     test_parts();
     test_reaction_event();
+    test_poll();
     test_search();
     test_batch();
     finish();

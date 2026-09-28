@@ -307,6 +307,98 @@ static void parse_embeds(json_t list, msg_t *out)
     }
 }
 
+/* Days from 1970-01-01 of a civil date (Howard Hinnant's algorithm). */
+static long long days_from_civil(long long y, int m, int d)
+{
+    long long era;
+    int yoe, doy, doe;
+
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = (int)(y - era * 400);
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* "2026-09-28T12:34:56.789+00:00" to Unix ms (UTC offsets other than +00:00 are ignored). */
+static long long iso_ms(const char *s)
+{
+    int f[6] = {0};
+    int k = 0;
+
+    for (const char *p = s; *p && k < 6; p++) {
+        if (*p >= '0' && *p <= '9') {
+            f[k] = f[k] * 10 + (*p - '0');
+        } else if (*p == '.' || *p == '+' || *p == 'Z') {
+            break;
+        } else {
+            k++;
+        }
+    }
+    return ((days_from_civil(f[0], f[1], f[2]) * 24 + f[3]) * 60 + f[4]) * 60000ll + f[5] * 1000ll;
+}
+
+static void parse_poll(json_t poll, msg_t *out)
+{
+    msg_poll_t *p = mem_alloc(sizeof *p);
+    json_t v, answers, a, media, emoji, results, counts, c;
+    json_iter_t it;
+
+    if (json_get(poll, "question", &v))
+        get_sb(v, "text", &p->question);
+    p->multi = json_get(poll, "allow_multiselect", &v) && json_type(v) == JSON_TRUE;
+    if (json_get(poll, "expiry", &v) && json_type(v) == JSON_STRING) {
+        sb_t iso = {0};
+        json_str(v, &iso);
+        p->expiry_ms = iso_ms(iso.data);
+        sb_free(&iso);
+    }
+    if (json_get(poll, "answers", &answers)) {
+        p->answers = mem_alloc((json_count(answers) + 1) * sizeof *p->answers);
+        json_iter(answers, &it);
+        while (json_next(&it, NULL, &a)) {
+            msg_answer_t *ans = &p->answers[p->nanswers];
+            ans->id = get_num(a, "answer_id");
+            if (json_get(a, "poll_media", &media)) {
+                if (json_get(media, "emoji", &emoji) && json_get(emoji, "name", &v) && json_type(v) == JSON_STRING &&
+                    !(json_get(emoji, "id", &c) && json_type(c) == JSON_STRING)) {
+                    json_str(v, &ans->text);
+                    sb_add(&ans->text, " ");
+                }
+                get_sb(media, "text", &ans->text);
+            }
+            p->nanswers++;
+        }
+    }
+    if (json_get(poll, "results", &results)) {
+        p->final = json_get(results, "is_finalized", &v) && json_type(v) == JSON_TRUE;
+        if (json_get(results, "answer_counts", &counts)) {
+            json_iter(counts, &it);
+            while (json_next(&it, NULL, &c)) {
+                int id = get_num(c, "id");
+                for (int k = 0; k < p->nanswers; k++)
+                    if (p->answers[k].id == id) {
+                        p->answers[k].count = get_num(c, "count");
+                        p->answers[k].me = json_get(c, "me_voted", &v) && json_type(v) == JSON_TRUE;
+                    }
+            }
+        }
+    }
+    out->poll = p;
+}
+
+void msg_poll_free(msg_poll_t *p)
+{
+    if (!p)
+        return;
+    sb_free(&p->question);
+    for (int i = 0; i < p->nanswers; i++)
+        sb_free(&p->answers[i].text);
+    mem_free(p->answers);
+    mem_free(p);
+}
+
 static void parse_reactions(json_t list, msg_t *out)
 {
     json_iter_t it;
@@ -387,6 +479,8 @@ int msg_parse(json_t obj, msg_t *out)
         parse_embeds(list, out);
     if (json_get(obj, "reactions", &list))
         parse_reactions(list, out);
+    if (json_get(obj, "poll", &list) && json_type(list) == JSON_OBJECT)
+        parse_poll(list, out);
     if (json_get(obj, "sticker_items", &list)) {
         json_iter(list, &it);
         if (json_next(&it, NULL, &item) && json_get(item, "id", &v)) {
@@ -414,7 +508,7 @@ int msg_parse(json_t obj, msg_t *out)
         sb_add(&out->text, "pinned a message.");
     } else if (type != TYPE_DEFAULT && type != TYPE_REPLY && type != TYPE_SLASH_COMMAND &&
                type != TYPE_CONTEXT_COMMAND && !out->text.len && !out->nfiles && !out->nembeds &&
-               !out->sticker_id[0]) {
+               !out->sticker_id[0] && !out->poll) {
         out->system = 1;
         sb_add(&out->text, "sent a system message.");
     }
@@ -457,6 +551,8 @@ void msg_free_extras(msg_t *m)
         sb_free(&m->reactions[i].emoji);
     mem_free(m->reactions);
     sb_free(&m->sticker_name);
+    msg_poll_free(m->poll);
+    m->poll = NULL;
     m->files = NULL;
     m->embeds = NULL;
     m->reactions = NULL;
@@ -557,6 +653,28 @@ msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me)
         json_raw(v, r->emoji_id, sizeof r->emoji_id);
     get_sb(emoji, "name", &r->emoji);
     m->nreactions = 1;
+    b->n = 1;
+    return b;
+}
+
+msg_batch_t *msg_batch_poll_vote(json_t d, int delta, const char *me)
+{
+    msg_batch_t *b = mem_alloc(sizeof *b);
+    json_t v;
+    char user[24] = "";
+
+    b->kind = BATCH_POLL_VOTE;
+    b->delta = delta;
+    b->msgs = mem_alloc(sizeof *b->msgs);
+    if (!json_get(d, "message_id", &v))
+        return b;
+    json_raw(v, b->msgs[0].id, sizeof b->msgs[0].id);
+    if (json_get(d, "channel_id", &v))
+        json_raw(v, b->channel_id, sizeof b->channel_id);
+    if (json_get(d, "user_id", &v))
+        json_raw(v, user, sizeof user);
+    b->mine = me && me[0] && sc_strlen(user) == sc_strlen(me) && same(user, me, sc_strlen(me));
+    b->total = get_num(d, "answer_id");
     b->n = 1;
     return b;
 }
