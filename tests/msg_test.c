@@ -36,6 +36,29 @@ static void test_content(void)
     expect_text("{\"id\":\"1\",\"content\":\"look\",\"attachments\":[{\"filename\":\"a.png\"}]}", "look",
                 "attachments stay out of the text");
     expect_text("{\"id\":\"1\",\"type\":7,\"content\":\"\"}", "joined the server.", "join notice");
+    expect_text("{\"id\":\"1\",\"content\":\"`<@42>` and ```\\n<:x:5> <@42>\\n```\",\"mentions\":[{\"id\":\"42\",\"username\":\"b\"}]}",
+                "`<@42>` and ```\n<:x:5> <@42>\n```", "markup inside code stays as typed");
+    expect_text("{\"id\":\"1\",\"content\":\"\\\\<@42> \\\\\\\\<@42>\",\"mentions\":[{\"id\":\"42\",\"username\":\"b\"}]}",
+                "\\<@42> \\\\" MD_MENTION_OPEN "@b" MD_MENTION_CLOSE, "an escaped mention stays text, an escaped backslash does not");
+    expect_text("{\"id\":\"1\",\"content\":\"run </ping:123> or </config user set:456>\"}",
+                "run " MD_MENTION_OPEN "/ping" MD_MENTION_CLOSE " or " MD_MENTION_OPEN "/config user set" MD_MENTION_CLOSE,
+                "slash command mentions");
+}
+
+static void test_system(void)
+{
+    expect_text("{\"id\":\"1\",\"type\":18,\"content\":\"Plans\",\"author\":{\"id\":\"5\",\"username\":\"a\"}}",
+                "started a thread: Plans", "thread created");
+    expect_text("{\"id\":\"1\",\"type\":4,\"content\":\"lounge\"}", "changed the channel name: lounge", "channel renamed");
+    expect_text("{\"id\":\"1\",\"type\":1,\"author\":{\"id\":\"5\"},\"mentions\":[{\"id\":\"6\",\"username\":\"bob\"}]}",
+                "added bob to the group.", "group member added");
+    expect_text("{\"id\":\"1\",\"type\":2,\"author\":{\"id\":\"6\"},\"mentions\":[{\"id\":\"6\",\"username\":\"bob\"}]}",
+                "left the group.", "group member left");
+    expect_text("{\"id\":\"1\",\"type\":3,\"content\":\"\"}", "started a call.", "call");
+    expect_text("{\"id\":\"1\",\"type\":46,\"content\":\"\",\"embeds\":[{\"type\":\"poll_result\",\"fields\":["
+                "{\"name\":\"poll_question_text\",\"value\":\"Best?\"},{\"name\":\"victor_answer_text\",\"value\":\"Cats\"},"
+                "{\"name\":\"victor_answer_votes\",\"value\":\"3\"},{\"name\":\"total_votes\",\"value\":\"4\"}]}]}",
+                "'s poll Best? has closed: Cats won with 3 votes.", "poll result");
 }
 
 static void test_author_and_reply(void)
@@ -57,6 +80,18 @@ static void test_author_and_reply(void)
 
     check(parse("{\"id\":\"3\",\"content\":\"x\",\"referenced_message\":null}", &m) && m.reply.len == 0,
           "no reply when referenced_message is null");
+    msg_free(&m);
+
+    check(parse("{\"id\":\"4\",\"type\":19,\"content\":\"x\",\"referenced_message\":null,"
+                "\"message_reference\":{\"message_id\":\"1\",\"type\":0}}", &m) &&
+              str_eq(&m.reply, "Original message was deleted"),
+          "a reply to a deleted message says so");
+    msg_free(&m);
+
+    check(parse("{\"id\":\"5\",\"type\":19,\"content\":\"x\",\"referenced_message\":{\"author\":{\"username\":\"ann\"},"
+                "\"content\":\"<@42> **hi** <:pog:1>\",\"mentions\":[{\"id\":\"42\",\"username\":\"bob\"}]}}", &m) &&
+              str_eq(&m.reply, "ann: @bob hi :pog:"),
+          "the reply preview is plain text");
     msg_free(&m);
 }
 
@@ -270,6 +305,7 @@ static void test_iso(void)
 void entry(void)
 {
     test_content();
+    test_system();
     test_author_and_reply();
     test_parts();
     test_reaction_event();

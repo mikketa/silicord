@@ -8,13 +8,20 @@
 
 enum {
     TYPE_DEFAULT = 0,
+    TYPE_RECIPIENT_ADD = 1,
+    TYPE_RECIPIENT_REMOVE = 2,
+    TYPE_CALL = 3,
+    TYPE_CHANNEL_NAME = 4,
+    TYPE_CHANNEL_ICON = 5,
     TYPE_PIN = 6,
     TYPE_JOIN = 7,
     TYPE_BOOST = 8,
     TYPE_BOOST_TIER_3 = 11,
     TYPE_REPLY = 19,
     TYPE_SLASH_COMMAND = 20,
+    TYPE_THREAD_CREATED = 18,
     TYPE_CONTEXT_COMMAND = 23,
+    TYPE_POLL_RESULT = 46,
 };
 
 static int is_digit(char c)
@@ -28,6 +35,15 @@ static int same(const char *a, const char *b, size_t n)
         if (a[i] != b[i])
             return 0;
     return 1;
+}
+
+static int get_num(json_t obj, const char *key);
+
+static int str_same(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
 }
 
 /* Display name of a user object: global_name, else username. */
@@ -63,10 +79,12 @@ static int mention_name(json_t mentions, const char *id, size_t len, sb_t *out)
 
 /*
  * Rewrites Discord markup into readable text:
- *   <@id> <@!id>  -> @name (from the mentions array), wrapped in MD_MENTION_OPEN/CLOSE
- *   <@&id>        -> left for the UI, which knows role names
- *   <:name:id>    -> :name:   (custom emoji, also <a:name:id>)
+ *   <@id> <@!id>     -> @name (from the mentions array), wrapped in MD_MENTION_OPEN/CLOSE
+ *   <@&id>           -> left for the UI, which knows role names
+ *   <:name:id>       -> the emoji marker (custom emoji, also <a:name:id>)
+ *   </name sub:id>   -> /name sub, a slash command mention
  * Channel mentions <#id> are left for the UI, which knows channel names.
+ * Code spans and blocks, and a "<" escaped with a backslash, stay as typed.
  */
 static void format_content(const char *s, size_t n, json_t mentions, sb_t *out)
 {
@@ -75,11 +93,43 @@ static void format_content(const char *s, size_t n, json_t mentions, sb_t *out)
     while (i < n) {
         size_t start = i, j;
 
-        if (s[i] != '<') {
-            while (i < n && s[i] != '<')
+        if (s[i] != '<' && s[i] != '`' && s[i] != '\\') {
+            while (i < n && s[i] != '<' && s[i] != '`' && s[i] != '\\')
                 i++;
             sb_addn(out, s + start, i - start);
             continue;
+        }
+        if (s[i] == '\\') {
+            sb_addn(out, s + i, i + 1 < n ? 2 : 1); /* the markdown parser drops the backslash */
+            i += 2;
+            continue;
+        }
+        if (s[i] == '`') {
+            j = md_code_end(s, n, i);
+            if (!j)
+                for (j = i; j < n && s[j] == '`'; j++)
+                    ;
+            sb_addn(out, s + i, j - i);
+            i = j;
+            continue;
+        }
+        /* </name:123>, </name sub:123> */
+        if (i + 1 < n && s[i + 1] == '/') {
+            size_t name0 = i + 2, k = name0;
+            while (k < n && s[k] != ':' && s[k] != '>' && s[k] != '\n' && k - name0 < 100)
+                k++;
+            if (k < n && s[k] == ':' && k > name0) {
+                size_t d = k + 1;
+                while (d < n && is_digit(s[d]))
+                    d++;
+                if (d < n && s[d] == '>' && d > k + 1) {
+                    sb_add(out, MD_MENTION_OPEN "/");
+                    sb_addn(out, s + name0, k - name0);
+                    sb_add(out, MD_MENTION_CLOSE);
+                    i = d + 1;
+                    continue;
+                }
+            }
         }
         /* <@123>, <@!123>, <@&123> */
         if (i + 2 < n && s[i + 1] == '@') {
@@ -152,11 +202,54 @@ static void add_line(sb_t *text, const char *prefix, json_t name)
     json_str(name, text);
 }
 
+/*
+ * Formatted text to plain text for one-line previews: mentions keep their
+ * "@name", custom emoji become ":name:", markdown markers go.
+ */
+static void plain_text(const char *s, size_t n, sb_t *out)
+{
+    size_t i = 0;
+
+    while (i < n) {
+        if (i + 3 <= n && same(s + i, MD_EMOJI_OPEN, 3)) {
+            size_t colon = i + 3, end;
+            while (colon < n && s[colon] != ':')
+                colon++;
+            for (end = colon; end + 3 <= n && !same(s + end, MD_EMOJI_CLOSE, 3); end++)
+                ;
+            if (colon < n && end + 3 <= n) {
+                sb_add(out, ":");
+                sb_addn(out, s + colon + 1, end - colon - 1);
+                sb_add(out, ":");
+                i = end + 3;
+                continue;
+            }
+        }
+        if (i + 3 <= n && (same(s + i, MD_MENTION_OPEN, 3) || same(s + i, MD_MENTION_CLOSE, 3))) {
+            i += 3;
+            continue;
+        }
+        if (i + 2 <= n && (same(s + i, "**", 2) || same(s + i, "__", 2) || same(s + i, "~~", 2) || same(s + i, "||", 2))) {
+            i += 2;
+            continue;
+        }
+        sb_addn(out, s + i, 1);
+        i++;
+    }
+}
+
 static void parse_reply(json_t obj, sb_t *out)
 {
-    json_t ref, author, content;
-    sb_t raw = {0};
+    json_t ref, author, content, mref, v;
+    sb_t raw = {0}, formatted = {0}, plain = {0};
 
+    /* A reply whose message is gone: Discord sends referenced_message null. */
+    if (json_get(obj, "referenced_message", &ref) && json_type(ref) == JSON_NULL &&
+        json_get(obj, "message_reference", &mref) && !(json_get(mref, "type", &v) && json_type(v) == JSON_NUMBER &&
+                                                       get_num(mref, "type") != 0)) {
+        sb_add(out, "Original message was deleted");
+        return;
+    }
     if (!json_get(obj, "referenced_message", &ref) || json_type(ref) != JSON_OBJECT) {
         /* A bot's answer to a slash command: "name used /command", like a reply. */
         json_t in, name;
@@ -172,11 +265,18 @@ static void parse_reply(json_t obj, sb_t *out)
     if (json_get(ref, "author", &author))
         user_name(author, out);
     sb_add(out, ": ");
-    if (json_get(ref, "content", &content) && json_str(content, &raw) && raw.len)
-        first_line(raw.data, raw.len, REPLY_SNIPPET, out);
-    else
+    if (json_get(ref, "content", &content) && json_str(content, &raw) && raw.len) {
+        json_t mentions = {0};
+        json_get(ref, "mentions", &mentions);
+        format_content(raw.data, raw.len, mentions, &formatted);
+        plain_text(formatted.data, formatted.len, &plain);
+        first_line(plain.data ? plain.data : "", plain.len, REPLY_SNIPPET, out);
+    } else {
         sb_add(out, "(attachment)");
+    }
     sb_free(&raw);
+    sb_free(&formatted);
+    sb_free(&plain);
 }
 
 static int get_sb(json_t obj, const char *key, sb_t *out)
@@ -566,6 +666,55 @@ static void parse_reactions(json_t list, msg_t *out)
     }
 }
 
+/* A poll's end: its result embed's fields become a line of text ("'s poll ..." follows the name). */
+static void poll_result(json_t obj, msg_t *out)
+{
+    json_t list, e, fields, f, name, value;
+    json_iter_t it, fit;
+    sb_t question = {0}, winner = {0}, votes = {0}, key = {0};
+
+    if (json_get(obj, "embeds", &list)) {
+        json_iter(list, &it);
+        while (json_next(&it, NULL, &e))
+            if (json_get(e, "fields", &fields)) {
+                json_iter(fields, &fit);
+                while (json_next(&fit, NULL, &f)) {
+                    if (!json_get(f, "name", &name) || !json_get(f, "value", &value))
+                        continue;
+                    if (json_str_eq(name, "poll_question_text"))
+                        json_str(value, &question);
+                    else if (json_str_eq(name, "victor_answer_text"))
+                        json_str(value, &winner);
+                    else if (json_str_eq(name, "victor_answer_votes"))
+                        json_str(value, &votes);
+                }
+            }
+    }
+    for (int i = 0; i < out->nembeds; i++)
+        msg_embed_free(&out->embeds[i]);
+    out->nembeds = 0;
+    out->system = 1;
+    sb_clear(&out->text);
+    sb_add(&out->text, "'s poll ");
+    sb_addn(&out->text, question.data ? question.data : "", question.len);
+    sb_add(&out->text, " has closed");
+    if (winner.len) {
+        sb_add(&out->text, ": ");
+        sb_addn(&out->text, winner.data, winner.len);
+        sb_add(&out->text, " won");
+        if (votes.len) {
+            sb_add(&out->text, " with ");
+            sb_addn(&out->text, votes.data, votes.len);
+            sb_add(&out->text, votes.len == 1 && votes.data[0] == '1' ? " vote" : " votes");
+        }
+    }
+    sb_add(&out->text, ".");
+    sb_free(&question);
+    sb_free(&winner);
+    sb_free(&votes);
+    sb_free(&key);
+}
+
 int msg_parse(json_t obj, msg_t *out)
 {
     json_t v, author, mentions = {0}, list, item, name;
@@ -649,7 +798,50 @@ int msg_parse(json_t obj, msg_t *out)
     out->mention_everyone = json_get(obj, "mention_everyone", &v) && json_type(v) == JSON_TRUE;
     (void)add_line;
 
-    if (type == TYPE_JOIN) {
+    if (type == TYPE_RECIPIENT_ADD || type == TYPE_RECIPIENT_REMOVE) {
+        /* "added Bob to the group.", "removed Bob from the group.", or "left the group." */
+        json_iter_t mit;
+        json_t who, id;
+        sb_t name = {0};
+        char aid[24] = "";
+        int self = 0;
+        json_iter(mentions, &mit);
+        if (json_next(&mit, NULL, &who)) {
+            user_name(who, &name);
+            if (json_get(who, "id", &id))
+                json_raw(id, aid, sizeof aid);
+            self = aid[0] && str_same(aid, out->author_id);
+        }
+        out->system = 1;
+        sb_clear(&out->text);
+        if (type == TYPE_RECIPIENT_REMOVE && self) {
+            sb_add(&out->text, "left the group.");
+        } else {
+            sb_add(&out->text, type == TYPE_RECIPIENT_ADD ? "added " : "removed ");
+            sb_addn(&out->text, name.data ? name.data : "someone", name.data ? name.len : 7);
+            sb_add(&out->text, type == TYPE_RECIPIENT_ADD ? " to the group." : " from the group.");
+        }
+        sb_free(&name);
+    } else if (type == TYPE_CALL) {
+        out->system = 1;
+        sb_clear(&out->text);
+        sb_add(&out->text, "started a call.");
+    } else if (type == TYPE_CHANNEL_NAME || type == TYPE_THREAD_CREATED) {
+        /* The content is the new name. */
+        sb_t name = {0};
+        sb_addn(&name, out->content.data ? out->content.data : "", out->content.len);
+        out->system = 1;
+        sb_clear(&out->text);
+        sb_add(&out->text, type == TYPE_CHANNEL_NAME ? "changed the channel name: " : "started a thread: ");
+        sb_addn(&out->text, name.data ? name.data : "", name.len);
+        sb_free(&name);
+    } else if (type == TYPE_CHANNEL_ICON) {
+        out->system = 1;
+        sb_clear(&out->text);
+        sb_add(&out->text, "changed the channel icon.");
+    } else if (type == TYPE_POLL_RESULT) {
+        poll_result(obj, out);
+    } else if (type == TYPE_JOIN) {
         out->system = 1;
         sb_clear(&out->text);
         sb_add(&out->text, "joined the server.");
