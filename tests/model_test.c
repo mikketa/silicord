@@ -54,6 +54,15 @@ static int index_in_guild(const model_t *m, const char *id)
     return i < 0 ? -1 : i - (int)m->guilds[0].first;
 }
 
+static void test_permissions(const model_t *m)
+{
+    int general = model_find_channel(m, "11"), staff = model_find_channel(m, "15"), dm = model_find_channel(m, "21");
+
+    check(general >= 0 && model_permissions(m, (unsigned)general) == 1024, "a channel's permissions from our roles");
+    check(staff >= 0 && (model_permissions(m, (unsigned)staff) & 1024), "a role's overwrite lets us see a channel");
+    check(dm >= 0 && model_permissions(m, (unsigned)dm) == ~0ull, "everything is allowed in DMs");
+}
+
 static void test_user_settings(const model_t *m)
 {
     model_t *a;
@@ -454,6 +463,7 @@ void entry(void)
     test_emojis(m);
     test_notify(m);
     test_user_settings(m);
+    test_permissions(m);
     test_threads(m);
     test_repeated_ids();
     test_visibility(m);

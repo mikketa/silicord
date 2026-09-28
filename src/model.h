@@ -141,6 +141,10 @@ int model_find_guild(const model_t *m, const char *id);
 /* Index of the guild owning channel i, -1 for direct messages. */
 int model_channel_guild(const model_t *m, unsigned i);
 int model_unread(const model_t *m, unsigned i);
+/* Our permissions in channel i (threads use their channel's); all of them in DMs, as owner or administrator. */
+unsigned long long model_permissions(const model_t *m, unsigned i);
+#define PERM_MANAGE_MESSAGES 0x2000ull
+#define PERM_PIN_MESSAGES (1ull << 51)
 typedef struct {
     char id[24];
     unsigned color;     /* 0xRRGGBB, 0 for none */

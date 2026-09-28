@@ -1977,6 +1977,23 @@ static model_t *apply_thread_members(const model_t *m, const char *event, json_t
     return NULL;
 }
 
+unsigned long long model_permissions(const model_t *m, unsigned i)
+{
+    int gi = model_channel_guild(m, i), p;
+    const channel_t *c = &m->channels[i];
+    const guild_t *g;
+    role_id_t mine[MAX_ROLES];
+
+    if (gi < 0)
+        return ~0ull;
+    g = &m->guilds[gi];
+    if (g->sees_all)
+        return ~0ull; /* owner, administrator, or roles not known yet */
+    if (model_is_thread(c->type) && c->parent[0] && (p = model_find_channel(m, c->parent)) >= 0)
+        c = &m->channels[p];
+    return channel_perms(m, c, g, mine, parse_roles(m, g->my_roles, mine));
+}
+
 model_t *model_apply(const model_t *m, const char *event, json_t d)
 {
     if (str_eq(event, "THREAD_CREATE") || str_eq(event, "THREAD_UPDATE")) {
