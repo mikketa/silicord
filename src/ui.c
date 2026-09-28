@@ -296,6 +296,11 @@ typedef struct {
     int picker_tab;            /* TAB_EMOJI, TAB_GIFS or TAB_STICKERS */
     sb_t gif_json;             /* last GIF answer */
     char qs_forward[24];       /* the switcher picks where to forward this message, when set */
+    int qs_prompt;             /* PROMPT_*: the switcher asks for a name instead */
+    char qs_prompt_id[24];     /* the message to start a thread from */
+    char qs_prompt_channel[24];
+    sb_t qs_prompt_title;      /* a forum post's title, while its message is asked */
+    RECT forum_new;            /* the forum's New Post button */
     char qs_forward_from[24];
     sb_t cmd_index;            /* slash commands of cmd_key's server or DM */
     char cmd_key[24];
@@ -1652,6 +1657,7 @@ static int divider_h(const msg_t *m);
 static void qs_open(void);
 static void qs_close(void);
 static void qs_rebuild(void);
+static void prompt_submit(void);
 static void qs_place(void);
 static int pins_button_x(void);
 static void paint_settings(RECT rc);
@@ -4077,6 +4083,18 @@ static void on_event(sb_t *p)
         return;
     if (lstrcmpA(name, "GUILD_MEMBER_LIST_UPDATE") == 0) {
         on_member_list(d);
+        return;
+    }
+    if (lstrcmpA(name, "THREAD_OURS") == 0) { /* a thread or post we just started: open it, as Discord does */
+        json_t v;
+        char id[24] = "";
+        int c;
+        if (json_get(d, "id", &v))
+            json_raw(v, id, sizeof id);
+        if (model_find_channel(g_ui.model, id) < 0 && (m = model_apply(g_ui.model, "THREAD_CREATE", d)) != NULL)
+            replace_model(m);
+        if ((c = model_find_channel(g_ui.model, id)) >= 0)
+            go_to_channel(c);
         return;
     }
     if (lstrcmpA(name, "VOICE_STATES") == 0 || lstrcmpA(name, "VOICE_STATE_UPDATE") == 0) {
@@ -8121,6 +8139,7 @@ static void paint_pins(void)
 #define QS_MAX 12
 
 enum { QS_CHANNEL, QS_DM, QS_GUILD };
+enum { PROMPT_NONE, PROMPT_THREAD, PROMPT_POST_TITLE, PROMPT_POST_MESSAGE };
 
 static void qs_rebuild(void)
 {
@@ -8130,7 +8149,7 @@ static void qs_rebuild(void)
 
     g_ui.nqs = 0;
     g_ui.qs_sel = 0;
-    if (!m)
+    if (!m || g_ui.qs_prompt)
         return;
     GetWindowTextW(g_ui.qs_edit, w, 64);
     WideCharToMultiByte(CP_UTF8, 0, w, -1, q, sizeof q, NULL, NULL);
@@ -8168,6 +8187,7 @@ static void qs_close(void)
     g_ui.qs = NULL;
     g_ui.qs_edit = NULL;
     g_ui.qs_forward[0] = 0;
+    g_ui.qs_prompt = PROMPT_NONE;
     DestroyWindow(w);
     SetFocus(g_ui.composer);
     redraw();
@@ -8195,6 +8215,8 @@ static void qs_go(int i)
 
 static int qs_height(void)
 {
+    if (g_ui.qs_prompt)
+        return S(96) + S(QS_ROW);
     return S(96) + (g_ui.nqs ? g_ui.nqs : 1) * S(QS_ROW) + S(16);
 }
 
@@ -8206,8 +8228,18 @@ static void qs_paint(void)
     r_fill(0, 0, w, h, 0xFF000000u);
     r_round(0, 0, w, h, S(10), 0xFF151515);
     r_round_outline(0, 0, w, h, S(10), 1, 0xFF2A2A2A);
-    text(g_ui.f_h, C_INK, rect(S(20), S(12), w - S(40), S(24)), g_ui.qs_forward[0] ? "Forward To" : "Where would you like to go?",
+    text(g_ui.f_h, C_INK, rect(S(20), S(12), w - S(40), S(24)),
+         g_ui.qs_prompt == PROMPT_THREAD         ? "Create Thread"
+         : g_ui.qs_prompt == PROMPT_POST_TITLE   ? "New Post"
+         : g_ui.qs_prompt == PROMPT_POST_MESSAGE ? "New Post: first message"
+         : g_ui.qs_forward[0]                    ? "Forward To"
+                                                 : "Where would you like to go?",
          DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (g_ui.qs_prompt) {
+        text(g_ui.f_small, C_FAINT, rect(S(20), y, w - S(40), S(QS_ROW)), "Enter to continue \xE2\x80\xA2 Esc to cancel",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
     r_round(S(20), S(44), w - S(40), S(40), S(6), 0xFF0B0B0B);
     if (!g_ui.nqs)
         text(g_ui.f_body, C_MUTED, rect(0, y, w, S(QS_ROW)), "No results", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -8269,7 +8301,9 @@ static LRESULT CALLBACK qs_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         if (wp == VK_RETURN) {
-            if (g_ui.nqs)
+            if (g_ui.qs_prompt)
+                prompt_submit();
+            else if (g_ui.nqs)
                 qs_go(g_ui.qs_sel);
             return 0;
         }
@@ -8329,6 +8363,48 @@ static LRESULT CALLBACK qs_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     }
     return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* The switcher as a one-line prompt: a thread's name, a forum post's title and message. */
+static void prompt_open(int kind, const char *message_id, const char *channel_id, const wchar_t *cue)
+{
+    qs_close();
+    qs_open();
+    if (!g_ui.qs)
+        return;
+    g_ui.qs_prompt = kind;
+    lstrcpynA(g_ui.qs_prompt_id, message_id ? message_id : "", sizeof g_ui.qs_prompt_id);
+    lstrcpynA(g_ui.qs_prompt_channel, channel_id, sizeof g_ui.qs_prompt_channel);
+    SendMessageW(g_ui.qs_edit, EM_SETCUEBANNER, TRUE, (LPARAM)cue);
+    qs_rebuild();
+    qs_place();
+}
+
+static void prompt_submit(void)
+{
+    wchar_t w[512];
+    sb_t text = {0};
+    char channel[24], message[24];
+    int kind = g_ui.qs_prompt;
+
+    GetWindowTextW(g_ui.qs_edit, w, ARRAYSIZE(w));
+    wide_to_utf8(w, (size_t)lstrlenW(w), &text);
+    if (!text.len)
+        return;
+    lstrcpynA(channel, g_ui.qs_prompt_channel, sizeof channel);
+    lstrcpynA(message, g_ui.qs_prompt_id, sizeof message);
+    if (kind == PROMPT_POST_TITLE) { /* then the post's first message */
+        sb_clear(&g_ui.qs_prompt_title);
+        sb_addn(&g_ui.qs_prompt_title, text.data, text.len);
+        prompt_open(PROMPT_POST_MESSAGE, NULL, channel, L"Message");
+    } else {
+        qs_close();
+        if (kind == PROMPT_THREAD)
+            app_create_thread(channel, message, text.data, NULL);
+        else
+            app_create_thread(channel, NULL, g_ui.qs_prompt_title.data ? g_ui.qs_prompt_title.data : "", text.data);
+    }
+    sb_free(&text);
 }
 
 /* The switcher, picking where message `id` of the open channel goes. */
@@ -8771,7 +8847,7 @@ static LRESULT CALLBACK settings_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM l
 enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
-    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD,
+    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD, CM_THREAD,
     CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
     CM_NOTIFY = 120,     /* + NOTIFY_* */
 };
@@ -8912,6 +8988,8 @@ static void message_menu(int i)
         AppendMenuW(menu, MF_STRING, CM_PIN, m->pinned ? L"Unpin Message" : L"Pin Message");
     AppendMenuW(menu, MF_STRING, CM_FORWARD, L"Forward");
     AppendMenuW(menu, MF_STRING, CM_MARK_UNREAD, L"Mark Unread");
+    if (g_ui.guild >= 0 && g_ui.channel >= 0 && !model_is_thread(chan(g_ui.channel)->type))
+        AppendMenuW(menu, MF_STRING, CM_THREAD, L"Create Thread");
     AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Message Link");
     if (developer_mode())
         AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
@@ -8948,6 +9026,9 @@ static void message_menu(int i)
         break;
     case CM_MARK_UNREAD:
         mark_unread(i);
+        break;
+    case CM_THREAD:
+        prompt_open(PROMPT_THREAD, m->id, g_ui.msgs_channel, L"Thread name");
         break;
     case CM_FORWARD:
         forward_open(m->id);
@@ -9644,6 +9725,11 @@ static void paint_forum(RECT rc, int x0, int w)
         text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, w, S(24)), "Loading posts\xE2\x80\xA6", DT_CENTER | DT_SINGLELINE);
         return;
     }
+    /* New Post, above the posts as in Discord. */
+    g_ui.forum_new = rect(x0 + S(24), y, S(120), S(36));
+    r_round(x0 + S(24), y, S(120), S(36), S(6), ARGB(C_AMBER));
+    text(g_ui.f_h, C_RAIL, g_ui.forum_new, "New Post", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    y += S(52);
     if (!g_ui.nposts) {
         text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, w, S(24)), "There are no posts here yet.", DT_CENTER | DT_SINGLELINE);
         return;
@@ -10168,6 +10254,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             {
                 int ph = post_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                if (forum_view() && g_ui.forum_loaded && PtInRect(&g_ui.forum_new, pt)) {
+                    prompt_open(PROMPT_POST_TITLE, NULL, chan(g_ui.channel)->id, L"Post title");
+                    return 0;
+                }
                 if (ph >= 0) {
                     open_post(ph);
                     return 0;

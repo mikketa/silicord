@@ -1375,6 +1375,51 @@ void app_ack(const char *channel_id, const char *message_id)
     CloseHandle(CreateThread(NULL, 0, ack_main, j, 0, NULL));
 }
 
+static DWORD WINAPI thread_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[128];
+
+    /* j->before: the message, or empty for a forum post; j->text: the JSON body. */
+    if (j->before[0])
+        wsprintfA(path, "/channels/%s/messages/%s/threads", j->channel, j->before);
+    else
+        wsprintfA(path, "/channels/%s/threads", j->channel);
+    if (http_request("POST", path, j->token.data, j->text.data, j->text.len, &resp) &&
+        (resp.status == 200 || resp.status == 201)) {
+        sb_t *p = mem_alloc(sizeof *p);
+        sb_add(p, "THREAD_OURS");
+        sb_addn(p, "", 1);
+        sb_addn(p, resp.body.data, resp.body.len);
+        ui_post(UI_EVENT, p);
+    } else {
+        char text[64];
+        wsprintfA(text, "Could not create the thread (HTTP %u)", resp.status);
+        ui_post(UI_SEND_FAILED, ui_text(text));
+    }
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_create_thread(const char *channel_id, const char *message_id, const char *name, const char *content)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->before, message_id ? message_id : "", sizeof j->before);
+    sb_add(&j->text, "{\"name\":");
+    sb_json_str(&j->text, name, (size_t)lstrlenA(name));
+    sb_add(&j->text, ",\"auto_archive_duration\":4320");
+    if (!message_id) {
+        sb_add(&j->text, ",\"message\":{\"content\":");
+        sb_json_str(&j->text, content ? content : "", content ? (size_t)lstrlenA(content) : 0);
+        sb_add(&j->text, "}");
+    }
+    sb_add(&j->text, "}");
+    CloseHandle(CreateThread(NULL, 0, thread_main, j, 0, NULL));
+}
+
 void app_ack_manual(const char *channel_id, const char *message_id)
 {
     rest_job_t *j = new_job(channel_id);

@@ -121,6 +121,12 @@ void app_leave_guild(const char *guild_id);
 void app_ack(const char *channel_id, const char *message_id);
 /* Marks a channel read up to message_id only, leaving what follows unread ("Mark Unread"). */
 void app_ack_manual(const char *channel_id, const char *message_id);
+/*
+ * Starts a thread named `name` from message_id, or, with message_id NULL, a
+ * forum post whose first message is `content`. The new thread comes back as
+ * UI_EVENT "THREAD_OURS" (a channel object) to open; failures as UI_SEND_FAILED.
+ */
+void app_create_thread(const char *channel_id, const char *message_id, const char *name, const char *content);
 /* Pins or unpins a message. */
 void app_pin(const char *channel_id, const char *message_id, int pin);
 /* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
