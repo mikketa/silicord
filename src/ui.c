@@ -301,6 +301,11 @@ typedef struct {
     char qs_prompt_channel[24];
     sb_t qs_prompt_title;      /* a forum post's title, while its message is asked */
     RECT forum_new;            /* the forum's New Post button */
+    char react_key[96];        /* the reaction under the pointer: "message id emoji", empty if none */
+    int react_x, react_y;      /* where to show who reacted */
+    int react_shown;           /* its tooltip is up (after a short pause) */
+    sb_t reactors;             /* "Ann, Bob and 3 others reacted with :x:" for react_key, once known */
+    char reactors_key[96];
     char qs_forward_from[24];
     sb_t cmd_index;            /* slash commands of cmd_key's server or DM */
     char cmd_key[24];
@@ -368,6 +373,8 @@ static void rel_remove(const char *id);
 #define WM_TRAY (WM_APP + 60)
 #define TIMER_ACK 1
 #define TIMER_FLASH 3
+#define TIMER_REACTORS 9
+#define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
 static const unsigned char k_word[8][7] = {
@@ -1658,6 +1665,7 @@ static void qs_open(void);
 static void qs_close(void);
 static void qs_rebuild(void);
 static void prompt_submit(void);
+static void redraw(void);
 static void qs_place(void);
 static int pins_button_x(void);
 static void paint_settings(RECT rc);
@@ -3411,6 +3419,125 @@ static int message_at(int x, int y, int *top)
     return -1;
 }
 
+/* ---- Who reacted ---- */
+
+static void reaction_key(const msg_t *m, const msg_reaction_t *r, char *out)
+{
+    wsprintfA(out, "%.24s %.24s%.40s", m->id, r->emoji_id, r->emoji.data ? r->emoji.data : "");
+}
+
+/* The pointer is over reaction k of message i (i < 0: over none): the tooltip comes after a pause. */
+static void react_hover(int i, int k, int x, int y)
+{
+    char key[96] = "";
+
+    if (i >= 0 && i < g_ui.nmsgs && k >= 0 && k < g_ui.msgs[i].nreactions)
+        reaction_key(&g_ui.msgs[i], &g_ui.msgs[i].reactions[k], key);
+    if (lstrcmpA(key, g_ui.react_key) == 0)
+        return;
+    lstrcpynA(g_ui.react_key, key, sizeof g_ui.react_key);
+    g_ui.react_x = x;
+    g_ui.react_y = y;
+    if (g_ui.react_shown)
+        redraw();
+    g_ui.react_shown = 0;
+    KillTimer(g_ui.wnd, TIMER_REACTORS);
+    if (key[0])
+        SetTimer(g_ui.wnd, TIMER_REACTORS, REACTORS_DELAY, NULL);
+}
+
+static const msg_reaction_t *hovered_reaction(const msg_t **msg)
+{
+    for (int i = 0; g_ui.react_key[0] && i < g_ui.nmsgs; i++)
+        for (int k = 0; k < g_ui.msgs[i].nreactions; k++) {
+            char key[96];
+            reaction_key(&g_ui.msgs[i], &g_ui.msgs[i].reactions[k], key);
+            if (lstrcmpA(key, g_ui.react_key) == 0) {
+                *msg = &g_ui.msgs[i];
+                return &g_ui.msgs[i].reactions[k];
+            }
+        }
+    return NULL;
+}
+
+/* The pause is over: show what we know, and ask Discord for the names. */
+static void react_timer(void)
+{
+    const msg_t *m;
+    const msg_reaction_t *r;
+
+    KillTimer(g_ui.wnd, TIMER_REACTORS);
+    if (!(r = hovered_reaction(&m)))
+        return;
+    g_ui.react_shown = 1;
+    if (lstrcmpA(g_ui.reactors_key, g_ui.react_key) != 0) {
+        sb_clear(&g_ui.reactors);
+        g_ui.reactors_key[0] = 0;
+        app_fetch_reactors(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, r, g_ui.react_key);
+    }
+    redraw();
+}
+
+static void on_reactors(const char *key, json_t users)
+{
+    const msg_t *m;
+    const msg_reaction_t *r;
+    json_iter_t it;
+    json_t u, v;
+    int n = 0;
+    char more[64];
+
+    if (lstrcmpA(key, g_ui.react_key) != 0 || !(r = hovered_reaction(&m)))
+        return;
+    sb_clear(&g_ui.reactors);
+    json_iter(users, &it);
+    while (n < 3 && json_next(&it, NULL, &u)) {
+        if (n)
+            sb_add(&g_ui.reactors, n == 2 && r->count == 3 ? " and " : ", ");
+        if (!((json_get(u, "global_name", &v) && json_type(v) == JSON_STRING && json_str(v, &g_ui.reactors)) ||
+              (json_get(u, "username", &v) && json_str(v, &g_ui.reactors))))
+            sb_add(&g_ui.reactors, "someone");
+        n++;
+    }
+    if (r->count > n && n) {
+        wsprintfA(more, " and %d other%s", r->count - n, r->count - n == 1 ? "" : "s");
+        sb_add(&g_ui.reactors, more);
+    }
+    sb_add(&g_ui.reactors, " reacted with ");
+    if (r->emoji_id[0]) {
+        sb_add(&g_ui.reactors, ":");
+        sb_add(&g_ui.reactors, r->emoji.data ? r->emoji.data : "");
+        sb_add(&g_ui.reactors, ":");
+    } else {
+        sb_add(&g_ui.reactors, r->emoji.data ? r->emoji.data : "");
+    }
+    lstrcpynA(g_ui.reactors_key, key, sizeof g_ui.reactors_key);
+    redraw();
+}
+
+/* Above the reaction, as in Discord. */
+static void paint_reactors(void)
+{
+    RECT rc;
+    int tw, th = S(36), x, y;
+
+    if (!g_ui.react_shown || !g_ui.reactors.len || lstrcmpA(g_ui.reactors_key, g_ui.react_key) != 0)
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    tw = text_width(g_ui.f_body, g_ui.reactors.data) + S(24);
+    if (tw > S(420))
+        tw = S(420);
+    x = g_ui.react_x - tw / 2;
+    if (x + tw > rc.right - S(8))
+        x = rc.right - S(8) - tw;
+    if (x < S(8))
+        x = S(8);
+    y = g_ui.react_y - S(24) - th;
+    r_round(x, y, tw, th, S(6), ARGB(C_TIP));
+    text(g_ui.f_body, C_INK, rect(x + S(12), y, tw - S(24), th), g_ui.reactors.data,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 static void paint_tooltip(void)
 {
     const char *name;
@@ -3442,6 +3569,7 @@ static void paint_app(RECT rc)
     paint_side(rc);
     paint_rail(rc);
     paint_tooltip();
+    paint_reactors();
     paint_confirm();
 }
 
@@ -4079,6 +4207,14 @@ static void on_event(sb_t *p)
     json_t d;
     model_t *m;
 
+    if (lstrcmpA(name, "REACTORS") == 0) { /* the payload is "key", NUL, users */
+        const char *key = p->data + n;
+        size_t kn = (size_t)lstrlenA(key) + 1;
+        json_t users;
+        if (n + kn < p->len && json_parse(p->data + n + kn, p->len - n - kn, &users))
+            on_reactors(key, users);
+        return;
+    }
     if (!g_ui.model || n >= p->len || !json_parse(p->data + n, p->len - n, &d))
         return;
     if (lstrcmpA(name, "GUILD_MEMBER_LIST_UPDATE") == 0) {
@@ -10011,9 +10147,9 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 static void update_hover(int x, int y)
 {
-    int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL), i, ax, ay;
+    int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL), i = -1, ax, ay;
     int tool = toolbar_hit(x, y, NULL);
-    part_t part;
+    part_t part = {PART_NONE, -1};
 
     {
         int mh = ml_hit(x, y, NULL);
@@ -10079,6 +10215,7 @@ static void update_hover(int x, int y)
     link = link || tool >= 0;
 
     link = link || author_hit(x, y, &i, &ax, &ay) || part_hit(x, y, &i, &part);
+    react_hover(part.kind == PART_REACTION ? i : -1, part.index, x, y);
 
     hit_test(x, y, &kind, &index);
     if (m != g_ui.hover_msg || link != g_ui.hover_link) {
@@ -10420,6 +10557,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == TIMER_ANIM) {
             anim_tick();
+            return 0;
+        }
+        if (wp == TIMER_REACTORS) {
+            react_timer();
             return 0;
         }
         if (wp == TIMER_FLASH) {

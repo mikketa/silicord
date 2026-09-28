@@ -150,6 +150,8 @@ void app_request_members(const char *guild_id, const char *const *user_ids, int 
 void app_vote(const char *channel_id, const char *message_id, const int *answers, int n);
 /* Adds or removes our reaction; the gateway echoes it back as MESSAGE_REACTION_ADD / _REMOVE. */
 void app_react(const char *channel_id, const char *message_id, const msg_reaction_t *r, int add);
+/* The first users who reacted with r: UI_EVENT "REACTORS", text "key", NUL, then a JSON array of users. */
+void app_fetch_reactors(const char *channel_id, const char *message_id, const msg_reaction_t *r, const char *key);
 /* Loads a profile popout; `guild_id` (may be empty) adds the server profile and mutual servers. */
 void app_fetch_profile(const char *user_id, const char *guild_id);
 /*

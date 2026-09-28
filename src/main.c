@@ -1116,6 +1116,42 @@ void app_react(const char *channel_id, const char *message_id, const msg_reactio
     CloseHandle(CreateThread(NULL, 0, react_main, j, 0, NULL));
 }
 
+static DWORD WINAPI reactors_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t *p = mem_alloc(sizeof *p);
+
+    /* j->text: the path; j->files: the key the UI gave. */
+    sb_add(p, "REACTORS");
+    sb_addn(p, "", 1);
+    sb_addn(p, j->files.data ? j->files.data : "", j->files.len);
+    sb_addn(p, "", 1);
+    if (http_request("GET", j->text.data, j->token.data, NULL, 0, &resp) && resp.status == 200)
+        sb_addn(p, resp.body.data, resp.body.len);
+    else
+        sb_add(p, "[]");
+    ui_post(UI_EVENT, p);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_reactors(const char *channel_id, const char *message_id, const msg_reaction_t *r, const char *key)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    sb_add(&j->text, "/channels/");
+    sb_add(&j->text, channel_id);
+    sb_add(&j->text, "/messages/");
+    sb_add(&j->text, message_id);
+    sb_add(&j->text, "/reactions/");
+    msg_reaction_path(r, &j->text);
+    sb_add(&j->text, "?limit=3&type=0");
+    sb_add(&j->files, key);
+    CloseHandle(CreateThread(NULL, 0, reactors_main, j, 0, NULL));
+}
+
 static DWORD WINAPI relation_main(LPVOID arg)
 {
     rest_job_t *j = arg;
