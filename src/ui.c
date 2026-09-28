@@ -7753,12 +7753,16 @@ static void friends_click(int x, int y)
             break;
         case ACT_IGNORE:
         case ACT_UNBLOCK:
-        case ACT_REMOVE:
+        case ACT_REMOVE: {
+            /* The message box runs a message loop that can move or free the relationships: keep the id. */
+            char id[24];
+            lstrcpynA(id, r->id, sizeof id);
             if (acts[act] == ACT_REMOVE &&
                 MessageBoxW(g_ui.wnd, L"Remove this friend?", L"Remove Friend", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
                 break;
-            app_relationship(r->id, "DELETE");
+            app_relationship(id, "DELETE");
             break;
+        }
         }
     }
 }
