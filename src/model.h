@@ -41,11 +41,16 @@ typedef struct {
     /* What we need to decide which new channels are visible. */
     unsigned long long base_perms;
     int sees_all;       /* owner, administrator, or our roles are unknown */
+    int owner;          /* we own the server */
+    int roles_known;    /* my_roles came from Discord (else everything is shown) */
     unsigned my_roles;  /* comma-separated role ids */
     unsigned roles;     /* packed role list, read with model_role_next() */
     unsigned emojis;    /* packed custom emoji list, read with model_emoji_next() */
     unsigned stickers;  /* packed sticker list, read with model_sticker_next() */
     int folder;         /* index in model_t.folders, -1 when not in a folder */
+    int rank;           /* place in the user's server order, -1 when not listed (then on top) */
+    unsigned hidden_first; /* channels we cannot see, in model_t.hidden: kept to show them */
+    unsigned hidden_count; /* if our roles or the permissions change */
 } guild_t;
 
 /* A server folder from the user's settings; its guilds are consecutive in the list. */
@@ -73,6 +78,7 @@ typedef struct {
     int muted;
     long long mute_until;
     int notify;         /* NOTIFY_*: NOTIFY_DEFAULT follows the category, then the server */
+    unsigned overwrites; /* permission overwrites, packed "id allow deny\n"; 0 if none */
 } channel_t;
 
 typedef struct {
@@ -93,6 +99,13 @@ typedef struct {
     int developer_mode; /* "Copy ID" in the menus */
     folder_t *folders;
     unsigned nfolders;
+    /* Kept to rebuild the above as things change, not for the UI. */
+    channel_t *hidden;      /* channels of the servers we cannot see, per guild_t.hidden_* */
+    unsigned nhidden;
+    unsigned folder_json;   /* the user's guild_folders, as JSON text (0 if none) */
+    unsigned joined;        /* threads we are a member of, "id\n" each */
+    unsigned pending;       /* servers unavailable at READY: "id\tsettings JSON\n" each */
+    unsigned pending_reads; /* their channels' read states: "channel last_message mentions\n" */
 } model_t;
 
 /* Builds the model from the READY payload `d`. Never returns NULL. */
@@ -103,7 +116,8 @@ void model_free(model_t *m);
  * Applies a gateway event (CHANNEL_CREATE/UPDATE/DELETE, THREAD_CREATE/UPDATE/DELETE
  * for threads we are in, GUILD_CREATE/UPDATE/DELETE,
  * GUILD_ROLE_CREATE/UPDATE/DELETE, GUILD_EMOJIS_UPDATE, USER_SETTINGS_UPDATE, GUILD_MEMBER_UPDATE for
- * us). Returns a new model, or NULL when nothing changed.
+ * us, THREAD_MEMBER_UPDATE and THREAD_MEMBERS_UPDATE). Returns a new model, or NULL when nothing changed.
+ * Channels are shown or hidden again when our roles or the permissions change.
  * `m` is left untouched; read state carries over by channel id.
  */
 model_t *model_apply(const model_t *m, const char *event, json_t d);
@@ -132,6 +146,7 @@ typedef struct {
     unsigned color;     /* 0xRRGGBB, 0 for none */
     int position;
     int hoist;          /* shown apart in the member list */
+    unsigned long long permissions;
     const char *name;
     int name_len;
 } model_role_t;

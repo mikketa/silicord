@@ -105,7 +105,8 @@ static void test_updates(const model_t *m)
 
     n = apply(m, "CHANNEL_CREATE", "{\"id\":\"17\",\"guild_id\":\"1\",\"type\":0,\"name\":\"hidden\","
                                    "\"permission_overwrites\":[{\"id\":\"1\",\"type\":0,\"allow\":\"0\",\"deny\":\"1024\"}]}");
-    check(n == NULL, "a channel we cannot see changes nothing");
+    check(n && model_find_channel(n, "17") < 0 && n->guilds[0].count == m->guilds[0].count && n->guilds[0].hidden_count == 2,
+          "a channel we cannot see is kept hidden");
     model_free(n);
 
     n = apply(m, "CHANNEL_UPDATE", "{\"id\":\"14\",\"guild_id\":\"1\",\"type\":0,\"name\":\"renamed\",\"position\":5}");
@@ -176,6 +177,137 @@ static void test_threads(const model_t *m)
     model_free(a);
     model_free(b);
     model_free(c);
+}
+
+/* Our roles and the roles' permissions decide what shows, and change it live. */
+static void test_visibility(const model_t *m)
+{
+    model_t *a, *b, *c, *d;
+    int i;
+
+    a = apply(m, "GUILD_MEMBER_UPDATE", "{\"guild_id\":\"1\",\"user\":{\"id\":\"100\"},\"roles\":[]}");
+    check(a && model_find_channel(a, "15") < 0 && a->guilds[0].count == 4, "losing a role hides its channels");
+    b = a ? apply(a, "GUILD_MEMBER_UPDATE", "{\"guild_id\":\"1\",\"user\":{\"id\":\"100\"},\"roles\":[\"50\"]}") : NULL;
+    check(b && model_find_channel(b, "15") >= 0 && b->guilds[0].count == 5, "getting it back shows them again");
+    model_free(a);
+    model_free(b);
+
+    a = apply(m, "GUILD_ROLE_UPDATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"1\",\"name\":\"@everyone\",\"permissions\":\"0\"}}");
+    check(a && model_find_channel(a, "11") < 0 && model_find_channel(a, "14") < 0 && model_find_channel(a, "15") >= 0,
+          "@everyone losing View Channel hides all but what our roles allow");
+    b = a ? apply(a, "THREAD_CREATE", "{\"id\":\"95\",\"guild_id\":\"1\",\"parent_id\":\"15\",\"type\":11,\"name\":\"t\","
+                                      "\"member\":{\"id\":\"95\",\"user_id\":\"100\"}}")
+          : NULL;
+    check(b && model_find_channel(b, "95") == model_find_channel(b, "15") + 1, "a thread shows when its channel does");
+    c = a ? apply(a, "GUILD_ROLE_UPDATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"1\",\"name\":\"@everyone\",\"permissions\":\"1024\"}}")
+          : NULL;
+    i = c ? model_find_channel(c, "11") : -1;
+    check(i >= 0 && c->channels[i].mentions == 2 && model_unread(c, (unsigned)i), "channels come back with their read state");
+    model_free(a);
+    model_free(b);
+    model_free(c);
+
+    a = apply(m, "GUILD_ROLE_CREATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"60\",\"name\":\"Admin\",\"permissions\":\"8\"}}");
+    b = a ? apply(a, "GUILD_MEMBER_UPDATE", "{\"guild_id\":\"1\",\"user\":{\"id\":\"100\"},\"roles\":[\"50\",\"60\"]}") : NULL;
+    check(b && model_find_channel(b, "12") >= 0, "an administrator role shows every channel");
+    c = apply(m, "CHANNEL_UPDATE", "{\"id\":\"12\",\"guild_id\":\"1\",\"type\":0,\"name\":\"secret\",\"parent_id\":\"10\","
+                                   "\"position\":2,\"permission_overwrites\":[]}");
+    check(c && model_find_channel(c, "12") >= 0, "a hidden channel opened to everyone shows");
+    d = apply(m, "GUILD_UPDATE", "{\"id\":\"1\",\"name\":\"G\",\"default_message_notifications\":1}");
+    check(d && d->guilds[0].default_notify == NOTIFY_MENTIONS, "the server's default notifications follow updates");
+    model_free(a);
+    model_free(b);
+    model_free(c);
+    model_free(d);
+}
+
+/* Threads we joined come back when unarchived, until we leave them. */
+static void test_joined_threads(const model_t *m)
+{
+    static const char unarchive[] = "{\"id\":\"90\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,"
+                                    "\"name\":\"s\",\"owner_id\":\"5\",\"thread_metadata\":{\"archived\":false}}";
+    model_t *a, *b, *c, *d, *e;
+
+    a = apply(m, "THREAD_CREATE", "{\"id\":\"90\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,\"name\":\"s\","
+                                  "\"owner_id\":\"5\",\"member\":{\"id\":\"90\",\"user_id\":\"100\"}}");
+    b = a ? apply(a, "THREAD_UPDATE", "{\"id\":\"90\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,"
+                                      "\"name\":\"s\",\"thread_metadata\":{\"archived\":true}}")
+          : NULL;
+    c = b ? apply(b, "THREAD_UPDATE", unarchive) : NULL;
+    check(b && model_find_channel(b, "90") < 0 && c && model_find_channel(c, "90") >= 0,
+          "a joined thread comes back when unarchived");
+    d = c ? apply(c, "THREAD_MEMBERS_UPDATE", "{\"id\":\"90\",\"guild_id\":\"1\",\"member_count\":1,"
+                                              "\"removed_member_ids\":[\"100\"]}")
+          : NULL;
+    check(d && model_find_channel(d, "90") < 0, "leaving a thread elsewhere removes it");
+    e = d ? apply(d, "THREAD_UPDATE", unarchive) : NULL;
+    check(d && !e, "a thread we left stays out");
+    model_free(a);
+    model_free(b);
+    model_free(c);
+    model_free(d);
+    model_free(e);
+
+    a = apply(m, "THREAD_MEMBER_UPDATE", "{\"id\":\"91\",\"user_id\":\"100\",\"guild_id\":\"1\"}");
+    b = a ? apply(a, "THREAD_UPDATE", "{\"id\":\"91\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,"
+                                      "\"name\":\"x\",\"owner_id\":\"5\"}")
+          : NULL;
+    check(b && model_find_channel(b, "91") >= 0, "joining a thread on another device counts");
+    model_free(a);
+    model_free(b);
+}
+
+/* Mutes and notification levels reach threads through their channel's category. */
+static void test_category_mute(const model_t *m)
+{
+    model_t *a = apply(m, "THREAD_CREATE", "{\"id\":\"90\",\"guild_id\":\"1\",\"parent_id\":\"11\",\"type\":11,"
+                                           "\"name\":\"s\",\"member\":{\"id\":\"90\",\"user_id\":\"100\"}}");
+    model_t *b = a ? apply(a, "USER_GUILD_SETTINGS_UPDATE", "{\"guild_id\":\"1\",\"muted\":false,\"channel_overrides\":["
+                                                             "{\"channel_id\":\"10\",\"muted\":true,\"message_notifications\":2}]}")
+                   : NULL;
+    int t = b ? model_find_channel(b, "90") : -1;
+
+    check(t >= 0 && model_muted(b, (unsigned)t, 0) && model_notify(b, (unsigned)t) == NOTIFY_NOTHING,
+          "a thread follows its category's mute and notifications");
+    model_free(a);
+    model_free(b);
+}
+
+/* Servers unavailable at READY get their settings, read states and place back; folders follow updates. */
+static void test_outage_and_folders(void)
+{
+    static const char ready[] =
+        "{\"user\":{\"id\":\"100\"},\"guilds\":[{\"id\":\"1\",\"name\":\"One\",\"owner_id\":\"100\",\"channels\":[]},"
+        "{\"id\":\"2\",\"unavailable\":true}],"
+        "\"user_settings\":{\"guild_folders\":[{\"id\":null,\"guild_ids\":[\"2\"]},{\"id\":null,\"guild_ids\":[\"1\"]}]},"
+        "\"read_state\":[{\"id\":\"30\",\"last_message_id\":\"5\",\"mention_count\":1}],"
+        "\"user_guild_settings\":[{\"guild_id\":\"2\",\"muted\":true}],"
+        "\"private_channels\":[{\"id\":\"40\",\"type\":1,\"last_message_id\":\"300\",\"recipients\":[{\"id\":\"7\",\"username\":\"a\"}]},"
+        "{\"id\":\"1200000000000000000\",\"type\":1,\"last_message_id\":null,\"recipients\":[{\"id\":\"8\",\"username\":\"b\"}]}]}";
+    json_t d;
+    model_t *m, *a, *b;
+    int i;
+
+    check(json_parse(ready, sizeof ready - 1, &d), "outage fixture parses");
+    m = model_from_ready(d);
+    check(m->nguilds == 1 && m->dm_count == 2 && lstrcmpA(m->channels[m->dm_first].id, "1200000000000000000") == 0,
+          "a new DM without messages sorts by when it was created");
+    a = apply(m, "GUILD_CREATE", "{\"id\":\"2\",\"name\":\"Two\",\"channels\":[{\"id\":\"30\",\"type\":0,\"name\":\"c\",\"last_message_id\":\"9\"}],"
+                                 "\"roles\":[],\"owner_id\":\"100\"}");
+    i = a ? model_find_channel(a, "30") : -1;
+    check(a && a->nguilds == 2 && lstrcmpA(a->guilds[0].id, "2") == 0, "a server back from an outage takes its place");
+    check(a && a->guilds[0].muted && i >= 0 && a->channels[i].mentions == 1 && model_unread(a, (unsigned)i),
+          "and its mute and read states from READY");
+    b = a ? apply(a, "USER_SETTINGS_UPDATE", "{\"guild_folders\":[{\"id\":null,\"guild_ids\":[\"1\"]},"
+                                              "{\"id\":7,\"name\":\"Pals\",\"guild_ids\":[\"2\"]}]}")
+          : NULL;
+    check(b && lstrcmpA(b->guilds[0].id, "1") == 0 && lstrcmpA(b->guilds[1].id, "2") == 0 && b->guilds[1].folder == 0 &&
+              b->guilds[0].folder == -1 && lstrcmpA(model_str(b, b->folders[0].name), "Pals") == 0 &&
+              model_find_channel(b, "30") >= 0,
+          "server order and folders follow the settings");
+    model_free(a);
+    model_free(b);
+    model_free(m);
 }
 
 static void test_emojis(const model_t *m)
@@ -324,6 +456,10 @@ void entry(void)
     test_user_settings(m);
     test_threads(m);
     test_repeated_ids();
+    test_visibility(m);
+    test_joined_threads(m);
+    test_category_mute(m);
+    test_outage_and_folders();
     model_free(m);
     finish();
 }
