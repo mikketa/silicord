@@ -2,3 +2,4 @@
 .githooks/* text eol=lf
 *.svg text eol=lf
 .githooks/** linguist-vendored
+*.ico binary
