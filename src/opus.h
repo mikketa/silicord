@@ -1,10 +1,12 @@
 #pragma once
 #include <stddef.h>
 #include "opus_celt.h"
+#include "opus_silk.h"
 
 /* Opus (RFC 6716): packet framing, and the decoder built on SILK and CELT. */
 
-enum { OPUS_SILK, OPUS_HYBRID, OPUS_CELT };
+/* Modes start at 1: a decoder's previous mode is 0 before its first packet. */
+enum { OPUS_SILK = 1, OPUS_HYBRID, OPUS_CELT };
 enum { OPUS_NB, OPUS_MB, OPUS_WB, OPUS_SWB, OPUS_FB };
 
 typedef struct {
@@ -23,7 +25,11 @@ int opus_packet_parse(const unsigned char *data, size_t n, opus_packet_t *p);
 typedef struct {
     int channels;
     celt_decoder_t celt;
+    silk_decoder_t silk;
+    int mode, prev_mode, prev_redundancy, bandwidth, frame_size, stream_channels;
     unsigned final_range; /* the last frame's range coder state, for conformance checks */
+    short pcm_silk[2 * 2880]; /* up to 60 ms of SILK */
+    float transition[2 * 240], redundant[2 * 240];
 } opus_decoder_t;
 
 void opus_decoder_init(opus_decoder_t *d, int channels);

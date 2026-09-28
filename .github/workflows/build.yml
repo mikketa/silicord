@@ -58,3 +58,11 @@ jobs:
 
       - name: Test and fuzz
         run: ctest --test-dir build-host --output-on-failure
+
+      - uses: actions/cache@v4
+        with:
+          path: opus_newvectors
+          key: opus-testvectors-rfc8251
+
+      - name: Opus conformance
+        run: sh tools/opus_vectors.sh build-host/opus_vectors opus_newvectors

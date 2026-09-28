@@ -51,6 +51,8 @@ add_library(silicord_core STATIC
   src/opus_celt.c
   src/opus_math.c
   src/opus_rc.c
+  src/opus_silk.c
+  src/opus_silk_tables.c
   src/model.c
   src/p256.c
   src/msg.c
@@ -149,8 +151,6 @@ silicord_test(rtp_test)
 add_test(NAME rtp COMMAND rtp_test)
 silicord_test(opus_test)
 add_test(NAME opus COMMAND opus_test)
-# Conformance against the Opus test vectors, run by hand or in CI with the vectors downloaded.
-silicord_test(opus_vectors shell32)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)

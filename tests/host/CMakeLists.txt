@@ -26,7 +26,7 @@ include_directories(shim ${ROOT}/src ${ROOT}/tests)
 add_library(core STATIC
   ${ROOT}/src/aes.c ${ROOT}/src/apng.c ${ROOT}/src/b64.c ${ROOT}/src/command.c ${ROOT}/src/dave.c ${ROOT}/src/dave_session.c ${ROOT}/src/emoji.c ${ROOT}/src/emoji_data.c ${ROOT}/src/emoji_alias.c
   ${ROOT}/src/hpke.c ${ROOT}/src/inflate.c ${ROOT}/src/json.c ${ROOT}/src/md.c ${ROOT}/src/mem.c ${ROOT}/src/memberlist.c
-  ${ROOT}/src/mls_crypto.c ${ROOT}/src/mls_group.c ${ROOT}/src/mls_msg.c ${ROOT}/src/mls_path.c ${ROOT}/src/mls_schedule.c ${ROOT}/src/mls_tree.c ${ROOT}/src/opus.c ${ROOT}/src/opus_celt.c ${ROOT}/src/opus_math.c ${ROOT}/src/opus_rc.c ${ROOT}/src/model.c ${ROOT}/src/p256.c ${ROOT}/src/msg.c ${ROOT}/src/profile.c ${ROOT}/src/qr.c ${ROOT}/src/rng.c ${ROOT}/src/rtp.c ${ROOT}/src/sb.c
+  ${ROOT}/src/mls_crypto.c ${ROOT}/src/mls_group.c ${ROOT}/src/mls_msg.c ${ROOT}/src/mls_path.c ${ROOT}/src/mls_schedule.c ${ROOT}/src/mls_tree.c ${ROOT}/src/opus.c ${ROOT}/src/opus_celt.c ${ROOT}/src/opus_math.c ${ROOT}/src/opus_rc.c ${ROOT}/src/opus_silk.c ${ROOT}/src/opus_silk_tables.c ${ROOT}/src/model.c ${ROOT}/src/p256.c ${ROOT}/src/msg.c ${ROOT}/src/profile.c ${ROOT}/src/qr.c ${ROOT}/src/rng.c ${ROOT}/src/rtp.c ${ROOT}/src/sb.c
   ${ROOT}/src/search.c ${ROOT}/src/sha2.c ${ROOT}/src/stats.c ${ROOT}/src/tls.c ${ROOT}/src/utf.c shim/shim.c)
 
 # The same test sources as on Windows (crypto, render and QR need Windows).
@@ -37,6 +37,10 @@ foreach(name aes apng command dave dave_session emoji hpke inflate json md membe
   add_test(NAME ${name} COMMAND ${name}_test)
   set_tests_properties(${name} PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL ")
 endforeach()
+
+# Conformance with the Opus test vectors (RFC 8251), which CI downloads: tools/opus_vectors.sh.
+add_executable(opus_vectors opus_vectors.c)
+target_link_libraries(opus_vectors core m)
 
 # The fuzzer's dictionaries come from the sources and the tests' JSON.
 set(DICT ${CMAKE_CURRENT_BINARY_DIR}/dict)
