@@ -301,6 +301,8 @@ int json_str(json_t v, sb_t *out)
                 hex4(p + 2, &lo) && lo >= 0xDC00 && lo < 0xE000) {
                 cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                 p += 6;
+            } else if (cp >= 0xD800 && cp < 0xE000) {
+                cp = 0xFFFD; /* a lone surrogate has no UTF-8 form */
             }
             put_utf8(out, cp);
             break;

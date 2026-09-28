@@ -90,6 +90,14 @@ static void test_str(void)
     check(json_str(v, &s) && str_eq(&s, "\xF0\x9F\x98\x80"), "surrogate pair to utf-8");
     sb_clear(&s);
 
+    parse("\"a\\ud83db\"", &v);
+    check(json_str(v, &s) && str_eq(&s, "a\xEF\xBF\xBD" "b"), "lone high surrogate becomes U+FFFD");
+    sb_clear(&s);
+
+    parse("\"\\ude00\"", &v);
+    check(json_str(v, &s) && str_eq(&s, "\xEF\xBF\xBD"), "lone low surrogate becomes U+FFFD");
+    sb_clear(&s);
+
     parse("\"d\xC3\xA9j\xC3\xA0\"", &v);
     check(json_str(v, &s) && str_eq(&s, "d\xC3\xA9j\xC3\xA0"), "raw utf-8 passthrough");
     sb_free(&s);
