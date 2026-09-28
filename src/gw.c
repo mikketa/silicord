@@ -1,11 +1,14 @@
 #include <windows.h>
 #include "gw.h"
+#include "inflate.h"
 #include "sb.h"
 #include "sc_asm.h"
 #include "ws.h"
 
 #define GW_HOST L"gateway.discord.gg"
-#define GW_PATH L"/?v=10&encoding=json"
+/* Compressed: READY and the member lists shrink to a fraction on the wire. */
+#define GW_PATH L"/?v=10&encoding=json&compress=zlib-stream"
+#define KEEP_BUFFER (256 * 1024) /* larger buffers (READY) are freed after use */
 
 enum {
     OP_DISPATCH = 0,
@@ -36,6 +39,9 @@ typedef struct {
     int *established;
     char session_id[80];
     wchar_t resume_host[128];
+    inflate_t zlib;    /* one stream per connection */
+    sb_t packed;       /* compressed bytes until the flush marker */
+    sb_t json;         /* the message they inflate to */
 } gw_t;
 
 static gw_t g_gw;
@@ -266,8 +272,30 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
         return cancelled(g) ? GW_STOPPED : (g->session_id[0] ? GW_RESUME : GW_REIDENTIFY);
     }
     status(g, g->resuming ? "Resuming\xE2\x80\xA6" : "Connected");
-    while (!cancelled(g) && ws_recv(&g->ws, &msg) && (result = handle(g, &msg)) == CONTINUE)
-        ;
+    inflate_init(&g->zlib);
+    sb_clear(&g->packed);
+    while (!cancelled(g) && ws_recv(&g->ws, &msg)) {
+        /* A message may come in several frames: inflate once the flush marker arrives. */
+        sb_addn(&g->packed, msg.data ? msg.data : "", msg.len);
+        if (!inflate_complete((const unsigned char *)g->packed.data, g->packed.len))
+            continue;
+        sb_clear(&g->json);
+        if (!inflate_message(&g->zlib, (const unsigned char *)g->packed.data, g->packed.len, &g->json)) {
+            status(g, "Corrupt data from the gateway");
+            result = GW_RESUME;
+            break;
+        }
+        sb_clear(&g->packed);
+        result = handle(g, &g->json);
+        if (g->json.cap > KEEP_BUFFER)
+            sb_free(&g->json);
+        if (msg.cap > KEEP_BUFFER)
+            sb_free(&msg);
+        if (g->packed.cap > KEEP_BUFFER)
+            sb_free(&g->packed);
+        if (result != CONTINUE)
+            break;
+    }
 
     if (cancelled(g))
         result = GW_STOPPED;
