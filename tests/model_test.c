@@ -161,6 +161,26 @@ static void test_emojis(const model_t *m)
     }
     check(n == 2 && ok, "custom emoji listed, unavailable ones dropped");
     model_free(a);
+
+    a = apply(m, "GUILD_STICKERS_UPDATE", "{\"guild_id\":\"1\",\"stickers\":["
+                                          "{\"id\":\"80\",\"name\":\"wave\",\"format_type\":1},"
+                                          "{\"id\":\"81\",\"name\":\"spin\",\"format_type\":4}]}");
+    cursor = 0;
+    n = 0;
+    ok = 1;
+    check(a != NULL, "sticker update applies");
+    while (a && model_sticker_next(a, 0, &cursor, &e)) {
+        if (n == 0)
+            ok &= lstrcmpA(e.id, "80") == 0 && e.format == 1 && e.name_len == 4;
+        if (n == 1)
+            ok &= lstrcmpA(e.id, "81") == 0 && e.format == 4 && e.name_len == 4;
+        n++;
+    }
+    check(n == 2 && ok, "stickers listed with their format");
+    cursor = 0;
+    check(a && model_emoji_next(a, 0, &cursor, &e) == model_emoji_next(m, 0, &(unsigned){0}, &e),
+          "sticker update keeps the emoji");
+    model_free(a);
 }
 
 static void test_roles(const model_t *m)

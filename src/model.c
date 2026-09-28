@@ -362,11 +362,14 @@ unsigned model_role_color(const model_t *m, int g, const char *roles)
     return color;
 }
 
-/* ---- Custom emoji ----
- * Packed like roles, one per line: "id animated name\n". Unavailable ones are left out.
+/* ---- Custom emoji and stickers ----
+ * Packed like roles, one per line: "id flag name\n", where the flag is 1 for an
+ * animated emoji, or a sticker's format_type. Unavailable ones are left out.
  */
 
-static unsigned pack_emojis(model_t *m, json_t list)
+static int packed_next(const char *base, unsigned *cursor, model_emoji_t *out);
+
+static unsigned pack_emojis(model_t *m, json_t list, int stickers)
 {
     sb_t packed = {0};
     json_iter_t it;
@@ -375,8 +378,9 @@ static unsigned pack_emojis(model_t *m, json_t list)
 
     json_iter(list, &it);
     while (json_next(&it, NULL, &e)) {
-        char id[24] = "";
+        char id[24] = "", flag[4] = " 0 ";
         sb_t name = {0};
+        long long format = 0;
         if (!json_get(e, "id", &v) || (json_get(e, "available", &v) && json_type(v) == JSON_FALSE))
             continue;
         json_get(e, "id", &v);
@@ -387,8 +391,12 @@ static unsigned pack_emojis(model_t *m, json_t list)
             sb_free(&name);
             continue;
         }
+        if (stickers && json_get(e, "format_type", &v) && json_int(v, &format) && format > 0 && format < 10)
+            flag[1] = (char)('0' + format);
+        else if (!stickers && json_get(e, "animated", &v) && is_true(v))
+            flag[1] = '1';
         sb_add(&packed, id);
-        sb_add(&packed, json_get(e, "animated", &v) && is_true(v) ? " 1 " : " 0 ");
+        sb_add(&packed, flag);
         sb_addn(&packed, name.data, name.len);
         sb_add(&packed, "\n");
         sb_free(&name);
@@ -403,12 +411,23 @@ static unsigned pack_emojis(model_t *m, json_t list)
 
 int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
 {
-    const char *base, *p;
-    int k = 0;
-
     if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].emojis)
         return 0;
-    base = m->strings.data + m->guilds[g].emojis;
+    return packed_next(m->strings.data + m->guilds[g].emojis, cursor, out);
+}
+
+int model_sticker_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
+{
+    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].stickers)
+        return 0;
+    return packed_next(m->strings.data + m->guilds[g].stickers, cursor, out);
+}
+
+static int packed_next(const char *base, unsigned *cursor, model_emoji_t *out)
+{
+    const char *p;
+    int k = 0;
+
     p = base + *cursor;
     if (!*p)
         return 0;
@@ -419,6 +438,7 @@ int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *o
     out->id[k] = 0;
     p += k + (p[k] == ' ');
     out->animated = *p == '1';
+    out->format = *p - '0';
     p += 2;
     out->name = p;
     while (*p && *p != '\n')
@@ -596,7 +616,9 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
     if (field(g, "roles", &v))
         out->roles = pack_roles(m, v);
     if (field(g, "emojis", &v))
-        out->emojis = pack_emojis(m, v);
+        out->emojis = pack_emojis(m, v, 0);
+    if (field(g, "stickers", &v))
+        out->stickers = pack_emojis(m, v, 1);
     nmine = my_roles(d, g, index, m->user_id, mine);
     if (nmine < 0 && !from_ready)
         nmine = 0; /* just joined: no roles yet */
@@ -945,6 +967,8 @@ model_t *model_from_ready(json_t d)
             json_raw(v, m->user_avatar, sizeof m->user_avatar);
         if ((json_get(user, "global_name", &v) && json_type(v) == JSON_STRING) || json_get(user, "username", &v))
             m->user_name = add_str(m, v);
+        if (json_get(user, "premium_type", &v))
+            m->premium = (int)to_i64(v);
     }
 
     total = json_get(d, "guilds", &guilds) ? (unsigned)json_count(guilds) : 0;
@@ -1003,6 +1027,7 @@ static model_t *clone_empty(const model_t *m, unsigned extra_guilds)
     copy_id(n->user_id, m->user_id, sizeof n->user_id);
     copy_id(n->user_avatar, m->user_avatar, sizeof n->user_avatar);
     n->user_name = m->user_name;
+    n->premium = m->premium;
     n->guilds = mem_alloc((m->nguilds + extra_guilds + 1) * sizeof *n->guilds);
     n->folders = mem_alloc((m->nfolders + 1) * sizeof *n->folders);
     for (unsigned f = 0; f < m->nfolders; f++)
@@ -1265,7 +1290,8 @@ static model_t *apply_role(const model_t *m, json_t d, int deleted)
     return n;
 }
 
-static model_t *apply_emojis(const model_t *m, json_t d)
+/* GUILD_EMOJIS_UPDATE or GUILD_STICKERS_UPDATE: the whole list is replaced. */
+static model_t *apply_emojis(const model_t *m, json_t d, int stickers)
 {
     json_t v, list;
     char gid[24] = "";
@@ -1275,13 +1301,16 @@ static model_t *apply_emojis(const model_t *m, json_t d)
 
     if (json_get(d, "guild_id", &v))
         json_raw(v, gid, sizeof gid);
-    if ((gi = model_find_guild(m, gid)) < 0 || !json_get(d, "emojis", &list))
+    if ((gi = model_find_guild(m, gid)) < 0 || !json_get(d, stickers ? "stickers" : "emojis", &list))
         return NULL;
     n = clone_empty(m, 0);
     for (unsigned g = 0; g < m->nguilds; g++)
         copy_guild(n, &cap, m, g, NULL);
     copy_dms(n, &cap, m, NULL, NULL, NULL);
-    n->guilds[gi].emojis = pack_emojis(n, list);
+    if (stickers)
+        n->guilds[gi].stickers = pack_emojis(n, list, 1);
+    else
+        n->guilds[gi].emojis = pack_emojis(n, list, 0);
     return n;
 }
 
@@ -1302,7 +1331,9 @@ model_t *model_apply(const model_t *m, const char *event, json_t d)
     if (str_eq(event, "THREAD_DELETE"))
         return apply_channel(m, d, 1);
     if (str_eq(event, "GUILD_EMOJIS_UPDATE"))
-        return apply_emojis(m, d);
+        return apply_emojis(m, d, 0);
+    if (str_eq(event, "GUILD_STICKERS_UPDATE"))
+        return apply_emojis(m, d, 1);
     if (str_eq(event, "GUILD_ROLE_CREATE") || str_eq(event, "GUILD_ROLE_UPDATE"))
         return apply_role(m, d, 0);
     if (str_eq(event, "GUILD_ROLE_DELETE"))

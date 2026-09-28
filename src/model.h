@@ -36,6 +36,7 @@ typedef struct {
     unsigned my_roles;  /* comma-separated role ids */
     unsigned roles;     /* packed role list, read with model_role_next() */
     unsigned emojis;    /* packed custom emoji list, read with model_emoji_next() */
+    unsigned stickers;  /* packed sticker list, read with model_sticker_next() */
     int folder;         /* index in model_t.folders, -1 when not in a folder */
 } guild_t;
 
@@ -75,6 +76,7 @@ typedef struct {
     char user_id[24];
     char user_avatar[40];
     unsigned user_name;
+    int premium;        /* Nitro tier, 0 without: stickers of other servers need it */
     folder_t *folders;
     unsigned nfolders;
 } model_t;
@@ -118,12 +120,15 @@ int model_role_next(const model_t *m, int g, unsigned *cursor, model_role_t *out
 typedef struct {
     char id[24];
     int animated;
+    int format;         /* stickers: 1 PNG, 2 APNG, 3 Lottie, 4 GIF */
     const char *name;
     int name_len;
 } model_emoji_t;
 
 /* Iterates the custom emoji of guild g: start with *cursor = 0; returns 0 at the end. */
 int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out);
+/* Same for the guild's stickers. */
+int model_sticker_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out);
 
 /* Color of the highest colored role among `roles` (comma-separated ids), 0 if none. */
 unsigned model_role_color(const model_t *m, int g, const char *roles);
