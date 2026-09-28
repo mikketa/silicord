@@ -43,3 +43,18 @@ void celt_reset(celt_decoder_t *st);
  * NULL; `data` NULL or len <= 1 conceals a lost frame. Returns the samples, or -1.
  */
 int celt_decode(celt_decoder_t *st, const unsigned char *data, int len, float *pcm, int frame_size, opus_rc_t *rc);
+
+/* A mono CELT encoder: 20 ms frames of 960 samples at 48 kHz, long blocks, constant size. */
+typedef struct {
+    float preemph_mem;
+    float in_mem[CELT_OVERLAP];
+    float old_band_e[CELT_BANDS];
+    int last_coded_bands, frames;
+    unsigned rng; /* the range coder's final state, as the decoder will find it */
+    float in[960 + CELT_OVERLAP], freq[960], x[960];
+    float z[2 * 480], f[2 * 480];
+} celt_encoder_t;
+
+void celt_encoder_init(celt_encoder_t *st);
+/* Encodes 960 samples in [-1, 1] into exactly `n` bytes (a CELT frame, no TOC). Returns 0 on failure. */
+int celt_encode(celt_encoder_t *st, const float *pcm, unsigned char *out, int n);

@@ -12,6 +12,8 @@ float om_sqrt(float x);
 float om_exp2(float x);
 /* log2(x) for x > 0 */
 float om_log2(float x);
+/* The angle of (x, y), in radians. */
+float om_atan2(float y, float x);
 /* Double precision sine and cosine, for tables computed once. */
 double om_sin(double x);
 double om_cos(double x);

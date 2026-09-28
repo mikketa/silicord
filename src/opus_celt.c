@@ -418,7 +418,7 @@ static int pulses2bits(int band, int lm, int pulses)
 static int interp_bits2pulses(int start, int end, int skip_start, const int *bits1, const int *bits2,
                               const int *thresh, const int *cap, int total, int *out_balance, int skip_rsv,
                               int *intensity, int intensity_rsv, int *dual_stereo, int dual_stereo_rsv, int *bits,
-                              int *ebits, int *fine_priority, int C, int lm, opus_rc_t *rc)
+                              int *ebits, int *fine_priority, int C, int lm, opus_rc_t *rc, opus_rce_t *enc, int prev)
 {
     int psum, lo = 0, hi = 1 << ALLOC_STEPS, done, coded, alloc_floor = C << BITRES, stereo = C > 1;
     int log_m = lm << BITRES, left, percoeff, balance, j;
@@ -469,8 +469,16 @@ static int interp_bits2pulses(int start, int end, int skip_start, const int *bit
         band_width = k_ebands[coded] - k_ebands[j];
         band_bits = bits[j] + percoeff * band_width + rem;
         if (band_bits >= imax(thresh[j], alloc_floor + (1 << BITRES))) {
-            if (rc_bit_logp(rc, 1))
+            if (enc) {
+                /* The encoder's choice, with some hysteresis against bands flickering in and out. */
+                if (band_bits > ((j < prev ? 7 : 9) * band_width << lm << BITRES) >> 4) {
+                    rce_bit_logp(enc, 1, 1);
+                    break;
+                }
+                rce_bit_logp(enc, 0, 1);
+            } else if (rc_bit_logp(rc, 1)) {
                 break;
+            }
             psum += 1 << BITRES;
             band_bits -= 1 << BITRES;
         }
@@ -486,15 +494,24 @@ static int interp_bits2pulses(int start, int end, int skip_start, const int *bit
         }
     }
 
-    if (intensity_rsv > 0)
-        *intensity = start + (int)rc_uint(rc, (unsigned)(coded + 1 - start));
-    else
+    if (intensity_rsv > 0) {
+        if (enc) {
+            *intensity = imin(*intensity, coded);
+            rce_uint(enc, (unsigned)(*intensity - start), (unsigned)(coded + 1 - start));
+        } else {
+            *intensity = start + (int)rc_uint(rc, (unsigned)(coded + 1 - start));
+        }
+    } else {
         *intensity = 0;
+    }
     if (*intensity <= start) {
         total += dual_stereo_rsv;
         dual_stereo_rsv = 0;
     }
-    *dual_stereo = dual_stereo_rsv > 0 ? rc_bit_logp(rc, 1) : 0;
+    if (dual_stereo_rsv > 0 && enc)
+        rce_bit_logp(enc, *dual_stereo, 1);
+    else
+        *dual_stereo = dual_stereo_rsv > 0 ? rc_bit_logp(rc, 1) : 0;
 
     /* The remaining bits, spread over the coded bands. */
     left = total - psum;
@@ -557,7 +574,7 @@ static int interp_bits2pulses(int start, int end, int skip_start, const int *bit
 
 static int compute_allocation(int start, int end, const int *offsets, const int *cap, int alloc_trim,
                               int *intensity, int *dual_stereo, int total, int *balance, int *pulses, int *ebits,
-                              int *fine_priority, int C, int lm, opus_rc_t *rc)
+                              int *fine_priority, int C, int lm, opus_rc_t *rc, opus_rce_t *enc, int prev)
 {
     int lo = 1, hi = 10, skip_start = start, skip_rsv, intensity_rsv = 0, dual_stereo_rsv = 0;
     int bits1[CELT_BANDS], bits2[CELT_BANDS], thresh[CELT_BANDS], trim_offset[CELT_BANDS];
@@ -619,7 +636,8 @@ static int compute_allocation(int start, int end, const int *offsets, const int 
         bits2[j] = imax(0, b2 - b1);
     }
     return interp_bits2pulses(start, end, skip_start, bits1, bits2, thresh, cap, total, balance, skip_rsv, intensity,
-                              intensity_rsv, dual_stereo, dual_stereo_rsv, pulses, ebits, fine_priority, C, lm, rc);
+                              intensity_rsv, dual_stereo, dual_stereo_rsv, pulses, ebits, fine_priority, C, lm, rc,
+                              enc, prev);
 }
 
 /* ---- Pulse vectors (PVQ) ---- */
@@ -1414,7 +1432,7 @@ int celt_decode(celt_decoder_t *st, const unsigned char *data, int len, float *p
     anti_collapse_rsv = is_transient && lm >= 2 && bits >= (lm + 2) << BITRES ? 1 << BITRES : 0;
     bits -= anti_collapse_rsv;
     coded = compute_allocation(st->start, st->end, offsets, cap, alloc_trim, &intensity, &dual_stereo, bits, &balance,
-                               pulses, fine, fine_priority, C, lm, rc);
+                               pulses, fine, fine_priority, C, lm, rc, NULL, 0);
 
     /* Fine energy */
     for (int i = st->start; i < st->end; i++) {
@@ -1563,4 +1581,489 @@ int celt_decode(celt_decoder_t *st, const unsigned char *data, int len, float *p
     }
     st->loss_count = 0;
     return rc_tell(rc) > 8 * len ? -1 : n;
+}
+
+/* ==== Encoder ==== */
+
+/* The forward MDCT matching imdct(): fold with the window, N/4-point FFT, rotations. */
+static void mdct_forward(celt_encoder_t *st, const float *in, float *out, int lm)
+{
+    int n = 2 * (SHORT_MDCT << lm), n2 = n / 2, n4 = n / 4, i;
+    const cpx_t *rot = g_rot[lm];
+    cpx_t *z = (cpx_t *)st->z, *f = (cpx_t *)st->f;
+    const float *xp1 = in + (CELT_OVERLAP >> 1), *xp2 = in + n2 - 1 + (CELT_OVERLAP >> 1);
+    const float *wp1 = g_window + (CELT_OVERLAP >> 1), *wp2 = g_window + (CELT_OVERLAP >> 1) - 1;
+
+    for (i = 0; i < CELT_OVERLAP >> 2; i++) {
+        z[i].r = *wp2 * xp1[n2] + *wp1 * *xp2;
+        z[i].i = *wp1 * *xp1 - *wp2 * xp2[-n2];
+        xp1 += 2;
+        xp2 -= 2;
+        wp1 += 2;
+        wp2 -= 2;
+    }
+    wp1 = g_window;
+    wp2 = g_window + CELT_OVERLAP - 1;
+    for (; i < n4 - (CELT_OVERLAP >> 2); i++) {
+        z[i].r = *xp2;
+        z[i].i = *xp1;
+        xp1 += 2;
+        xp2 -= 2;
+    }
+    for (; i < n4; i++) {
+        z[i].r = -*wp1 * xp1[-n2] + *wp2 * *xp2;
+        z[i].i = *wp2 * *xp1 + *wp1 * xp2[n2];
+        xp1 += 2;
+        xp2 -= 2;
+        wp1 += 2;
+        wp2 -= 2;
+    }
+    /* Pre-rotation by -e^(-i theta), conjugated for the forward transform through the inverse FFT. */
+    for (i = 0; i < n4; i++) {
+        float re = z[i].r, im = z[i].i;
+        cpx_t w;
+        w.r = -(re * rot[i].r + im * rot[i].i);
+        w.i = -(im * rot[i].r - re * rot[i].i);
+        z[i].r = w.r;
+        z[i].i = -w.i;
+    }
+    ifft_rec(f, z, n4, 1);
+    for (i = 0; i < n4; i++) {
+        float fr = f[i].r / (float)n4, fi = -f[i].i / (float)n4;
+        out[2 * i] = fr * rot[i].r + fi * rot[i].i;
+        out[n2 - 1 - 2 * i] = -(fi * rot[i].r - fr * rot[i].i);
+    }
+}
+
+static void laplace_encode(opus_rce_t *enc, int *value, unsigned fs, int decay)
+{
+    unsigned fl = 0;
+    int val = *value;
+
+    if (val) {
+        int s = -(val < 0), i;
+        val = (val + s) ^ s;
+        fl = fs;
+        fs = (32768 - LAPLACE_MINP * (2 * LAPLACE_NMIN) - fs) * (unsigned)(16384 - decay) >> 15;
+        for (i = 1; fs > 0 && i < val; i++) {
+            fs *= 2;
+            fl += fs + 2 * LAPLACE_MINP;
+            fs = (fs * (unsigned)decay) >> 15;
+        }
+        if (!fs) {
+            int ndi_max = (int)(32768 - fl + LAPLACE_MINP - 1), di;
+            ndi_max = (ndi_max - s) >> 1;
+            di = imin(val - i, ndi_max - 1);
+            fl += (unsigned)((2 * di + 1 + s) * LAPLACE_MINP);
+            fs = 32768 - fl < LAPLACE_MINP ? 32768 - fl : LAPLACE_MINP;
+            *value = (i + di + s) ^ s;
+        } else {
+            fs += LAPLACE_MINP;
+            fl += fs & (unsigned)~s;
+        }
+    }
+    rce_encode_bin(enc, fl, fl + fs, 15);
+}
+
+static void quant_coarse(celt_encoder_t *st, opus_rce_t *enc, const float *log_e, float *error, int intra, int lm,
+                         int budget, float max_decay)
+{
+    const unsigned char *prob = k_e_prob[lm][intra];
+    float prev = 0, coef = intra ? 0 : k_pred_coef[lm], beta = intra ? k_beta_intra : k_beta_coef[lm];
+
+    if (rce_tell(enc) + 3 <= budget)
+        rce_bit_logp(enc, intra, 3);
+    for (int i = 0; i < CELT_BANDS; i++) {
+        float x = log_e[i], old_e = st->old_band_e[i] < -9.f ? -9.f : st->old_band_e[i], f, decay_bound;
+        int qi, tell, bits_left;
+        f = x - coef * old_e - prev;
+        qi = (int)(f + .5f >= 0 ? f + .5f : f + .5f - 1.f); /* floor */
+        decay_bound = (st->old_band_e[i] < -28.f ? -28.f : st->old_band_e[i]) - max_decay;
+        if (qi < 0 && x < decay_bound) {
+            qi += (int)(decay_bound - x);
+            if (qi > 0)
+                qi = 0;
+        }
+        tell = rce_tell(enc);
+        bits_left = budget - tell - 3 * (CELT_BANDS - i);
+        if (i != 0 && bits_left < 30) {
+            if (bits_left < 24)
+                qi = imin(1, qi);
+            if (bits_left < 16)
+                qi = imax(-1, qi);
+        }
+        if (budget - tell >= 15) {
+            int pi = 2 * imin(i, 20);
+            laplace_encode(enc, &qi, (unsigned)prob[pi] << 7, prob[pi + 1] << 6);
+        } else if (budget - tell >= 2) {
+            qi = imax(-1, imin(qi, 1));
+            rce_icdf(enc, 2 * qi ^ -(qi < 0), k_small_energy_icdf, 2);
+        } else if (budget - tell >= 1) {
+            qi = imin(0, qi);
+            rce_bit_logp(enc, -qi, 1);
+        } else {
+            qi = -1;
+        }
+        error[i] = f - (float)qi;
+        st->old_band_e[i] = coef * old_e + prev + (float)qi;
+        prev = prev + (float)qi - beta * (float)qi;
+    }
+}
+
+/* PVQ codeword index of a pulse vector (the inverse of decode_pulses). */
+static void encode_pulses(const int *y, int n, int k, opus_rce_t *enc)
+{
+    unsigned u[132], idx, nc;
+    int j = n - 2, kk;
+
+    u[0] = 0;
+    for (kk = 1; kk <= k + 1; kk++)
+        u[kk] = (unsigned)((kk << 1) - 1);
+    idx = y[n - 1] < 0;
+    kk = y[n - 1] < 0 ? -y[n - 1] : y[n - 1];
+    idx += u[kk];
+    kk += y[j] < 0 ? -y[j] : y[j];
+    if (y[j] < 0)
+        idx += u[kk + 1];
+    while (j-- > 0) {
+        /* The next row: u[i][j] = u[i-1][j] + u[i][j-1] + u[i-1][j-1] */
+        unsigned u0 = 0, u1;
+        int m = 1;
+        do {
+            u1 = u[m] + u[m - 1] + u0;
+            u[m - 1] = u0;
+            u0 = u1;
+        } while (++m < k + 2);
+        u[m - 1] = u0;
+        idx += u[kk];
+        kk += y[j] < 0 ? -y[j] : y[j];
+        if (y[j] < 0)
+            idx += u[kk + 1];
+    }
+    nc = u[kk] + u[kk + 1];
+    rce_uint(enc, idx, nc);
+}
+
+/* Pyramid vector quantization of x (unit norm) with k pulses: a greedy search after a projection. */
+static void alg_quant(float *x, int n, int k, int spread, int b, opus_rce_t *enc)
+{
+    int iy[176], signx[176], pulses_left = k;
+    float y[176], xy = 0, yy = 0;
+
+    exp_rotation(x, n, 1, b, k, spread);
+    for (int j = 0; j < n; j++) {
+        signx[j] = x[j] > 0 ? 1 : -1;
+        if (x[j] < 0)
+            x[j] = -x[j];
+        iy[j] = 0;
+        y[j] = 0;
+    }
+    if (k > n >> 1) {
+        float sum = 0, rcp;
+        for (int j = 0; j < n; j++)
+            sum += x[j];
+        if (!(sum > EPSILON && sum < 64)) {
+            x[0] = 1.f;
+            for (int j = 1; j < n; j++)
+                x[j] = 0;
+            sum = 1.f;
+        }
+        rcp = (float)(k - 1) / sum;
+        for (int j = 0; j < n; j++) {
+            iy[j] = (int)(rcp * x[j]); /* floor, x is positive */
+            y[j] = (float)iy[j];
+            yy += y[j] * y[j];
+            xy += x[j] * y[j];
+            y[j] *= 2;
+            pulses_left -= iy[j];
+        }
+    }
+    if (pulses_left > n + 3) {
+        float t = (float)pulses_left;
+        yy += t * t + t * y[0];
+        iy[0] += pulses_left;
+        pulses_left = 0;
+    }
+    for (int i = 0; i < pulses_left; i++) {
+        int best = 0;
+        float best_num = -1e15f, best_den = 0;
+        yy += 1;
+        for (int j = 0; j < n; j++) {
+            float rxy = xy + x[j], ryy = yy + y[j];
+            rxy *= rxy;
+            if (best_den * rxy > ryy * best_num) {
+                best_den = ryy;
+                best_num = rxy;
+                best = j;
+            }
+        }
+        xy += x[best];
+        yy += y[best];
+        y[best] += 2;
+        iy[best]++;
+    }
+    for (int j = 0; j < n; j++)
+        if (signx[j] < 0)
+            iy[j] = -iy[j];
+    encode_pulses(iy, n, k, enc);
+}
+
+typedef struct {
+    opus_rce_t *enc;
+    int spread, remaining_bits;
+} enc_ctx_t;
+
+/* The band's angle between its two halves, in 1/16384 of a quarter turn. */
+static int band_itheta(const float *x, const float *y, int n)
+{
+    float emid = EPSILON, eside = EPSILON;
+
+    for (int i = 0; i < n; i++) {
+        emid += x[i] * x[i];
+        eside += y[i] * y[i];
+    }
+    return (int)(.5f + 16384 * 0.63662f * om_atan2(om_sqrt(eside), om_sqrt(emid)));
+}
+
+/* quant_band() of the decoder, encoding a mono band: the same splits and the same bit accounting. */
+static void quant_band_enc(enc_ctx_t *ctx, int i, float *x, int n, int b, int big_b, int tf_change, int lm, int level)
+{
+    opus_rce_t *enc = ctx->enc;
+    int n_b = n / big_b, b0 = big_b, recombine = 0, split = 0, long_blocks = b0 == 1;
+    float *y = NULL;
+
+    if (n == 1) {
+        if (ctx->remaining_bits >= 1 << BITRES) {
+            rce_bits(enc, x[0] < 0, 1);
+            ctx->remaining_bits -= 1 << BITRES;
+        }
+        return;
+    }
+    if (level == 0) {
+        if (tf_change > 0)
+            recombine = tf_change;
+        for (int k = 0; k < recombine; k++)
+            haar1(x, n >> k, 1 << k);
+        big_b >>= recombine;
+        n_b <<= recombine;
+        while ((n_b & 1) == 0 && tf_change < 0) {
+            haar1(x, n_b, big_b);
+            big_b <<= 1;
+            n_b >>= 1;
+            tf_change++;
+        }
+        b0 = big_b;
+        if (b0 > 1)
+            deinterleave_hadamard(x, n_b >> recombine, b0 << recombine, long_blocks);
+    }
+    {
+        const unsigned char *cache = pulse_cache(i, lm);
+        if (lm != -1 && b > cache[cache[0]] + 12 && n > 2) {
+            n >>= 1;
+            y = x + n;
+            split = 1;
+            lm -= 1;
+            big_b = (big_b + 1) >> 1;
+        }
+    }
+    if (split) {
+        int pulse_cap = k_log_n[i] + lm * (1 << BITRES), offset = (pulse_cap >> 1) - QTHETA_OFFSET;
+        int qn = compute_qn(n, b, offset, pulse_cap, 0), itheta = band_itheta(x, y, n), tell, qalloc, delta, mbits;
+        int sbits, rebalance;
+        tell = (int)rce_tell_frac(enc);
+        if (qn != 1) {
+            itheta = (itheta * qn + 8192) >> 14;
+            if (b0 > 1) {
+                rce_uint(enc, (unsigned)itheta, (unsigned)(qn + 1));
+            } else {
+                int ft = ((qn >> 1) + 1) * ((qn >> 1) + 1);
+                int fs = itheta <= qn >> 1 ? itheta + 1 : qn + 1 - itheta;
+                int fl = itheta <= qn >> 1 ? itheta * (itheta + 1) >> 1 : ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1);
+                rce_encode(enc, (unsigned)fl, (unsigned)(fl + fs), (unsigned)ft);
+            }
+            itheta = itheta * 16384 / qn;
+        } else {
+            itheta = 0;
+        }
+        qalloc = (int)rce_tell_frac(enc) - tell;
+        b -= qalloc;
+        if (itheta == 0)
+            delta = -16384;
+        else if (itheta == 16384)
+            delta = 16384;
+        else
+            delta = frac_mul16((n - 1) << 7, bitexact_log2tan(bitexact_cos(16384 - itheta), bitexact_cos(itheta)));
+        if (b0 > 1 && (itheta & 0x3fff)) {
+            if (itheta > 8192)
+                delta -= delta >> (4 - lm);
+            else
+                delta = imin(0, delta + (n << BITRES >> (5 - lm)));
+        }
+        mbits = imax(0, imin(b, (b - delta) / 2));
+        sbits = b - mbits;
+        ctx->remaining_bits -= qalloc;
+        rebalance = ctx->remaining_bits;
+        if (mbits >= sbits) {
+            quant_band_enc(ctx, i, x, n, mbits, big_b, tf_change, lm, level + 1);
+            rebalance = mbits - (rebalance - ctx->remaining_bits);
+            if (rebalance > 3 << BITRES && itheta != 0)
+                sbits += rebalance - (3 << BITRES);
+            quant_band_enc(ctx, i, y, n, sbits, big_b, tf_change, lm, level + 1);
+        } else {
+            quant_band_enc(ctx, i, y, n, sbits, big_b, tf_change, lm, level + 1);
+            rebalance = sbits - (rebalance - ctx->remaining_bits);
+            if (rebalance > 3 << BITRES && itheta != 16384)
+                mbits += rebalance - (3 << BITRES);
+            quant_band_enc(ctx, i, x, n, mbits, big_b, tf_change, lm, level + 1);
+        }
+    } else {
+        int q = bits2pulses(i, lm, b), curr = pulses2bits(i, lm, q);
+        ctx->remaining_bits -= curr;
+        while (ctx->remaining_bits < 0 && q > 0) {
+            ctx->remaining_bits += curr;
+            q--;
+            curr = pulses2bits(i, lm, q);
+            ctx->remaining_bits -= curr;
+        }
+        if (q != 0)
+            alg_quant(x, n, get_pulses(q), ctx->spread, big_b, enc);
+    }
+}
+
+void celt_encoder_init(celt_encoder_t *st)
+{
+    init_tables();
+    memset(st, 0, sizeof *st);
+}
+
+int celt_encode(celt_encoder_t *st, const float *pcm, unsigned char *out, int nbytes)
+{
+    const int lm = 3, n = 960, total_bits = nbytes * 8;
+    float band_e[CELT_BANDS], log_e[CELT_BANDS], error[CELT_BANDS];
+    int cap[CELT_BANDS], offsets[CELT_BANDS] = {0}, pulses[CELT_BANDS], fine[CELT_BANDS], fine_priority[CELT_BANDS];
+    int tf_res[CELT_BANDS], intensity = 0, dual_stereo = 0, balance, coded, bits, tell;
+    opus_rce_t enc;
+    enc_ctx_t ctx;
+
+    if (nbytes < 2 || nbytes > 1275)
+        return 0;
+    rce_init(&enc, out, (unsigned)nbytes);
+
+    /* Pre-emphasis, after the previous frame's overlap. */
+    memcpy(st->in, st->in_mem, sizeof st->in_mem);
+    for (int i = 0; i < n; i++) {
+        float v = pcm[i] * SIG_SCALE;
+        if (!(v == v))
+            v = 0;
+        st->in[CELT_OVERLAP + i] = v - st->preemph_mem;
+        st->preemph_mem = 0.85000610f * v;
+    }
+    memcpy(st->in_mem, st->in + n, sizeof st->in_mem);
+
+    if (rce_tell(&enc) == 1)
+        rce_bit_logp(&enc, 0, 15); /* not silence */
+    if (rce_tell(&enc) + 16 <= total_bits)
+        rce_bit_logp(&enc, 0, 1); /* no pitch post-filter */
+    if (rce_tell(&enc) + 3 <= total_bits)
+        rce_bit_logp(&enc, 0, 3); /* no transient: one long MDCT */
+
+    mdct_forward(st, st->in, st->freq, lm);
+    for (int i = 0; i < CELT_BANDS; i++) {
+        float sum = 1e-27f, g;
+        for (int j = k_ebands[i] << lm; j < k_ebands[i + 1] << lm; j++)
+            sum += st->freq[j] * st->freq[j];
+        band_e[i] = om_sqrt(sum);
+        log_e[i] = om_log2(band_e[i]) - k_e_means[i];
+        g = 1.f / (1e-27f + band_e[i]);
+        for (int j = k_ebands[i] << lm; j < k_ebands[i + 1] << lm; j++)
+            st->x[j] = st->freq[j] * g;
+    }
+
+    /* Intra energy on the first frame, then prediction from the previous one. */
+    quant_coarse(st, &enc, log_e, error, st->frames == 0, lm, total_bits, 16.f < .125f * (float)nbytes ? 16.f : .125f * (float)nbytes);
+
+    /* No time-frequency changes. */
+    {
+        unsigned budget = (unsigned)total_bits, t = (unsigned)rce_tell(&enc);
+        int tf_select_rsv = t + 4 + 1 <= budget;
+        budget -= (unsigned)tf_select_rsv;
+        for (int i = 0, logp = 4; i < CELT_BANDS; i++, logp = 5)
+            if (t + (unsigned)logp <= budget) {
+                rce_bit_logp(&enc, 0, (unsigned)logp);
+                t = (unsigned)rce_tell(&enc);
+            }
+        if (tf_select_rsv && k_tf_select[lm][0] != k_tf_select[lm][2])
+            rce_bit_logp(&enc, 0, 1);
+        for (int i = 0; i < CELT_BANDS; i++)
+            tf_res[i] = k_tf_select[lm][0];
+    }
+    if (rce_tell(&enc) + 4 <= total_bits)
+        rce_icdf(&enc, SPREAD_NORMAL, k_spread_icdf, 5);
+
+    for (int i = 0; i < CELT_BANDS; i++)
+        cap[i] = (k_cache_caps[CELT_BANDS * (2 * lm) + i] + 64) * ((k_ebands[i + 1] - k_ebands[i]) << lm) >> 2;
+    /* No dynamic allocation boosts. */
+    tell = (int)rce_tell_frac(&enc);
+    for (int i = 0; i < CELT_BANDS; i++)
+        if (tell + (6 << BITRES) < total_bits << BITRES && 0 < cap[i]) {
+            rce_bit_logp(&enc, 0, 6);
+            tell = (int)rce_tell_frac(&enc);
+        }
+    if (tell + (6 << BITRES) <= total_bits << BITRES)
+        rce_icdf(&enc, 5, k_trim_icdf, 7);
+
+    bits = ((nbytes * 8) << BITRES) - (int)rce_tell_frac(&enc) - 1;
+    coded = compute_allocation(0, CELT_BANDS, offsets, cap, 5, &intensity, &dual_stereo, bits, &balance, pulses, fine,
+                               fine_priority, 1, lm, NULL, &enc, st->last_coded_bands);
+    st->last_coded_bands = coded;
+
+    /* Fine energy */
+    for (int i = 0; i < CELT_BANDS; i++) {
+        int frac = 1 << fine[i], q2;
+        float offset;
+        if (fine[i] <= 0)
+            continue;
+        q2 = (int)((error[i] + .5f) * (float)frac + 1024.f) - 1024; /* floor */
+        q2 = q2 > frac - 1 ? frac - 1 : q2 < 0 ? 0 : q2;
+        rce_bits(&enc, (unsigned)q2, (unsigned)fine[i]);
+        offset = ((float)q2 + .5f) * (float)(1 << (14 - fine[i])) * (1.f / 16384) - .5f;
+        st->old_band_e[i] += offset;
+        error[i] -= offset;
+    }
+
+    /* The shapes, band by band. */
+    ctx.enc = &enc;
+    ctx.spread = SPREAD_NORMAL;
+    for (int i = 0; i < CELT_BANDS; i++) {
+        int t = (int)rce_tell_frac(&enc), b, w = (k_ebands[i + 1] - k_ebands[i]) << lm;
+        if (i != 0)
+            balance -= t;
+        ctx.remaining_bits = nbytes * (8 << BITRES) - t - 1;
+        if (i <= coded - 1) {
+            int curr_balance = balance / imin(3, coded - i);
+            b = imax(0, imin(16383, imin(ctx.remaining_bits + 1, pulses[i] + curr_balance)));
+        } else {
+            b = 0;
+        }
+        quant_band_enc(&ctx, i, st->x + (k_ebands[i] << lm), w, b, 1, tf_res[i], lm, 0);
+        balance += pulses[i] + t;
+    }
+
+    /* The last fine energy bits, by priority. */
+    {
+        int bits_left = nbytes * 8 - rce_tell(&enc);
+        for (int prio = 0; prio < 2; prio++)
+            for (int i = 0; i < CELT_BANDS && bits_left >= 1; i++) {
+                int q2;
+                if (fine[i] >= MAX_FINE_BITS || fine_priority[i] != prio)
+                    continue;
+                q2 = error[i] < 0 ? 0 : 1;
+                rce_bits(&enc, (unsigned)q2, 1);
+                st->old_band_e[i] += ((float)q2 - .5f) * (float)(1 << (14 - fine[i] - 1)) * (1.f / 16384);
+                bits_left--;
+            }
+    }
+    st->frames++;
+    st->rng = enc.rng;
+    return rce_done(&enc);
 }

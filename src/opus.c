@@ -330,3 +330,22 @@ int opus_decode(opus_decoder_t *d, const unsigned char *data, size_t n, float *p
     }
     return total;
 }
+
+void opus_encoder_init(opus_encoder_t *e)
+{
+    memset(e, 0, sizeof *e);
+    celt_encoder_init(&e->celt);
+    e->bitrate = 64000;
+}
+
+int opus_encode(opus_encoder_t *e, const float *pcm, unsigned char *out)
+{
+    int bytes = e->bitrate / 400; /* 20 ms at that rate */
+
+    if (bytes < 3)
+        bytes = 3;
+    if (bytes > 1276)
+        bytes = 1276;
+    out[0] = 31 << 3; /* CELT fullband, 20 ms, mono, one frame */
+    return celt_encode(&e->celt, pcm, out + 1, bytes - 1) ? bytes : 0;
+}

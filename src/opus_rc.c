@@ -170,3 +170,205 @@ unsigned rc_tell_frac(const opus_rc_t *rc)
     }
     return (unsigned)(rc->nbits_total * 8 - lg);
 }
+
+/* ---- Encoder ---- */
+
+#define CODE_TOP (1u << 31)
+#define CODE_SHIFT 23
+
+static void write_byte(opus_rce_t *e, unsigned v)
+{
+    if (e->offs + e->end_offs >= e->storage)
+        e->error = 1;
+    else
+        e->buf[e->offs++] = (unsigned char)v;
+}
+
+static void write_byte_at_end(opus_rce_t *e, unsigned v)
+{
+    if (e->offs + e->end_offs >= e->storage)
+        e->error = 1;
+    else
+        e->buf[e->storage - ++e->end_offs] = (unsigned char)v;
+}
+
+/* Outputs a byte, holding back runs of 255 until a carry is known. */
+static void carry_out(opus_rce_t *e, int c)
+{
+    if (c != 255) {
+        int carry = c >> 8;
+        if (e->rem >= 0)
+            write_byte(e, (unsigned)(e->rem + carry));
+        for (; e->ext > 0; e->ext--)
+            write_byte(e, (255u + (unsigned)carry) & 255);
+        e->rem = c & 255;
+    } else {
+        e->ext++;
+    }
+}
+
+static void enc_normalize(opus_rce_t *e)
+{
+    while (e->rng <= TOP) {
+        carry_out(e, (int)(e->val >> CODE_SHIFT));
+        e->val = (e->val << 8) & (CODE_TOP - 1);
+        e->rng <<= 8;
+        e->nbits_total += 8;
+    }
+}
+
+void rce_init(opus_rce_t *e, unsigned char *buf, unsigned n)
+{
+    e->buf = buf;
+    e->storage = n;
+    e->offs = e->end_offs = e->end_window = 0;
+    e->nend_bits = 0;
+    e->nbits_total = 33;
+    e->rng = CODE_TOP;
+    e->rem = -1;
+    e->val = e->ext = 0;
+    e->error = 0;
+}
+
+void rce_encode(opus_rce_t *e, unsigned fl, unsigned fh, unsigned ft)
+{
+    unsigned r = e->rng / ft;
+
+    if (fl > 0) {
+        e->val += e->rng - r * (ft - fl);
+        e->rng = r * (fh - fl);
+    } else {
+        e->rng -= r * (ft - fh);
+    }
+    enc_normalize(e);
+}
+
+void rce_encode_bin(opus_rce_t *e, unsigned fl, unsigned fh, unsigned bits)
+{
+    unsigned r = e->rng >> bits;
+
+    if (fl > 0) {
+        e->val += e->rng - r * ((1u << bits) - fl);
+        e->rng = r * (fh - fl);
+    } else {
+        e->rng -= r * ((1u << bits) - fh);
+    }
+    enc_normalize(e);
+}
+
+void rce_bit_logp(opus_rce_t *e, int val, unsigned logp)
+{
+    unsigned s = e->rng >> logp, r = e->rng - s;
+
+    if (val)
+        e->val += r;
+    e->rng = val ? s : r;
+    enc_normalize(e);
+}
+
+void rce_icdf(opus_rce_t *e, int s, const unsigned char *icdf, unsigned ftb)
+{
+    unsigned r = e->rng >> ftb;
+
+    if (s > 0) {
+        e->val += e->rng - r * icdf[s - 1];
+        e->rng = r * (unsigned)(icdf[s - 1] - icdf[s]);
+    } else {
+        e->rng -= r * icdf[s];
+    }
+    enc_normalize(e);
+}
+
+void rce_bits(opus_rce_t *e, unsigned fl, unsigned n)
+{
+    unsigned window = e->end_window;
+    int used = e->nend_bits;
+
+    if (used + (int)n > 32) {
+        do {
+            write_byte_at_end(e, window & 255);
+            window >>= 8;
+            used -= 8;
+        } while (used >= 8);
+    }
+    window |= fl << used;
+    used += (int)n;
+    e->end_window = window;
+    e->nend_bits = used;
+    e->nbits_total += (int)n;
+}
+
+void rce_uint(opus_rce_t *e, unsigned fl, unsigned ft)
+{
+    int ftb;
+
+    ft--;
+    ftb = rc_ilog(ft);
+    if (ftb > 8) {
+        unsigned ft1, f;
+        ftb -= 8;
+        ft1 = (ft >> ftb) + 1;
+        f = fl >> ftb;
+        rce_encode(e, f, f + 1, ft1);
+        rce_bits(e, fl & ((1u << ftb) - 1), (unsigned)ftb);
+    } else {
+        rce_encode(e, fl, fl + 1, ft + 1);
+    }
+}
+
+int rce_tell(const opus_rce_t *e)
+{
+    return e->nbits_total - rc_ilog(e->rng);
+}
+
+unsigned rce_tell_frac(const opus_rce_t *e)
+{
+    opus_rc_t view;
+
+    view.nbits_total = e->nbits_total;
+    view.rng = e->rng;
+    return rc_tell_frac(&view);
+}
+
+int rce_done(opus_rce_t *e)
+{
+    int l = 32 - rc_ilog(e->rng), used;
+    unsigned msk = (CODE_TOP - 1) >> l, end = (e->val + msk) & ~msk, window;
+
+    if ((end | msk) >= e->val + e->rng) {
+        l++;
+        msk >>= 1;
+        end = (e->val + msk) & ~msk;
+    }
+    while (l > 0) {
+        carry_out(e, (int)(end >> CODE_SHIFT));
+        end = (end << 8) & (CODE_TOP - 1);
+        l -= 8;
+    }
+    if (e->rem >= 0 || e->ext > 0)
+        carry_out(e, 0);
+    window = e->end_window;
+    used = e->nend_bits;
+    while (used >= 8) {
+        write_byte_at_end(e, window & 255);
+        window >>= 8;
+        used -= 8;
+    }
+    if (!e->error) {
+        for (unsigned i = e->offs; i < e->storage - e->end_offs; i++)
+            e->buf[i] = 0;
+        if (used > 0) {
+            if (e->end_offs >= e->storage) {
+                e->error = 1;
+            } else {
+                l = -l;
+                if (e->offs + e->end_offs >= e->storage && l < used) {
+                    window &= (1u << l) - 1;
+                    e->error = 1;
+                }
+                e->buf[e->storage - e->end_offs - 1] |= (unsigned char)window;
+            }
+        }
+    }
+    return !e->error;
+}

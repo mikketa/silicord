@@ -53,6 +53,35 @@ float om_log2(float x)
     return (float)e + 2.88539008f * t * (1.f + t2 * (1.f / 3 + t2 * (1.f / 5 + t2 * (1.f / 7 + t2 * (1.f / 9)))));
 }
 
+/* atan(t) for 0 <= t <= 1: two half-angle reductions, then the series. */
+static double atan_unit(double t)
+{
+    double sum, term, t2;
+
+    for (int i = 0; i < 2; i++)
+        t = t / (1 + (double)om_sqrt((float)(1 + t * t)));
+    t2 = t * t;
+    term = t;
+    sum = t;
+    for (int n = 1; n < 8; n++) {
+        term *= -t2;
+        sum += term / (2 * n + 1);
+    }
+    return 4 * sum;
+}
+
+float om_atan2(float y, float x)
+{
+    double ax = x < 0 ? -x : x, ay = y < 0 ? -y : y, a;
+
+    if (ax == 0 && ay == 0)
+        return 0;
+    a = ay <= ax ? atan_unit(ay / ax) : OM_PI / 2 - atan_unit(ax / ay);
+    if (x < 0)
+        a = OM_PI - a;
+    return (float)(y < 0 ? -a : a);
+}
+
 /* sin on [-pi/4, pi/4] and cos on the same, as Taylor series to beyond double precision's needs. */
 static double sin_small(double x)
 {

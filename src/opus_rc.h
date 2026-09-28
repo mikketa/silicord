@@ -40,3 +40,24 @@ int rc_tell(const opus_rc_t *rc);
 unsigned rc_tell_frac(const opus_rc_t *rc);
 /* Number of bits needed for x (0 for 0). */
 int rc_ilog(unsigned x);
+
+/* The range encoder (section 5.1), writing into a fixed-size frame. */
+typedef struct {
+    unsigned char *buf;
+    unsigned storage, offs, end_offs, end_window;
+    int nend_bits, nbits_total;
+    unsigned rng, val, ext;
+    int rem, error;
+} opus_rce_t;
+
+void rce_init(opus_rce_t *e, unsigned char *buf, unsigned n);
+void rce_encode(opus_rce_t *e, unsigned fl, unsigned fh, unsigned ft);
+void rce_encode_bin(opus_rce_t *e, unsigned fl, unsigned fh, unsigned bits);
+void rce_bit_logp(opus_rce_t *e, int val, unsigned logp);
+void rce_icdf(opus_rce_t *e, int s, const unsigned char *icdf, unsigned ftb);
+void rce_uint(opus_rce_t *e, unsigned fl, unsigned ft);
+void rce_bits(opus_rce_t *e, unsigned fl, unsigned n);
+int rce_tell(const opus_rce_t *e);
+unsigned rce_tell_frac(const opus_rce_t *e);
+/* Flushes the frame; returns 0 when the symbols did not fit. */
+int rce_done(opus_rce_t *e);

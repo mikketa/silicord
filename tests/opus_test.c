@@ -2,6 +2,7 @@
 #include "test.h"
 #include "opus.h"
 #include "opus_rc.h"
+#include "opus_math.h"
 
 static void framing(void)
 {
@@ -58,9 +59,93 @@ static void range_decoder(void)
     check(rc_ilog(0) == 0 && rc_ilog(1) == 1 && rc_ilog(255) == 8 && rc_ilog(256) == 9, "ilog");
 }
 
+/* Every kind of symbol through the encoder, then back through the decoder. */
+static void range_round_trip(void)
+{
+    static const unsigned char icdf[] = {200, 120, 40, 0};
+    unsigned char buf[1000]; /* about 530 bytes of symbols */
+    unsigned seed = 1;
+    int vals[600], ok = 1;
+    opus_rce_t e;
+    opus_rc_t d;
+
+    rce_init(&e, buf, sizeof buf);
+    for (int i = 0; i < 600; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        vals[i] = (int)(seed >> 8);
+        switch (i % 6) {
+        case 0: rce_bit_logp(&e, vals[i] & 1, 1 + (unsigned)(i % 7)); break;
+        case 1: rce_icdf(&e, vals[i] & 3, icdf, 8); break;
+        case 2: rce_uint(&e, (unsigned)vals[i] % 1000, 1000); break;
+        case 3: rce_uint(&e, (unsigned)vals[i] % 70000, 70000); break;
+        case 4: rce_bits(&e, (unsigned)vals[i] & 0x1FF, 9); break;
+        default: rce_encode(&e, (unsigned)vals[i] % 13, (unsigned)vals[i] % 13 + 1, 13); break;
+        }
+    }
+    ok = rce_done(&e);
+    check(ok, "the symbols fit");
+    rc_init(&d, buf, sizeof buf);
+    for (int i = 0; ok && i < 600; i++) {
+        unsigned v;
+        switch (i % 6) {
+        case 0: ok = rc_bit_logp(&d, 1 + (unsigned)(i % 7)) == (vals[i] & 1); break;
+        case 1: ok = rc_icdf(&d, icdf, 8) == (vals[i] & 3); break;
+        case 2: ok = rc_uint(&d, 1000) == (unsigned)vals[i] % 1000; break;
+        case 3: ok = rc_uint(&d, 70000) == (unsigned)vals[i] % 70000; break;
+        case 4: ok = rc_bits(&d, 9) == ((unsigned)vals[i] & 0x1FF); break;
+        default:
+            v = rc_decode(&d, 13);
+            ok = v == (unsigned)vals[i] % 13;
+            rc_update(&d, v, v + 1, 13);
+            break;
+        }
+    }
+    check(ok, "decoded symbols match");
+    check(d.rng == e.rng, "final ranges match");
+}
+
+/* Our encoder through our (conformant) decoder: the same final range, and the tone back. */
+static void encoder(void)
+{
+    static opus_encoder_t enc;
+    static opus_decoder_t dec;
+    static float in[960], out[5760 * 2];
+    unsigned char packet[1276];
+    double sig = 0, err = 0;
+    int ok = 1, ranges = 1;
+    unsigned phase = 0;
+
+    opus_encoder_init(&enc);
+    opus_decoder_init(&dec, 1);
+    for (int f = 0; f < 50; f++) {
+        int n, got;
+        /* A 440 Hz tone with a slow second partial, at -12 dBFS. */
+        for (int i = 0; i < 960; i++, phase++) {
+            float t = (float)phase / 48000.f;
+            in[i] = 0.2f * (float)om_sin(2 * OM_PI * 440 * t) + 0.05f * (float)om_sin(2 * OM_PI * 1320 * t);
+        }
+        n = opus_encode(&enc, in, packet);
+        got = n ? opus_decode(&dec, packet, (size_t)n, out, 0) : -1;
+        ok &= n == 160 && got == 960;
+        ranges &= dec.final_range == enc.celt.rng;
+        /* Compare after the codec's delay settles: one overlap (120 samples) late. */
+        if (f >= 5)
+            for (int i = 0; i + 120 < 960; i++) {
+                double a = in[i], b = out[i + 120];
+                sig += a * a;
+                err += (a - b) * (a - b);
+            }
+    }
+    check(ok, "encoded packets decode");
+    check(ranges, "encoder and decoder end on the same range state");
+    check(sig > 100 * err, "the tone survives within 20 dB");
+}
+
 void entry(void)
 {
     framing();
     range_decoder();
+    range_round_trip();
+    encoder();
     finish();
 }
