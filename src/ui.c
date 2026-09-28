@@ -7169,8 +7169,9 @@ static void ac_update(void)
         ;
     if (k >= 0 && (w[k] == '@' || w[k] == '#' || w[k] == ':') && (k == 0 || w[k - 1] == ' ' || w[k - 1] == '\n')) {
         int qn = (int)end - k - 1;
-        WideCharToMultiByte(CP_UTF8, 0, w + k + 1, qn, g_ui.ac_query, sizeof g_ui.ac_query - 1, NULL, NULL);
-        g_ui.ac_query[qn < (int)sizeof g_ui.ac_query - 1 ? qn : (int)sizeof g_ui.ac_query - 1] = 0;
+        /* End at the bytes written: a UTF-16 count cuts non-ASCII queries (0 when too long). */
+        int nb = qn ? WideCharToMultiByte(CP_UTF8, 0, w + k + 1, qn, g_ui.ac_query, sizeof g_ui.ac_query - 1, NULL, NULL) : 0;
+        g_ui.ac_query[nb] = 0;
         g_ui.ac_start = k;
         g_ui.ac_end = (int)end;
         g_ui.ac_kind = w[k] == '@' ? AC_USER : w[k] == '#' ? AC_CHANNEL : AC_EMOJI;
