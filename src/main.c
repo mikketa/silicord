@@ -234,15 +234,13 @@ static int is_open(const char *channel_id)
     return open;
 }
 
-/* Mentioned directly, or through @everyone / @here. Role mentions are not resolved yet. */
+/* Named in the message (@everyone and roles are told apart: settings can silence them). */
 static int mentions_me(json_t d, const char *me)
 {
     json_t v, list, user;
     json_iter_t it;
     char id[24];
 
-    if (json_get(d, "mention_everyone", &v) && json_type(v) == JSON_TRUE)
-        return 1;
     if (!json_get(d, "mentions", &list))
         return 0;
     json_iter(list, &it);
@@ -278,6 +276,7 @@ static void post_activity(session_t *s, json_t d, const msg_t *m)
     lstrcpynA(a->message_id, m->id, sizeof a->message_id);
     a->from_me = s->me[0] && lstrcmpA(m->author_id, s->me) == 0;
     a->mentions_me = !a->from_me && mentions_me(d, s->me);
+    a->everyone = !a->from_me && json_get(d, "mention_everyone", &v) && json_type(v) == JSON_TRUE;
     sb_addn(&a->author, m->author.data ? m->author.data : "", m->author.len);
     sb_addn(&a->preview, m->text.data ? m->text.data : "", m->text.len);
     ui_post_activity(a);
@@ -290,6 +289,7 @@ static int is_structure_event(json_t t)
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
         "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE", "GUILD_STICKERS_UPDATE",
+        "USER_GUILD_SETTINGS_UPDATE",
         "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
         "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE",
     };
@@ -1209,7 +1209,7 @@ static void rest(const char *method, const char *path, const sb_t *body)
     CloseHandle(CreateThread(NULL, 0, settings_main, j, 0, NULL));
 }
 
-void app_mute(const char *guild_id, const char *channel_id, int muted)
+void app_notify_settings(const char *guild_id, const char *channel_id, const char *fields)
 {
     sb_t body = {0};
     char path[96];
@@ -1218,12 +1218,44 @@ void app_mute(const char *guild_id, const char *channel_id, int muted)
     if (channel_id) {
         sb_add(&body, "{\"channel_overrides\":{\"");
         sb_add(&body, channel_id);
-        sb_add(&body, muted ? "\":{\"muted\":true,\"mute_config\":null}}}" : "\":{\"muted\":false}}}");
+        sb_add(&body, "\":{");
+        sb_add(&body, fields);
+        sb_add(&body, "}}}");
     } else {
-        sb_add(&body, muted ? "{\"muted\":true,\"mute_config\":null}" : "{\"muted\":false}");
+        sb_add(&body, "{");
+        sb_add(&body, fields);
+        sb_add(&body, "}");
     }
     rest("PATCH", path, &body);
     sb_free(&body);
+}
+
+void app_mute(const char *guild_id, const char *channel_id, int muted, int minutes)
+{
+    char fields[160];
+
+    if (!muted) {
+        lstrcpyA(fields, "\"muted\":false");
+    } else if (!minutes) {
+        lstrcpyA(fields, "\"muted\":true,\"mute_config\":{\"selected_time_window\":-1,\"end_time\":null}");
+    } else {
+        /* Discord keeps the end time and lifts the mute itself. */
+        FILETIME ft;
+        ULARGE_INTEGER t;
+        SYSTEMTIME st;
+        GetSystemTimeAsFileTime(&ft);
+        t.LowPart = ft.dwLowDateTime;
+        t.HighPart = ft.dwHighDateTime;
+        t.QuadPart += (unsigned long long)minutes * 60 * 10000000;
+        ft.dwLowDateTime = t.LowPart;
+        ft.dwHighDateTime = t.HighPart;
+        FileTimeToSystemTime(&ft, &st);
+        wsprintfA(fields,
+                  "\"muted\":true,\"mute_config\":{\"selected_time_window\":%d,"
+                  "\"end_time\":\"%04u-%02u-%02uT%02u:%02u:%02u.000Z\"}",
+                  minutes * 60, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    }
+    app_notify_settings(guild_id, channel_id, fields);
 }
 
 void app_ack_bulk(const char *pairs, int n)

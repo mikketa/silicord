@@ -957,10 +957,20 @@ static void initials(const char *name, wchar_t *out, int max)
 
 #define C_BADGE 0xFFE5484Du
 
+static long long now_ms(void)
+{
+    FILETIME ft;
+    ULARGE_INTEGER t;
+
+    GetSystemTimeAsFileTime(&ft);
+    t.LowPart = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    return (long long)(t.QuadPart / 10000 - 11644473600000ull);
+}
+
 static int channel_muted(unsigned i)
 {
-    int g = model_channel_guild(g_ui.model, i);
-    return chan((int)i)->muted || (g >= 0 && g_ui.model->guilds[g].muted);
+    return model_muted(g_ui.model, i, now_ms());
 }
 
 static int channel_unread(unsigned i)
@@ -973,7 +983,7 @@ static void range_state(unsigned first, unsigned count, int *unread, int *mentio
     *unread = *mentions = 0;
     for (unsigned i = first; i < first + count; i++) {
         *mentions += chan((int)i)->mentions;
-        if (!chan((int)i)->muted && model_unread(g_ui.model, i))
+        if (!channel_muted(i) && model_unread(g_ui.model, i))
             *unread = 1;
     }
 }
@@ -983,7 +993,7 @@ static void guild_state(int g, int *unread, int *mentions)
     const guild_t *gd = &g_ui.model->guilds[g];
 
     range_state(gd->first, gd->count, unread, mentions);
-    if (gd->muted)
+    if (model_guild_muted(g_ui.model, g, now_ms()))
         *unread = 0;
 }
 
@@ -3280,10 +3290,12 @@ static void on_activity(activity_t *a)
             g_ui.ack_pending = 1;
             SetTimer(g_ui.wnd, TIMER_ACK, ACK_DELAY, NULL);
         } else {
-            int dm = is_dm_type(c->type);
-            if (!a->mentions_me && a->mention_roles.len) {
+            int dm = is_dm_type(c->type), g = model_channel_guild(g_ui.model, (unsigned)i), level;
+            const guild_t *gd = g >= 0 ? &g_ui.model->guilds[g] : NULL;
+            if (a->everyone && gd && gd->suppress_everyone)
+                a->everyone = 0;
+            if (!a->mentions_me && a->mention_roles.len && !(gd && gd->suppress_roles)) {
                 /* @Role pings count when we have that role. */
-                int g = model_channel_guild(g_ui.model, (unsigned)i);
                 const char *p = a->mention_roles.data;
                 while (*p && !a->mentions_me) {
                     char role[24];
@@ -3296,9 +3308,13 @@ static void on_activity(activity_t *a)
                     a->mentions_me = model_has_role(g_ui.model, g, role);
                 }
             }
+            a->mentions_me |= a->everyone;
             if (a->mentions_me || dm)
                 c->mentions++;
-            if (a->mentions_me || (dm && !c->muted))
+            /* Like Discord: pings get through a mute, other messages follow the notification level. */
+            level = model_notify(g_ui.model, (unsigned)i);
+            if (level != NOTIFY_NOTHING &&
+                (a->mentions_me || (level == NOTIFY_ALL && !channel_muted((unsigned)i))))
                 notify(i, a);
         }
     }
@@ -7715,7 +7731,51 @@ static void qs_open(void)
 enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
+    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES,
+    CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
+    CM_NOTIFY = 120,     /* + NOTIFY_* */
 };
+
+static const int k_mute_minutes[] = {15, 60, 180, 480, 1440, 0};
+static const wchar_t *const k_mute_names[] = {L"For 15 Minutes", L"For 1 Hour", L"For 3 Hours", L"For 8 Hours",
+                                              L"For 24 Hours", L"Until I turn it back on"};
+
+/* "Mute ..." with its durations, or "Unmute ..." when muted. */
+static void add_mute_items(HMENU menu, int muted, const wchar_t *what)
+{
+    wchar_t label[48];
+
+    if (muted) {
+        wsprintfW(label, L"Unmute %s", what);
+        AppendMenuW(menu, MF_STRING, CM_UNMUTE, label);
+    } else {
+        HMENU sub = CreatePopupMenu();
+        for (int k = 0; k < (int)ARRAYSIZE(k_mute_minutes); k++)
+            AppendMenuW(sub, MF_STRING, CM_MUTE_FOR + k, k_mute_names[k]);
+        wsprintfW(label, L"Mute %s", what);
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, label);
+    }
+}
+
+/* Notification Settings: the levels, ticked at `current`; `inherit` names the default entry for channels. */
+static HMENU notify_menu(int current, const wchar_t *inherit)
+{
+    HMENU sub = CreatePopupMenu();
+
+    if (inherit)
+        AppendMenuW(sub, MF_STRING | (current == NOTIFY_DEFAULT ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_DEFAULT, inherit);
+    AppendMenuW(sub, MF_STRING | (current == NOTIFY_ALL ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_ALL, L"All Messages");
+    AppendMenuW(sub, MF_STRING | (current == NOTIFY_MENTIONS ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_MENTIONS,
+                L"Only @mentions");
+    AppendMenuW(sub, MF_STRING | (current == NOTIFY_NOTHING ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_NOTHING, L"Nothing");
+    return sub;
+}
+
+/* The JSON Discord takes for a NOTIFY_* level. */
+static void notify_fields(int level, char *out)
+{
+    wsprintfA(out, "\"message_notifications\":%d", level == NOTIFY_DEFAULT ? 3 : level - NOTIFY_ALL);
+}
 
 /* Dark native menus, as the rest of the window (uxtheme's undocumented but stable switch). */
 static void dark_menus(void)
@@ -7820,16 +7880,23 @@ static void channel_menu(int i)
 {
     HMENU menu = CreatePopupMenu();
     const channel_t *c = chan(i);
-    int muted = c->muted, cmd, g = model_channel_guild(g_ui.model, (unsigned)i);
+    int muted = c->muted && (!c->mute_until || c->mute_until > now_ms()), cmd, g = model_channel_guild(g_ui.model, (unsigned)i);
     char id[24];
 
     if (c->type == CH_CATEGORY) {
+        add_mute_items(menu, muted, L"Category");
+        if (g >= 0)
+            AppendMenuW(menu, MF_POPUP, (UINT_PTR)notify_menu(c->notify, L"Use Server Default"), L"Notification Settings");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Category ID");
     } else {
         AppendMenuW(menu, MF_STRING | (model_unread(g_ui.model, (unsigned)i) || c->mentions ? 0 : MF_GRAYED), CM_MARK_READ,
                     L"Mark As Read");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(menu, MF_STRING, muted ? CM_UNMUTE : CM_MUTE, muted ? L"Unmute Channel" : L"Mute Channel");
+        add_mute_items(menu, muted, is_dm_type(c->type) ? L"Conversation" : L"Channel");
+        if (g >= 0)
+            AppendMenuW(menu, MF_POPUP, (UINT_PTR)notify_menu(c->notify, c->parent[0] ? L"Use Category Default" : L"Use Server Default"),
+                        L"Notification Settings");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Link");
         AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Channel ID");
@@ -7842,16 +7909,28 @@ static void channel_menu(int i)
     case CM_MARK_READ:
         mark_read(i);
         break;
-    case CM_MUTE:
     case CM_UNMUTE:
-        g_ui.model->channels[i].muted = cmd == CM_MUTE;
-        app_mute(g >= 0 ? g_ui.model->guilds[g].id : NULL, id, cmd == CM_MUTE);
+        g_ui.model->channels[i].muted = 0;
+        app_mute(g >= 0 ? g_ui.model->guilds[g].id : NULL, id, 0, 0);
         break;
     case CM_COPY_LINK:
         copy_link(g >= 0 ? g_ui.model->guilds[g].id : NULL, id, NULL);
         break;
     case CM_COPY_ID:
         copy_text(id);
+        break;
+    default:
+        if (cmd >= CM_MUTE_FOR && cmd < CM_MUTE_FOR + (int)ARRAYSIZE(k_mute_minutes)) {
+            int minutes = k_mute_minutes[cmd - CM_MUTE_FOR];
+            g_ui.model->channels[i].muted = 1;
+            g_ui.model->channels[i].mute_until = minutes ? now_ms() + minutes * 60000ll : 0;
+            app_mute(g >= 0 ? g_ui.model->guilds[g].id : NULL, id, 1, minutes);
+        } else if (cmd >= CM_NOTIFY && cmd <= CM_NOTIFY + NOTIFY_NOTHING && g >= 0) {
+            char fields[48];
+            g_ui.model->channels[i].notify = cmd - CM_NOTIFY;
+            notify_fields(cmd - CM_NOTIFY, fields);
+            app_notify_settings(g_ui.model->guilds[g].id, id, fields);
+        }
         break;
     }
     update_title();
@@ -7868,7 +7947,15 @@ static void guild_menu(int g)
     guild_state(g, &unread, &mentions);
     AppendMenuW(menu, MF_STRING | (unread || mentions ? 0 : MF_GRAYED), CM_MARK_READ, L"Mark As Read");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING, gd->muted ? CM_UNMUTE : CM_MUTE, gd->muted ? L"Unmute Server" : L"Mute Server");
+    add_mute_items(menu, model_guild_muted(g_ui.model, g, now_ms()), L"Server");
+    {
+        HMENU sub = notify_menu(gd->notify == NOTIFY_DEFAULT ? gd->default_notify : gd->notify, NULL);
+        AppendMenuW(sub, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(sub, MF_STRING | (gd->suppress_everyone ? MF_CHECKED : 0), CM_SUPPRESS_EVERYONE,
+                    L"Suppress @everyone and @here");
+        AppendMenuW(sub, MF_STRING | (gd->suppress_roles ? MF_CHECKED : 0), CM_SUPPRESS_ROLES, L"Suppress All Role @mentions");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, L"Notification Settings");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Server ID");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -7899,10 +7986,17 @@ static void guild_menu(int g)
         sb_free(&acks);
         break;
     }
-    case CM_MUTE:
     case CM_UNMUTE:
-        gd->muted = cmd == CM_MUTE;
-        app_mute(id, NULL, cmd == CM_MUTE);
+        gd->muted = 0;
+        app_mute(id, NULL, 0, 0);
+        break;
+    case CM_SUPPRESS_EVERYONE:
+        gd->suppress_everyone = !gd->suppress_everyone;
+        app_notify_settings(id, NULL, gd->suppress_everyone ? "\"suppress_everyone\":true" : "\"suppress_everyone\":false");
+        break;
+    case CM_SUPPRESS_ROLES:
+        gd->suppress_roles = !gd->suppress_roles;
+        app_notify_settings(id, NULL, gd->suppress_roles ? "\"suppress_roles\":true" : "\"suppress_roles\":false");
         break;
     case CM_COPY_ID:
         copy_text(id);
@@ -7916,6 +8010,19 @@ static void guild_menu(int g)
             app_leave_guild(id);
         break;
     }
+    default:
+        if (cmd >= CM_MUTE_FOR && cmd < CM_MUTE_FOR + (int)ARRAYSIZE(k_mute_minutes)) {
+            int minutes = k_mute_minutes[cmd - CM_MUTE_FOR];
+            gd->muted = 1;
+            gd->mute_until = minutes ? now_ms() + minutes * 60000ll : 0;
+            app_mute(id, NULL, 1, minutes);
+        } else if (cmd >= CM_NOTIFY + NOTIFY_ALL && cmd <= CM_NOTIFY + NOTIFY_NOTHING) {
+            char fields[48];
+            gd->notify = cmd - CM_NOTIFY;
+            notify_fields(gd->notify, fields);
+            app_notify_settings(id, NULL, fields);
+        }
+        break;
     }
     update_title();
     redraw();

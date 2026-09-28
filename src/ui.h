@@ -44,7 +44,8 @@ typedef struct {
     char guild_id[24];
     char message_id[24];
     int from_me;
-    int mentions_me;
+    int mentions_me;    /* named in the message */
+    int everyone;       /* @everyone or @here */
     sb_t author;
     sb_t preview;
     sb_t mention_roles; /* comma-separated role ids */
@@ -102,7 +103,10 @@ void app_delete_message(const char *channel_id, const char *message_id);
 /* Shows "typing..." to the others for about ten seconds. */
 void app_typing(const char *channel_id);
 /* Mutes or unmutes a server (channel_id NULL) or one of its channels; guild_id NULL for a DM. */
-void app_mute(const char *guild_id, const char *channel_id, int muted);
+/* Mutes (for `minutes`, 0 until unmuted) or unmutes a server, or a channel of it (guild_id NULL for DMs). */
+void app_mute(const char *guild_id, const char *channel_id, int muted, int minutes);
+/* Changes notification settings: `fields` are JSON members such as "\"message_notifications\":1". */
+void app_notify_settings(const char *guild_id, const char *channel_id, const char *fields);
 /* Marks n channels read at once: `pairs` holds channel id, NUL, message id, NUL, repeated. */
 void app_ack_bulk(const char *pairs, int n);
 /* Leaves a server; it goes away with GUILD_DELETE. */
