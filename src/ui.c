@@ -183,6 +183,12 @@ typedef struct {
     char new_after[24];        /* messages after this one were unread when the channel opened */
     char flash_id[24];         /* message briefly highlighted after a jump */
     msg_batch_t *pins;         /* pinned messages panel, NULL when closed */
+    HWND search_edit;
+    WNDPROC search_proc;
+    msg_batch_t *results;      /* search results, NULL while searching */
+    int results_open, results_scroll, results_content, result_hover;
+    int result_y[64], result_h[64];
+    int detached;              /* showing older messages after a jump: new ones are not appended */
     int pins_open, pins_scroll, pins_content;
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
@@ -1324,6 +1330,14 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static wchar_t *plain_text(const sb_t *text);
+static void place_search(void);
+static void paint_search(void);
+static void paint_detached(int x0, int w, int cy);
+static void search_close(void);
+static int open_discord_link(const char *url);
+static void jump_to(int i);
+static LRESULT CALLBACK search_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 static void guild_state(int g, int *unread, int *mentions);
 static int divider_h(const msg_t *m);
 static void qs_open(void);
@@ -2282,6 +2296,15 @@ static void apply_reaction(msg_t *m, const msg_reaction_t *r, int delta, int min
 
 static void on_batch(msg_batch_t *b)
 {
+    if (b->kind == BATCH_SEARCH) {
+        if (g_ui.results_open && !g_ui.results) {
+            g_ui.results = b;
+            g_ui.results_scroll = 0;
+            return;
+        }
+        msg_batch_free(b);
+        return;
+    }
     if (b->kind == BATCH_PINS) {
         if (g_ui.pins_open && lstrcmpA(b->channel_id, g_ui.msgs_channel) == 0 && !g_ui.pins) {
             g_ui.pins = b;
@@ -2304,6 +2327,7 @@ static void on_batch(msg_batch_t *b)
         g_ui.msgs_status = b->status;
         g_ui.msgs_has_more = b->has_more;
         g_ui.msg_scroll = 0;
+        g_ui.detached = b->around[0] != 0;
         g_ui.log_memory = 1; /* after the next paint lays the messages out */
         reserve_msgs(b->n);
         for (int i = 0; i < b->n; i++)
@@ -2324,7 +2348,7 @@ static void on_batch(msg_batch_t *b)
         break;
     case BATCH_NEW:
         typing_stop(b->msgs[0].author_id);
-        if (g_ui.msgs_loading || find_msg(b->msgs[0].id) >= 0)
+        if (g_ui.msgs_loading || g_ui.detached || find_msg(b->msgs[0].id) >= 0)
             break;
         reserve_msgs(1);
         g_ui.msgs[g_ui.nmsgs++] = b->msgs[0];
@@ -2395,10 +2419,16 @@ static void on_batch(msg_batch_t *b)
         break;
     }
     }
-    msg_batch_free(b);
-    request_authors();
-    update_grouping();
-    clamp_msg_scroll();
+    {
+        char around[24];
+        lstrcpynA(around, b->kind == BATCH_HISTORY ? b->around : "", sizeof around);
+        msg_batch_free(b);
+        request_authors();
+        update_grouping();
+        clamp_msg_scroll();
+        if (around[0] && find_msg(around) >= 0)
+            jump_to(find_msg(around));
+    }
     maybe_load_older();
     place_composer();
 }
@@ -2646,6 +2676,7 @@ static void paint_main(RECT rc)
         paint_toolbar();
         paint_autocomplete();
         paint_pins();
+        paint_search();
         if (g_ui.guild >= 0)
             text_w(g_ui.f_icon, g_ui.show_members ? C_INK : C_MUTED, rect(x0 + w - S(48), 0, S(32), S(HEADER_H)), L"\xE716",
                    -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2655,6 +2686,7 @@ static void paint_main(RECT rc)
             int cy = rc.bottom - S(24) - S(COMPOSER_H);
             paint_tray(x0, w, cy - (g_ui.bar ? S(BAR_H) : 0));
             paint_bar(x0, w, cy);
+            paint_detached(x0, w, cy);
             r_round(x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
             /* Attach button, like Discord's "+" */
             r_circle(x0 + S(28), cy + (S(COMPOSER_H) - S(24)) / 2, S(24), g_ui.hover_attach ? ARGB(C_INK) : ARGB(C_MUTED));
@@ -3100,14 +3132,17 @@ static void open_channel(int index)
     g_ui.hover_msg = -1;
     sb_clear(&g_ui.send_error);
     g_ui.msgs_channel[0] = 0;
+    g_ui.detached = 0;
     if (index < 0 || !g_ui.model || is_voice_type(chan(index)->type)) {
         g_ui.msgs_loading = 0;
         app_open_channel("");
         place_composer();
         place_friend_input();
+        place_search();
         return;
     }
     place_friend_input();
+    place_search();
     c = chan(index);
     lstrcpynA(g_ui.new_after, model_unread(g_ui.model, (unsigned)index) ? c->read : "", sizeof g_ui.new_after);
     mark_read(index);
@@ -3606,6 +3641,8 @@ static void open_url(const char *url)
 
     int n = lstrlenA(url);
 
+    if (open_discord_link(url))
+        return;
     /* Only web links: never hand a file path or another scheme to the shell. */
     if (!(n > 8 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, url, 8, "https://", 8) == CSTR_EQUAL) &&
         !(n > 7 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, url, 7, "http://", 7) == CSTR_EQUAL))
@@ -4842,7 +4879,7 @@ static void paint_confirm(void)
     text(g_ui.f_title, C_INK, rect(r.left + S(20), r.top + S(18), S(400), S(28)), "Delete Message", DT_LEFT | DT_SINGLELINE);
     text(g_ui.f_body, C_MUTED, rect(r.left + S(20), r.top + S(56), S(400), S(22)),
          "Are you sure you want to delete this message?", DT_LEFT | DT_SINGLELINE);
-    preview = utf8_to_wide(g_ui.msgs[i].text.data ? g_ui.msgs[i].text.data : "", g_ui.msgs[i].text.len);
+    preview = plain_text(&g_ui.msgs[i].text);
     r_round(r.left + S(20), r.top + S(86), S(400), S(40), S(6), 0xFF1E1E1E);
     r_text(g_ui.f_body, ARGB(C_INK), r.left + S(32), r.top + S(86), S(376), S(40), preview, -1,
            R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
@@ -6414,6 +6451,28 @@ static void place_friend_input(void)
     }
 }
 
+/* Message text for one-line previews: mention markers dropped, custom emoji as :name:. */
+static wchar_t *plain_text(const sb_t *text)
+{
+    wchar_t *w = utf8_to_wide(text->data ? text->data : "", text->len), *src = w, *dst = w;
+
+    for (; *src; src++) {
+        if (*src == 0xE002) { /* custom emoji: keep ":name:" */
+            while (src[1] && src[1] != ':' && src[1] != 0xE003)
+                src++;
+            *dst++ = ':';
+            if (src[1] == ':')
+                src++;
+        } else if (*src == 0xE003) {
+            *dst++ = ':';
+        } else if (*src != 0xE000 && *src != 0xE001) {
+            *dst++ = *src;
+        }
+    }
+    *dst = 0;
+    return w;
+}
+
 /* ---- Pinned messages ---- */
 
 #define PINS_W 440
@@ -6468,7 +6527,7 @@ static void paint_pins(void)
     for (int k = g_ui.pins->n; k-- > 0;) { /* newest first */
         msg_t *m = &g_ui.pins->msgs[k];
         int tw = r.right - r.left - S(76), th;
-        wchar_t *body = utf8_to_wide(m->text.data ? m->text.data : "", m->text.len), when[64];
+        wchar_t *body = plain_text(&m->text), when[64];
         r_image_t *img = user_avatar(m->author_id, m->avatar);
         th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
         if (th > S(88))
@@ -7003,6 +7062,271 @@ static void on_right_click(int x, int y)
         guild_menu(index);
 }
 
+/* ---- Search and jumping to messages ---- */
+
+#define SEARCH_W 200
+#define RESULTS_W 460
+
+/* Opens channel `channel_id` at message `message_id` (loading the messages around it). */
+static void navigate_to_message(const char *channel_id, const char *message_id)
+{
+    int c = g_ui.model ? model_find_channel(g_ui.model, channel_id) : -1, i;
+
+    if (c < 0)
+        return;
+    if (c != g_ui.channel)
+        go_to_channel(c);
+    if ((i = find_msg(message_id)) >= 0) {
+        jump_to(i);
+        return;
+    }
+    g_ui.msgs_loading = 1;
+    app_fetch_around(channel_id, message_id);
+    redraw();
+}
+
+/* discord.com/channels/{guild or @me}/{channel}[/{message}] links open here. */
+static int open_discord_link(const char *url)
+{
+    static const char *const hosts[] = {"https://discord.com/channels/", "https://ptb.discord.com/channels/",
+                                        "https://canary.discord.com/channels/"};
+    char channel[24] = "", message[24] = "";
+    const char *p = NULL;
+
+    for (int h = 0; h < 3 && !p; h++) {
+        int n = lstrlenA(hosts[h]);
+        if (CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, url, n, hosts[h], n) == CSTR_EQUAL)
+            p = url + n;
+    }
+    if (!p)
+        return 0;
+    while (*p && *p != '/') /* guild id or @me */
+        p++;
+    if (*p != '/')
+        return 0;
+    p++;
+    for (int k = 0; *p >= '0' && *p <= '9' && k < 23; k++, p++)
+        channel[k] = *p, channel[k + 1] = 0;
+    if (*p == '/') {
+        p++;
+        for (int k = 0; *p >= '0' && *p <= '9' && k < 23; k++, p++)
+            message[k] = *p, message[k + 1] = 0;
+    }
+    if (!channel[0] || model_find_channel(g_ui.model, channel) < 0)
+        return 0; /* not a channel we have: let the browser deal with it */
+    if (message[0])
+        navigate_to_message(channel, message);
+    else
+        go_to_channel(model_find_channel(g_ui.model, channel));
+    return 1;
+}
+
+static int search_box_x(void)
+{
+    return pins_button_x() - S(SEARCH_W) - S(12);
+}
+
+static void place_search(void)
+{
+    int show = g_ui.view == VIEW_APP && open_is_text();
+
+    if (show && !g_ui.search_edit) {
+        HFONT font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
+        g_ui.search_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.wnd,
+                                           NULL, NULL, NULL);
+        g_ui.search_proc = (WNDPROC)SetWindowLongPtrW(g_ui.search_edit, GWLP_WNDPROC, (LONG_PTR)search_edit_proc);
+        SendMessageW(g_ui.search_edit, WM_SETFONT, (WPARAM)font, FALSE);
+        SendMessageW(g_ui.search_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search");
+    }
+    if (g_ui.search_edit) {
+        if (show)
+            MoveWindow(g_ui.search_edit, search_box_x() + S(8), (S(HEADER_H) - S(20)) / 2, S(SEARCH_W) - S(16), S(20), TRUE);
+        ShowWindow(g_ui.search_edit, show ? SW_SHOWNA : SW_HIDE);
+    }
+}
+
+static void search_close(void)
+{
+    msg_batch_free(g_ui.results);
+    g_ui.results = NULL;
+    g_ui.results_open = 0;
+    g_ui.results_scroll = 0;
+}
+
+static void search_run(void)
+{
+    wchar_t w[128];
+    sb_t q = {0};
+
+    GetWindowTextW(g_ui.search_edit, w, 128);
+    wide_to_utf8(w, (size_t)lstrlenW(w), &q);
+    if (q.len && open_is_text()) {
+        search_close();
+        g_ui.results_open = 1;
+        pins_close();
+        if (g_ui.guild >= 0)
+            app_search(g_ui.model->guilds[g_ui.guild].id, NULL, q.data);
+        else
+            app_search(NULL, g_ui.msgs_channel, q.data);
+    }
+    sb_free(&q);
+    redraw();
+}
+
+static LRESULT CALLBACK search_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        search_run();
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        SetWindowTextW(h, L"");
+        search_close();
+        SetFocus(g_ui.composer);
+        redraw();
+        return 0;
+    }
+    if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE))
+        return 0;
+    return CallWindowProcW(g_ui.search_proc, h, msg, wp, lp);
+}
+
+static RECT results_rect(void)
+{
+    RECT rc;
+
+    GetClientRect(g_ui.wnd, &rc);
+    return rect(main_right() - S(RESULTS_W) - S(16), S(HEADER_H) + S(4), S(RESULTS_W), rc.bottom - S(HEADER_H) - S(24));
+}
+
+static void paint_search(void)
+{
+    RECT r;
+    int y;
+    char title[64];
+
+    /* The box in the header. */
+    if (open_is_text())
+        r_round(search_box_x(), (S(HEADER_H) - S(28)) / 2, S(SEARCH_W), S(28), S(6), 0xFF0B0B0B);
+    if (!g_ui.results_open)
+        return;
+    r = results_rect();
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    if (!g_ui.results)
+        lstrcpyA(title, "Searching\xE2\x80\xA6");
+    else if (g_ui.results->status)
+        lstrcpyA(title, "Search failed");
+    else
+        wsprintfA(title, "%d Result%s", g_ui.results->total, g_ui.results->total == 1 ? "" : "s");
+    text(g_ui.f_h, C_INK, rect(r.left + S(16), r.top, S(300), S(48)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    fill(r.left + S(1), r.top + S(48), r.right - r.left - S(2), 1, C_LINE);
+    if (!g_ui.results)
+        return;
+    r_clip(r.left, r.top + S(49), r.right - r.left, r.bottom - r.top - S(50));
+    y = r.top + S(56) - g_ui.results_scroll;
+    for (int k = 0; k < g_ui.results->n; k++) {
+        msg_t *m = &g_ui.results->msgs[k];
+        int tw = r.right - r.left - S(76), th, c = model_find_channel(g_ui.model, m->channel_id);
+        wchar_t *body = plain_text(&m->text), when[64];
+        r_image_t *img = user_avatar(m->author_id, m->avatar);
+        char where[96];
+        th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
+        if (th > S(66))
+            th = S(66);
+        g_ui.result_y[k < 64 ? k : 63] = y;
+        wsprintfA(where, "# %.80s", c >= 0 ? model_str(g_ui.model, chan(c)->name) : "unknown");
+        text(g_ui.f_cat, C_MUTED, rect(r.left + S(16), y, tw, S(18)), where, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        y += S(20);
+        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + S(8), S(6), g_ui.result_hover == k ? 0xFF222222 : 0xFF181818);
+        if (img)
+            r_image(img, r.left + S(16), y + S(8), S(32), S(32), S(16));
+        text(g_ui.f_h, C_INK, rect(r.left + S(60), y + S(6), tw, S(20)), m->author.data ? m->author.data : "",
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        format_time(m->id, when, ARRAYSIZE(when));
+        text_w(g_ui.f_small, C_FAINT, rect(r.left + S(60) + text_width(g_ui.f_h, m->author.data ? m->author.data : "") + S(8),
+                                          y + S(8), S(200), S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
+        if (th)
+            r_text(g_ui.f_body, ARGB(C_INK), r.left + S(60), y + S(28), tw, th, body, -1, R_LEFT | R_WRAP | R_ELLIPSIS);
+        mem_free(body);
+        y += S(40) + th + S(16);
+        g_ui.result_h[k < 64 ? k : 63] = y - g_ui.result_y[k < 64 ? k : 63];
+    }
+    g_ui.results_content = y + g_ui.results_scroll - (r.top + S(56));
+    r_unclip();
+}
+
+static int result_hit(int x, int y)
+{
+    RECT r = results_rect();
+
+    if (!g_ui.results_open || !g_ui.results || x < r.left || x >= r.right || y < r.top + S(49) || y >= r.bottom)
+        return -1;
+    for (int k = 0; k < g_ui.results->n && k < 64; k++)
+        if (y >= g_ui.result_y[k] && y < g_ui.result_y[k] + g_ui.result_h[k])
+            return k;
+    return -1;
+}
+
+/* Clicks while the results are open: 1 when handled. */
+static int click_results(int x, int y)
+{
+    RECT r;
+    int k;
+
+    if (!g_ui.results_open)
+        return 0;
+    r = results_rect();
+    if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) {
+        if (y >= S(HEADER_H)) {
+            search_close();
+            redraw();
+        }
+        return 0;
+    }
+    if ((k = result_hit(x, y)) >= 0) {
+        char channel[24], id[24];
+        lstrcpynA(channel, g_ui.results->msgs[k].channel_id, sizeof channel);
+        lstrcpynA(id, g_ui.results->msgs[k].id, sizeof id);
+        navigate_to_message(channel, id);
+    }
+    return 1;
+}
+
+/* Bar shown while older messages are on screen after a jump. */
+static void paint_detached(int x0, int w, int cy)
+{
+    int y = cy - S(32) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
+
+    if (!g_ui.detached)
+        return;
+    r_round(x0 + S(24), y, w - S(48), S(28), S(6), 0xFF1B1B1B);
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(36), y, w - S(200), S(28)), "You're viewing older messages",
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_cat, C_INK, rect(x0 + w - S(180), y, S(144), S(28)), "Jump To Present \xE2\x86\x93",
+         DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+}
+
+static int click_detached(int x, int y)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0, cy, top;
+
+    if (!g_ui.detached)
+        return 0;
+    GetClientRect(g_ui.wnd, &rc);
+    cy = rc.bottom - S(24) - S(COMPOSER_H);
+    top = cy - S(32) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
+    if (y < top || y >= top + S(28) || x < x0 + S(24) || x >= x0 + w - S(24))
+        return 0;
+    /* Back to the latest messages. */
+    g_ui.detached = 0;
+    g_ui.msgs_loading = 1;
+    app_fetch_messages(g_ui.msgs_channel, NULL);
+    redraw();
+    return 1;
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -7133,6 +7457,14 @@ static void update_hover(int x, int y)
         }
         link = link || th >= 0 || att;
     }
+    {
+        int rh = result_hit(x, y);
+        if (rh != g_ui.result_hover) {
+            g_ui.result_hover = rh;
+            redraw();
+        }
+        link = link || rh >= 0;
+    }
     if (friends_view()) {
         int act, fh = friends_hit(x, y, &act);
         if (fh != g_ui.friend_hover || act != g_ui.friend_act) {
@@ -7211,6 +7543,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         clamp_msg_scroll();
         place_composer();
         place_friend_input();
+        place_search();
         pop_place();
         redraw();
         return 0;
@@ -7219,6 +7552,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             composer_changed();
         break;
     case WM_CTLCOLOREDIT:
+        if ((HWND)lp == g_ui.search_edit || (HWND)lp == g_ui.friend_edit) {
+            static HBRUSH dark;
+            if (!dark)
+                dark = CreateSolidBrush(RGB(0x0B, 0x0B, 0x0B));
+            SetTextColor((HDC)wp, GDI(C_INK));
+            SetBkColor((HDC)wp, RGB(0x0B, 0x0B, 0x0B));
+            return (LRESULT)dark;
+        }
         SetTextColor((HDC)wp, GDI(C_INK));
         SetBkColor((HDC)wp, RGB(0x1F, 0x1F, 0x1F));
         return (LRESULT)g_ui.b_composer;
@@ -7283,6 +7624,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 picker_close(); /* a click outside only closes the picker */
                 return 0;
             }
+            if (click_results(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || click_detached(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+                return 0;
             {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
                 if (open_is_text() && y < S(HEADER_H) && x >= pins_button_x() && x < pins_button_x() + S(32)) {
@@ -7377,6 +7720,19 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.view != VIEW_APP)
             return 0;
         pop_close();
+        if (g_ui.results_open) {
+            RECT sr = results_rect();
+            if (pt.x >= sr.left && pt.x < sr.right && pt.y >= sr.top && pt.y < sr.bottom) {
+                int max = g_ui.results_content - (sr.bottom - sr.top - S(56));
+                g_ui.results_scroll += delta;
+                if (g_ui.results_scroll > max)
+                    g_ui.results_scroll = max;
+                if (g_ui.results_scroll < 0)
+                    g_ui.results_scroll = 0;
+                redraw();
+                return 0;
+            }
+        }
         if (g_ui.pins_open) {
             RECT pr = pins_rect();
             if (pt.x >= pr.left && pt.x < pr.right && pt.y >= pr.top && pt.y < pr.bottom) {
