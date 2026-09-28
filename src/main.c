@@ -641,10 +641,12 @@ static DWORD WINAPI fetch_main(LPVOID arg)
     msg_batch_t *b = NULL;
     json_t root;
     char path[128];
-    int kind = j->flag == 1 ? BATCH_PINS : j->before[0] && j->flag != 2 ? BATCH_OLDER : BATCH_HISTORY;
+    int kind = j->flag == 1 || j->flag == 3 ? BATCH_PINS : j->before[0] && j->flag != 2 ? BATCH_OLDER : BATCH_HISTORY;
 
     if (j->flag == 1)
         wsprintfA(path, "/channels/%s/pins", j->channel);
+    else if (j->flag == 3) /* the inbox: recent mentions everywhere */
+        lstrcpyA(path, "/users/@me/mentions?limit=25&roles=true&everyone=true");
     else if (j->flag == 2)
         wsprintfA(path, "/channels/%s/messages?limit=50&around=%s", j->channel, j->before);
     else if (j->before[0])
@@ -1615,6 +1617,14 @@ void app_fetch_pins(const char *channel_id)
     rest_job_t *j = new_job(channel_id);
 
     j->flag = 1;
+    CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
+}
+
+void app_fetch_mentions(void)
+{
+    rest_job_t *j = new_job(INBOX_CHANNEL);
+
+    j->flag = 3;
     CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
 }
 

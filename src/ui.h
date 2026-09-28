@@ -92,6 +92,9 @@ void app_run_command(const char *guild_id, const char *channel_id, const char *a
 void app_fetch_forum(const char *channel_id);
 /* Loads the channel's pinned messages; they come back as a BATCH_PINS batch. */
 void app_fetch_pins(const char *channel_id);
+/* Recent mentions in every server and DM (Discord's inbox), answered as BATCH_PINS for INBOX_CHANNEL. */
+#define INBOX_CHANNEL "@inbox"
+void app_fetch_mentions(void);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */
 void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention);
 /* Sends a sticker, as a reply when reply_id is not NULL. */
