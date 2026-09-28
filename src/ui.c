@@ -199,6 +199,8 @@ typedef struct {
     int nposts, forum_loaded, forum_scroll, forum_content, post_hover;
     int post_y[64];
     int pins_open, pins_scroll, pins_content;
+    int pins_inbox;            /* the panel shows our recent mentions instead */
+    int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
     sb_t send_error;
@@ -1381,6 +1383,7 @@ static int divider_h(const msg_t *m);
 static void qs_open(void);
 static void qs_close(void);
 static int pins_button_x(void);
+static int inbox_button_x(void);
 static void paint_pins(void);
 static void pins_close(void);
 static int divider_h(const msg_t *m);
@@ -2569,7 +2572,8 @@ static void on_batch(msg_batch_t *b)
         return;
     }
     if (b->kind == BATCH_PINS) {
-        if (g_ui.pins_open && lstrcmpA(b->channel_id, g_ui.msgs_channel) == 0 && !g_ui.pins) {
+        if (g_ui.pins_open && !g_ui.pins &&
+            lstrcmpA(b->channel_id, g_ui.pins_inbox ? INBOX_CHANNEL : g_ui.msgs_channel) == 0) {
             g_ui.pins = b;
             return;
         }
@@ -2962,9 +2966,12 @@ static void paint_main(RECT rc)
                 text(g_ui.f_small, C_MUTED, rect(tx + S(8), 0, right - tx - S(8), S(HEADER_H)), model_str(g_ui.model, c->topic),
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
-            if (!voice)
-                text_w(g_ui.f_icon, g_ui.pins_open ? C_INK : C_MUTED, rect(pins_button_x(), 0, S(32), S(HEADER_H)),
-                       L"\xE718", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (!voice) {
+                text_w(g_ui.f_icon, g_ui.pins_open && !g_ui.pins_inbox ? C_INK : C_MUTED,
+                       rect(pins_button_x(), 0, S(32), S(HEADER_H)), L"\xE718", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                text_w(g_ui.f_icon, g_ui.pins_open && g_ui.pins_inbox ? C_INK : C_MUTED,
+                       rect(inbox_button_x(), 0, S(32), S(HEADER_H)), L"\xE715", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
         }
 
         if (voice) {
@@ -7523,12 +7530,58 @@ static int pins_button_x(void)
     return main_right() - (g_ui.guild >= 0 ? S(88) : S(48));
 }
 
+static int inbox_button_x(void)
+{
+    return pins_button_x() - S(40);
+}
+
 static void pins_close(void)
 {
     msg_batch_free(g_ui.pins);
     g_ui.pins = NULL;
     g_ui.pins_open = 0;
+    g_ui.pins_inbox = 0;
     g_ui.pins_scroll = 0;
+}
+
+/* Opens the pins (inbox 0) or the inbox, or closes the panel when it already shows that. */
+static void pins_toggle(int inbox)
+{
+    int same = g_ui.pins_open && g_ui.pins_inbox == inbox;
+
+    pins_close();
+    if (same)
+        return;
+    g_ui.pins_open = 1;
+    g_ui.pins_inbox = inbox;
+    if (inbox)
+        app_fetch_mentions();
+    else
+        app_fetch_pins(g_ui.msgs_channel);
+}
+
+static RECT pins_rect(void);
+static void navigate_to_message(const char *channel_id, const char *message_id);
+
+/* A click in the panel: jumps to the message under it, as Discord's "Jump". */
+static void pins_click(int x, int y)
+{
+    RECT r = pins_rect();
+    char channel[24], id[24];
+
+    if (!g_ui.pins || y < r.top + S(49))
+        return;
+    for (int k = 0; k < g_ui.pins->n && k < (int)ARRAYSIZE(g_ui.pin_top); k++) {
+        int top = g_ui.pin_top[k] - g_ui.pins_scroll;
+        msg_t *m = &g_ui.pins->msgs[k];
+        if (x < r.left || x >= r.right || y < top || y >= top + g_ui.pin_h[k])
+            continue;
+        lstrcpynA(channel, m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, sizeof channel);
+        lstrcpynA(id, m->id, sizeof id);
+        pins_close();
+        navigate_to_message(channel, id);
+        return;
+    }
 }
 
 static RECT pins_rect(void)
@@ -7551,7 +7604,8 @@ static void paint_pins(void)
     r = pins_rect();
     r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
     r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
-    text(g_ui.f_h, C_INK, rect(r.left + S(16), r.top, S(300), S(48)), "Pinned Messages", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_h, C_INK, rect(r.left + S(16), r.top, S(300), S(48)), g_ui.pins_inbox ? "Mentions" : "Pinned Messages",
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     fill(r.left + S(1), r.top + S(48), r.right - r.left - S(2), 1, C_LINE);
     if (!g_ui.pins) {
         text(g_ui.f_body, C_MUTED, rect(r.left, r.top + S(60), r.right - r.left, S(24)), "Loading\xE2\x80\xA6", DT_CENTER | DT_SINGLELINE);
@@ -7559,7 +7613,9 @@ static void paint_pins(void)
     }
     if (!g_ui.pins->n) {
         text(g_ui.f_body, C_MUTED, rect(r.left, r.top + S(80), r.right - r.left, S(24)),
-             g_ui.pins->status ? "Could not load the pins." : "This channel doesn't have any pinned messages... yet.",
+             g_ui.pins->status   ? (g_ui.pins_inbox ? "Could not load your mentions." : "Could not load the pins.")
+             : g_ui.pins_inbox ? "You're all caught up!"
+                               : "This channel doesn't have any pinned messages... yet.",
              DT_CENTER | DT_SINGLELINE);
         return;
     }
@@ -7581,11 +7637,30 @@ static void paint_pins(void)
         format_time(m->id, when, ARRAYSIZE(when));
         text_w(g_ui.f_small, C_FAINT, rect(r.left + S(60) + text_width(g_ui.f_h, m->author.data ? m->author.data : "") + S(8),
                                           y + S(10), S(200), S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
+        if (g_ui.pins_inbox) { /* where it was said */
+            int c = model_find_channel(g_ui.model, m->channel_id), g = c >= 0 ? model_channel_guild(g_ui.model, (unsigned)c) : -1;
+            char where[160];
+            int from = r.left + S(60) + text_width(g_ui.f_h, m->author.data ? m->author.data : "") + S(8) +
+                       r_text_width(g_ui.f_small, when, -1) + S(16);
+            if (c >= 0 && from < r.right - S(48)) {
+                if (g >= 0)
+                    wsprintfA(where, "#%.60s \xE2\x80\xA2 %.60s", model_str(g_ui.model, chan(c)->name),
+                              model_str(g_ui.model, g_ui.model->guilds[g].name));
+                else
+                    wsprintfA(where, "%.60s", model_str(g_ui.model, chan(c)->name));
+                text(g_ui.f_small, C_MUTED, rect(from, y + S(10), r.right - S(16) - from, S(18)), where,
+                     DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+        }
         if (th)
             r_text(g_ui.f_body, ARGB(C_INK), r.left + S(60), y + S(30), tw, th, body, -1, R_LEFT | R_WRAP | R_ELLIPSIS);
         else if (m->nfiles || m->nembeds)
             text(g_ui.f_small, C_MUTED, rect(r.left + S(60), y + S(30), tw, S(18)), "Attachment", DT_LEFT | DT_SINGLELINE);
         mem_free(body);
+        if (k < (int)ARRAYSIZE(g_ui.pin_top)) {
+            g_ui.pin_top[k] = y + g_ui.pins_scroll;
+            g_ui.pin_h[k] = S(40) + th + S(12);
+        }
         y += S(40) + (th ? th : S(18)) + S(20);
     }
     g_ui.pins_content = y + g_ui.pins_scroll - (r.top + S(56));
@@ -8255,7 +8330,7 @@ static int open_discord_link(const char *url)
 
 static int search_box_x(void)
 {
-    return pins_button_x() - S(SEARCH_W) - S(12);
+    return inbox_button_x() - S(SEARCH_W) - S(12);
 }
 
 static void place_search(void)
@@ -9038,21 +9113,22 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
                 if (open_is_text() && y < S(HEADER_H) && x >= pins_button_x() && x < pins_button_x() + S(32)) {
-                    if (g_ui.pins_open) {
-                        pins_close();
-                    } else {
-                        g_ui.pins_open = 1;
-                        app_fetch_pins(g_ui.msgs_channel);
-                    }
+                    pins_toggle(0);
+                    redraw();
+                    return 0;
+                }
+                if (open_is_text() && y < S(HEADER_H) && x >= inbox_button_x() && x < inbox_button_x() + S(32)) {
+                    pins_toggle(1);
                     redraw();
                     return 0;
                 }
                 if (g_ui.pins_open) {
                     RECT pr = pins_rect();
-                    if (!(x >= pr.left && x < pr.right && y >= pr.top && y < pr.bottom)) {
+                    if (!(x >= pr.left && x < pr.right && y >= pr.top && y < pr.bottom))
                         pins_close();
-                        redraw();
-                    }
+                    else
+                        pins_click(x, y);
+                    redraw();
                     return 0;
                 }
             }
