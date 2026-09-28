@@ -641,7 +641,8 @@ static int process_commit(mls_group_t *g, const mls_content_t *m)
         ext = a.ext;
     memset(commit_secret, 0, 32);
     if (c.has_path) {
-        if (ct_equal(g->tree.nodes[2 * committer].key, c.path.leaf.key, 65) || !mls_path_merge(&t, committer, &c.path) ||
+        if (ct_equal(g->tree.nodes[2 * committer].key, c.path.leaf.key, 65) ||
+            !mls_path_merge(&t, committer, &c.path) ||
             !mls_leaf_verify(&t.nodes[2 * committer], g->group_id.data, g->group_id.len, committer))
             goto out;
         if (!a.removed_me) {

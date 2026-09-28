@@ -292,7 +292,8 @@ int mls_tree_parse(mls_tree_t *t, const unsigned char *data, size_t n)
     /* Unmerged leaves must be leaves under their parent. */
     for (unsigned i = 1; i < mls_nodes(t->nleaves); i += 2)
         for (int k = 0; k < t->nodes[i].nunmerged; k++)
-            if (!mls_in_subtree(2 * t->nodes[i].unmerged[k], i) || 2 * t->nodes[i].unmerged[k] >= mls_nodes(t->nleaves)) {
+            if (!mls_in_subtree(2 * t->nodes[i].unmerged[k], i) ||
+                2 * t->nodes[i].unmerged[k] >= mls_nodes(t->nleaves)) {
                 mls_tree_free(t);
                 return 0;
             }

@@ -31,6 +31,7 @@ add_library(silicord_core STATIC
   src/command.c
   src/crypto.c
   src/dave.c
+  src/dave_session.c
   src/emoji.c
   src/emoji_data.c
   src/emoji_alias.c
@@ -136,6 +137,8 @@ silicord_test(mls_msg_test bcrypt)
 add_test(NAME mls_msg COMMAND mls_msg_test)
 silicord_test(mls_group_test bcrypt)
 add_test(NAME mls_group COMMAND mls_group_test)
+silicord_test(dave_session_test bcrypt)
+add_test(NAME dave_session COMMAND dave_session_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)
