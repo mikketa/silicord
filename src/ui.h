@@ -33,6 +33,7 @@ enum {
     UI_FRIEND_RESULT,   /* text = outcome of a friend request */
     UI_FORUM,           /* text = forum channel id, NUL, then the threads/search JSON (empty on failure) */
     UI_GIFS,            /* text = the query, NUL, then a JSON array of GIF objects (empty on failure) */
+    UI_COMMANDS,        /* text = the guild or channel id, NUL, then the application-command-index (empty on failure) */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -79,6 +80,10 @@ void app_fetch_around(const char *channel_id, const char *message_id);
 void app_search(const char *guild_id, const char *dm_channel_id, const char *query);
 /* Trending GIFs (empty query) or a search, from Discord's GIF picker API; answered with UI_GIFS. */
 void app_fetch_gifs(const char *query);
+/* The slash commands usable in a server (guild_id) or a DM (channel_id); answered with UI_COMMANDS. */
+void app_fetch_commands(const char *guild_id, const char *channel_id);
+/* Runs a slash command: `data` is the interaction data built by cmd_build(). Failures come as UI_SEND_FAILED. */
+void app_run_command(const char *guild_id, const char *channel_id, const char *application_id, const char *data);
 /* Loads a forum's recent posts; they come back as UI_FORUM. */
 void app_fetch_forum(const char *channel_id);
 /* Loads the channel's pinned messages; they come back as a BATCH_PINS batch. */

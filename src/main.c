@@ -612,6 +612,7 @@ typedef struct {
     sb_t files;        /* files to upload: UTF-8 paths, each followed by a NUL */
     int nfiles;
     char sticker[24];  /* sticker sent with the message */
+    char guild[24];
 } rest_job_t;
 
 static rest_job_t *new_job(const char *channel_id)
@@ -1441,6 +1442,94 @@ static DWORD WINAPI gifs_main(LPVOID arg)
     sb_free(&path);
     free_job(j);
     return 0;
+}
+
+static DWORD WINAPI commands_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    char path[96];
+    sb_t *p = mem_alloc(sizeof *p);
+
+    if (j->guild[0])
+        wsprintfA(path, "/guilds/%s/application-command-index", j->guild);
+    else
+        wsprintfA(path, "/channels/%s/application-command-index", j->channel);
+    for (int tries = 0; tries < 3; tries++) {
+        http_resp_free(&resp);
+        if (!http_request("GET", path, j->token.data, NULL, 0, &resp) || resp.status != 429)
+            break;
+        Sleep(retry_after_ms(&resp));
+    }
+    sb_add(p, j->guild[0] ? j->guild : j->channel);
+    sb_addn(p, "", 1);
+    if (resp.status == 200)
+        sb_addn(p, resp.body.data, resp.body.len);
+    ui_post(UI_COMMANDS, p);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_commands(const char *guild_id, const char *channel_id)
+{
+    rest_job_t *j = new_job(channel_id ? channel_id : "");
+
+    lstrcpynA(j->guild, guild_id ? guild_id : "", sizeof j->guild);
+    CloseHandle(CreateThread(NULL, 0, commands_main, j, 0, NULL));
+}
+
+static DWORD WINAPI command_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t body = {0};
+    char session[80], nonce[24];
+    FILETIME ft;
+    ULARGE_INTEGER now;
+
+    GetSystemTimeAsFileTime(&ft);
+    now.LowPart = ft.dwLowDateTime;
+    now.HighPart = ft.dwHighDateTime;
+    wsprintfA(nonce, "%I64u", (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22);
+    gw_session_id(session, sizeof session);
+    sb_add(&body, "{\"type\":2,\"application_id\":\"");
+    sb_add(&body, j->before);
+    if (j->guild[0]) {
+        sb_add(&body, "\",\"guild_id\":\"");
+        sb_add(&body, j->guild);
+    }
+    sb_add(&body, "\",\"channel_id\":\"");
+    sb_add(&body, j->channel);
+    sb_add(&body, "\",\"session_id\":\"");
+    sb_add(&body, session);
+    sb_add(&body, "\",\"data\":");
+    sb_addn(&body, j->text.data, j->text.len);
+    sb_add(&body, ",\"nonce\":\"");
+    sb_add(&body, nonce);
+    sb_add(&body, "\"}");
+    /* The answer (or the bot's "thinking...") comes over the gateway like any message. */
+    if (!http_request("POST", "/interactions", j->token.data, body.data, body.len, &resp)) {
+        ui_post(UI_SEND_FAILED, ui_text("Could not reach discord.com"));
+    } else if (resp.status != 204 && resp.status != 200) {
+        char text[64];
+        wsprintfA(text, "The command failed (HTTP %u)", resp.status);
+        ui_post(UI_SEND_FAILED, ui_text(text));
+    }
+    sb_free(&body);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_run_command(const char *guild_id, const char *channel_id, const char *application_id, const char *data)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->guild, guild_id ? guild_id : "", sizeof j->guild);
+    lstrcpynA(j->before, application_id, sizeof j->before);
+    sb_add(&j->text, data);
+    CloseHandle(CreateThread(NULL, 0, command_main, j, 0, NULL));
 }
 
 void app_fetch_gifs(const char *query)
