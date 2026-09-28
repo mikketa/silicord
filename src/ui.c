@@ -6106,15 +6106,9 @@ static void picker_rebuild(void)
         int header = 0;
         while (model_emoji_next(g_ui.model, g_ui.guild, &cursor, &e)) {
             pick_item_t it = {PI_CUSTOM, 0};
-            int len = e.name_len < 39 ? e.name_len : 39, match = !q[0];
+            int len = e.name_len < 39 ? e.name_len : 39;
             lstrcpynA(it.name, e.name, len + 1);
-            for (int k = 0; !match && it.name[k]; k++) {
-                int j = 0;
-                while (q[j] && (it.name[k + j] | 32) == (q[j] | 32))
-                    j++;
-                match = !q[j];
-            }
-            if (!match)
+            if (q[0] && !find_str_ci(it.name, q))
                 continue;
             if (!header) {
                 pick_item_t h = {PI_HEADER, -1 - g_ui.guild};
