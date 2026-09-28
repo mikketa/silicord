@@ -1216,8 +1216,10 @@ static void paint_channel_row(unsigned i, int y)
     }
     if (sel || hov)
         r_round(x, y + S(1), w, S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
-    if (c->type == CH_VOICE || c->type == CH_STAGE)
-        text_w(g_ui.f_icon, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)), ICON_VOLUME, -1,
+    if (c->type == CH_VOICE || c->type == CH_STAGE || c->type == CH_NEWS || c->type == CH_FORUM || c->type == CH_MEDIA)
+        /* Speaker, megaphone for announcements, speech bubbles for forums, like Discord. */
+        text_w(g_ui.f_icon, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)),
+               c->type == CH_NEWS ? L"\xE789" : c->type == CH_FORUM || c->type == CH_MEDIA ? L"\xE8F2" : ICON_VOLUME, -1,
                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     else
         text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2871,6 +2873,32 @@ static void redraw(void)
 
 /* ---- Fonts, icon ---- */
 
+static int CALLBACK font_found(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM found)
+{
+    (void)lf;
+    (void)tm;
+    (void)type;
+    *(int *)found = 1;
+    return 0;
+}
+
+/* Windows 11's icon font when installed (Discord-like glyphs), else Windows 10's. */
+static const wchar_t *icon_family(void)
+{
+    static int checked, fluent;
+
+    if (!checked) {
+        LOGFONTW lf = {0};
+        HDC dc = GetDC(NULL);
+        lstrcpyW(lf.lfFaceName, L"Segoe Fluent Icons");
+        lf.lfCharSet = DEFAULT_CHARSET;
+        EnumFontFamiliesExW(dc, &lf, font_found, (LPARAM)&fluent, 0);
+        ReleaseDC(NULL, dc);
+        checked = 1;
+    }
+    return fluent ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
+}
+
 static void make_fonts(void)
 {
     r_font_t **f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat, &g_ui.f_icon,
@@ -2888,8 +2916,8 @@ static void make_fonts(void)
     g_ui.f_body = r_font(L"Segoe UI", S(15), FW_NORMAL, 0);
     g_ui.f_small = r_font(L"Segoe UI", S(13), FW_NORMAL, 0);
     g_ui.f_cat = r_font(L"Segoe UI", S(12), FW_BOLD, 0);
-    g_ui.f_icon = r_font(L"Segoe MDL2 Assets", S(14), FW_NORMAL, 0);
-    g_ui.f_icon_big = r_font(L"Segoe MDL2 Assets", S(32), FW_NORMAL, 0);
+    g_ui.f_icon = r_font(icon_family(), S(14), FW_NORMAL, 0);
+    g_ui.f_icon_big = r_font(icon_family(), S(32), FW_NORMAL, 0);
     g_ui.f_initial = r_font(L"Segoe UI", S(17), FW_SEMIBOLD, 0);
     g_ui.f_initial_small = r_font(L"Segoe UI", S(13), FW_SEMIBOLD, 0);
     g_ui.f_mono = r_font(L"Consolas", S(14), FW_NORMAL, 0);
@@ -2898,7 +2926,7 @@ static void make_fonts(void)
     g_ui.f_h3 = r_font(L"Segoe UI", S(17), FW_BOLD, 0);
     g_ui.f_name = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
     g_ui.f_emoji = r_font(L"Segoe UI Emoji", S(24), FW_NORMAL, 0);
-    g_ui.f_icon_mid = r_font(L"Segoe MDL2 Assets", S(20), FW_NORMAL, 0);
+    g_ui.f_icon_mid = r_font(icon_family(), S(20), FW_NORMAL, 0);
     build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
@@ -5194,9 +5222,6 @@ static void group_title(const ml_item_t *it, char *out, int size)
                 break;
             }
     wsprintfA(buf, "%.60s \xE2\x80\x94 %d", name, it->count ? it->count : ml_group_count(&g_ui.ml, it->id));
-    for (char *c = buf; *c; c++) /* uppercase like Discord (ASCII only: names may be UTF-8) */
-        if (*c >= 'a' && *c <= 'z')
-            *c = (char)(*c - 'a' + 'A');
     lstrcpynA(out, buf, size);
 }
 
@@ -5214,9 +5239,13 @@ static void paint_members(RECT rc)
         if (y + h > S(HEADER_H) && y < rc.bottom && r_visible(y, h)) {
             if (it->group && it->valid) {
                 char title[128];
+                wchar_t *wt;
                 group_title(it, title, sizeof title);
-                text(g_ui.f_cat, C_MUTED, rect(x0 + S(16), y + S(16), S(MEMBERS_W) - S(24), S(20)), title,
-                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                wt = utf8_to_wide(title, lstrlenA(title));
+                CharUpperW(wt); /* uppercase like Discord, accents included */
+                text_w(g_ui.f_cat, C_MUTED, rect(x0 + S(16), y + S(16), S(MEMBERS_W) - S(24), S(20)), wt, -1,
+                       DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                mem_free(wt);
             } else if (it->valid) {
                 int offline = it->status == ML_OFFLINE || it->status == ML_UNKNOWN;
                 r_image_t *img = user_avatar(it->id, it->avatar);
