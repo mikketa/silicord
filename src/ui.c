@@ -84,7 +84,8 @@ typedef struct {
 #define PICK_H 440
 #define PICK_COLS 9
 #define PICK_CELL 40
-#define PICK_TOP 56
+#define PICK_TOP 92
+#define PICK_TABS 44
 #define PICK_FOOT 52
 #define PICK_HEAD 28
 
@@ -264,6 +265,10 @@ typedef struct {
     char picker_msg[24];
     void *pick_items;
     int npick, pick_scroll, pick_hover, pick_content;
+    int picker_tab;            /* 0 emoji, 1 GIFs */
+    sb_t gif_json;             /* last GIF answer */
+    sb_t gif_query;
+    int gif_x[40], gif_y[40], gif_w[40], gif_h[40], ngif;
 
     /* Member list. */
     ml_t ml;
@@ -558,6 +563,7 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
     lstrcpynA(im->key, key, sizeof im->key);
     im->failed = 0;
     im->used = g_ui.frame;
+    im->wnd = g_ui.paint_wnd;
     im->img = frame_ms() < SYNC_DECODE_MS ? img_cached(path, max_px) : NULL;
     if (!im->img) {
         if (g_ui.image_first)
@@ -1335,6 +1341,9 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static void gifs_paint(int w, int h);
+static void gifs_click(int x, int y);
+static void on_gifs(const sb_t *p);
 static void posts_clear(void);
 static void on_forum(const sb_t *p);
 static int forum_view(void);
@@ -3586,6 +3595,15 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         redraw();
         return;
     }
+    if (msg == UI_GIFS) {
+        if (p)
+            on_gifs(p);
+        if (p) {
+            sb_free(p);
+            mem_free(p);
+        }
+        return;
+    }
     if (msg == UI_FORUM) {
         if (p)
             on_forum(p);
@@ -3708,6 +3726,8 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         if (im) {
             im->img = (r_image_t *)wp;
             im->failed = !wp;
+            if (im->wnd && im->wnd != g_ui.wnd && IsWindow(im->wnd))
+                InvalidateRect(im->wnd, NULL, FALSE); /* the picker or another child waits for it */
         } else {
             r_image_free((r_image_t *)wp);
         }
@@ -5563,7 +5583,21 @@ static void picker_paint(void)
     r_fill(0, 0, w, h, ARGB(C_MAIN));
     r_round(0, 0, w, h, S(8), 0xFF111111);
     r_round_outline(0, 0, w, h, S(8), 1, 0xFF2A2A2A);
-    r_round(S(12), S(12), w - S(24), S(32), S(6), 0xFF1E1E1E);
+    if (g_ui.picker_mode == PICK_COMPOSER) {
+        static const char *const tabs[] = {"Emoji", "GIFs"};
+        for (int t = 0; t < 2; t++) {
+            int tx = S(12) + t * S(76);
+            if (g_ui.picker_tab == t)
+                r_round(tx, S(10), S(68), S(26), S(6), ARGB(C_SELECT));
+            text(g_ui.f_h, g_ui.picker_tab == t ? C_INK : C_MUTED, rect(tx, S(10), S(68), S(26)), tabs[t],
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+    r_round(S(12), S(PICK_TABS), w - S(24), S(32), S(6), 0xFF1E1E1E);
+    if (g_ui.picker_tab == 1) {
+        gifs_paint(w, h);
+        return;
+    }
     r_clip(0, S(PICK_TOP) - S(4), w, grid_bottom - S(PICK_TOP) + S(4));
     for (int i = 0; i < g_ui.npick; i++) {
         const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
@@ -5739,10 +5773,24 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_COMMAND:
         if ((HWND)lp == g_ui.picker_edit && HIWORD(wp) == EN_CHANGE) {
-            picker_rebuild();
-            InvalidateRect(wnd, NULL, FALSE);
+            if (g_ui.picker_tab == 1) {
+                SetTimer(wnd, 1, 400, NULL); /* search once typing pauses */
+            } else {
+                picker_rebuild();
+                InvalidateRect(wnd, NULL, FALSE);
+            }
         }
         return 0;
+    case WM_TIMER: {
+        wchar_t q[64];
+        sb_t s = {0};
+        KillTimer(wnd, 1);
+        GetWindowTextW(g_ui.picker_edit, q, 64);
+        wide_to_utf8(q, (size_t)lstrlenW(q), &s);
+        app_fetch_gifs(s.data ? s.data : "");
+        sb_free(&s);
+        return 0;
+    }
     case WM_CTLCOLOREDIT:
         SetTextColor((HDC)wp, GDI(C_INK));
         SetBkColor((HDC)wp, RGB(0x1E, 0x1E, 0x1E));
@@ -5762,7 +5810,24 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_LBUTTONUP: {
-        int h = picker_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), h;
+        if (g_ui.picker_mode == PICK_COMPOSER && y >= S(10) && y < S(36) && x >= S(12) && x < S(12) + 2 * S(76)) {
+            g_ui.picker_tab = (x - S(12)) / S(76);
+            SetWindowTextW(g_ui.picker_edit, L"");
+            SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE,
+                         (LPARAM)(g_ui.picker_tab == 1 ? L"Search GIFs" : L"Find the perfect emoji"));
+            g_ui.pick_scroll = 0;
+            KillTimer(wnd, 1); /* clearing the edit armed a search */
+            if (g_ui.picker_tab == 1)
+                app_fetch_gifs("");
+            InvalidateRect(wnd, NULL, FALSE);
+            return 0;
+        }
+        if (g_ui.picker_tab == 1) {
+            gifs_click(x, y);
+            return 0;
+        }
+        h = picker_hit(x, y);
         if (h >= 0)
             picker_choose(h);
         return 0;
@@ -5781,6 +5846,114 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     }
     return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* ---- GIFs tab ---- */
+
+static void on_gifs(const sb_t *p)
+{
+    const char *query = p->data;
+    wchar_t now[64];
+    sb_t cur = {0};
+
+    if (!g_ui.picker || g_ui.picker_tab != 1)
+        return;
+    GetWindowTextW(g_ui.picker_edit, now, 64);
+    wide_to_utf8(now, (size_t)lstrlenW(now), &cur);
+    if (lstrcmpA(query, cur.data ? cur.data : "") == 0) { /* ignore answers to older queries */
+        size_t n = p->len - (size_t)lstrlenA(query) - 1;
+        sb_clear(&g_ui.gif_json);
+        sb_addn(&g_ui.gif_json, p->data + lstrlenA(query) + 1, n);
+        g_ui.pick_scroll = 0;
+        InvalidateRect(g_ui.picker, NULL, FALSE);
+    }
+    sb_free(&cur);
+}
+
+/* Two columns of GIFs, each as tall as its aspect ratio asks. */
+static void gifs_paint(int w, int h)
+{
+    json_t arr, g, v;
+    json_iter_t it;
+    int col_w = (w - S(36)) / 2, colh[2] = {S(PICK_TOP) - S(36), S(PICK_TOP) - S(36)}, bottom = h - S(8);
+
+    g_ui.ngif = 0;
+    if (!g_ui.gif_json.len || !json_parse(g_ui.gif_json.data, g_ui.gif_json.len, &arr) || json_type(arr) != JSON_ARRAY) {
+        char msg[48];
+        if (!g_ui.gif_json.len)
+            lstrcpyA(msg, "Loading GIFs\xE2\x80\xA6");
+        else if (g_ui.gif_json.data[0] == '!')
+            wsprintfA(msg, "Couldn't load GIFs (%s)", g_ui.gif_json.data + 1);
+        else
+            lstrcpyA(msg, "No GIFs found");
+        text(g_ui.f_body, C_MUTED, rect(0, h / 2, w, S(24)), msg, DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    r_clip(0, S(PICK_TOP) - S(8), w, bottom - S(PICK_TOP) + S(8));
+    json_iter(arr, &it);
+    while (g_ui.ngif < 40 && json_next(&it, NULL, &g)) {
+        long long gw = 1, gh = 1;
+        int c = colh[0] <= colh[1] ? 0 : 1, x = S(12) + c * (col_w + S(12)), y = colh[c] - g_ui.pick_scroll, ch;
+        sb_t src = {0};
+        char key[64], id[32] = "";
+        if (json_get(g, "width", &v))
+            json_int(v, &gw);
+        if (json_get(g, "height", &v))
+            json_int(v, &gh);
+        ch = gw > 0 ? (int)(col_w * gh / gw) : col_w;
+        if (ch > col_w * 2)
+            ch = col_w * 2;
+        g_ui.gif_x[g_ui.ngif] = x;
+        g_ui.gif_y[g_ui.ngif] = colh[c];
+        g_ui.gif_w[g_ui.ngif] = col_w;
+        g_ui.gif_h[g_ui.ngif] = ch;
+        if (y + ch > S(PICK_TOP) - S(8) && y < bottom && r_visible(y, ch)) {
+            r_image_t *img = NULL;
+            if (json_get(g, "id", &v))
+                json_raw(v, id, sizeof id);
+            if (json_get(g, "src", &v))
+                json_str(v, &src);
+            wsprintfA(key, "gif:%s", id);
+            if (src.len)
+                img = image_get(key, src.data, col_w > ch ? col_w : ch);
+            if (img)
+                r_image_cover(img, x, y, col_w, ch, S(6));
+            else
+                r_round(x, y, col_w, ch, S(6), 0xFF1E1E1E);
+        }
+        sb_free(&src);
+        colh[c] += ch + S(8);
+        g_ui.ngif++;
+    }
+    g_ui.pick_content = (colh[0] > colh[1] ? colh[0] : colh[1]) - (S(PICK_TOP) - S(36));
+    r_unclip();
+}
+
+static void gifs_click(int x, int y)
+{
+    json_t arr, g, v;
+    json_iter_t it;
+    int k = 0;
+
+    if (!g_ui.gif_json.len || !json_parse(g_ui.gif_json.data, g_ui.gif_json.len, &arr))
+        return;
+    json_iter(arr, &it);
+    while (k < g_ui.ngif && json_next(&it, NULL, &g)) {
+        int top = g_ui.gif_y[k] - g_ui.pick_scroll;
+        if (x >= g_ui.gif_x[k] && x < g_ui.gif_x[k] + g_ui.gif_w[k] && y >= top && y < top + g_ui.gif_h[k] &&
+            y >= S(PICK_TOP) - S(8)) {
+            /* Discord sends the GIF's page link; the embed shows it. */
+            sb_t url = {0};
+            if (json_get(g, "url", &v))
+                json_str(v, &url);
+            if (url.len && open_is_text())
+                app_send_message(g_ui.msgs_channel, url.data);
+            sb_free(&url);
+            picker_close();
+            return;
+        }
+        k++;
+    }
 }
 
 /* Opens the picker with its bottom-right corner at (right, bottom), clamped to the window. */
@@ -5805,17 +5978,22 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
         y = rc.bottom - S(8) - h;
     g_ui.picker_mode = mode;
     lstrcpynA(g_ui.picker_msg, msg_id ? msg_id : "", sizeof g_ui.picker_msg);
+    if (mode != PICK_COMPOSER)
+        g_ui.picker_tab = 0;
     if (!g_ui.picker_brush)
         g_ui.picker_brush = CreateSolidBrush(RGB(0x1E, 0x1E, 0x1E));
     g_ui.picker = CreateWindowExW(0, L"SilicordEmoji", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, x, y, w, h,
                                   g_ui.wnd, NULL, NULL, NULL);
-    g_ui.picker_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(22), S(18), w - S(44), S(20),
-                                       g_ui.picker, NULL, NULL, NULL);
+    g_ui.picker_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(22), S(PICK_TABS) + S(6),
+                                       w - S(44), S(20), g_ui.picker, NULL, NULL, NULL);
     g_ui.picker_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.picker_edit, GWLP_WNDPROC, (LONG_PTR)picker_edit_proc);
     font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
     SendMessageW(g_ui.picker_edit, WM_SETFONT, (WPARAM)font, FALSE);
-    SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Find the perfect emoji");
+    SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)(g_ui.picker_tab == 1 ? L"Search GIFs" : L"Find the perfect emoji"));
     picker_rebuild();
+    if (g_ui.picker_tab == 1)
+        app_fetch_gifs("");
     SetWindowPos(g_ui.picker, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     SetFocus(g_ui.picker_edit);
 }
@@ -8250,7 +8428,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_FORUM) {
+        if (msg >= UI_QR && msg <= UI_GIFS) {
             on_worker(msg, wp, lp);
             return 0;
         }
