@@ -1,5 +1,6 @@
 #include "model.h"
 #include "mem.h"
+#include "msg.h"
 
 #define PERM_ADMINISTRATOR 0x8ull
 #define PERM_VIEW_CHANNEL 0x400ull
@@ -617,6 +618,7 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
         out->roles = pack_roles(m, v);
     if (field(g, "emojis", &v))
         out->emojis = pack_emojis(m, v, 0);
+    out->default_notify = field(g, "default_message_notifications", &v) && to_i64(v) == 1 ? NOTIFY_MENTIONS : NOTIFY_ALL;
     if (field(g, "stickers", &v))
         out->stickers = pack_emojis(m, v, 1);
     nmine = my_roles(d, g, index, m->user_id, mine);
@@ -918,36 +920,133 @@ static void apply_read_state(model_t *m, json_t d)
     }
 }
 
+/* ---- Notification settings ---- */
+
+/* Discord's message_notifications (0 all, 1 mentions, 2 nothing, 3 inherit) as NOTIFY_*. */
+static int notify_level(json_t obj)
+{
+    json_t v;
+    long long n = 3;
+
+    if (json_get(obj, "message_notifications", &v))
+        json_int(v, &n);
+    return n >= 0 && n <= 2 ? (int)n + NOTIFY_ALL : NOTIFY_DEFAULT;
+}
+
+/* "muted" with its mute_config: when a timed mute ends. */
+static int read_mute(json_t obj, long long *until)
+{
+    json_t v, cfg;
+    sb_t iso = {0};
+
+    *until = 0;
+    if (!json_get(obj, "muted", &v) || !is_true(v))
+        return 0;
+    if (json_get(obj, "mute_config", &cfg) && json_type(cfg) == JSON_OBJECT && json_get(cfg, "end_time", &v) &&
+        json_type(v) == JSON_STRING && json_str(v, &iso) && iso.len)
+        *until = msg_iso_ms(iso.data);
+    sb_free(&iso);
+    return 1;
+}
+
+/* One user_guild_settings entry; guild_id null holds the DM overrides. Replaces what was there. */
+static void apply_settings_entry(model_t *m, json_t e)
+{
+    json_t v, overrides, o;
+    json_iter_t it;
+    char id[24] = "";
+    int g = -1;
+    unsigned first, count;
+
+    if (json_get(e, "guild_id", &v) && json_type(v) == JSON_STRING) {
+        json_raw(v, id, sizeof id);
+        if ((g = model_find_guild(m, id)) < 0)
+            return;
+    }
+    if (g >= 0) {
+        guild_t *gd = &m->guilds[g];
+        gd->muted = read_mute(e, &gd->mute_until);
+        gd->notify = notify_level(e);
+        gd->suppress_everyone = json_get(e, "suppress_everyone", &v) && is_true(v);
+        gd->suppress_roles = json_get(e, "suppress_roles", &v) && is_true(v);
+        first = gd->first;
+        count = gd->count;
+    } else {
+        first = m->dm_first;
+        count = m->dm_count;
+    }
+    for (unsigned i = first; i < first + count; i++) {
+        m->channels[i].muted = 0;
+        m->channels[i].mute_until = 0;
+        m->channels[i].notify = NOTIFY_DEFAULT;
+    }
+    if (!json_get(e, "channel_overrides", &overrides))
+        return;
+    json_iter(overrides, &it);
+    while (json_next(&it, NULL, &o)) {
+        int i;
+        if (!json_get(o, "channel_id", &v))
+            continue;
+        json_raw(v, id, sizeof id);
+        if ((i = model_find_channel(m, id)) < 0)
+            continue;
+        m->channels[i].muted = read_mute(o, &m->channels[i].mute_until);
+        m->channels[i].notify = notify_level(o);
+    }
+}
+
 static void apply_mutes(model_t *m, json_t d)
 {
-    json_t list, e, v, overrides, o;
-    json_iter_t it, oit;
-    char id[24];
+    json_t list, e;
+    json_iter_t it;
 
     if (!entries(d, "user_guild_settings", &list))
         return;
     json_iter(list, &it);
-    while (json_next(&it, NULL, &e)) {
-        int g;
-        id[0] = 0;
-        if (json_get(e, "guild_id", &v))
-            json_raw(v, id, sizeof id);
-        if (id[0] && json_get(e, "muted", &v) && is_true(v) && (g = model_find_guild(m, id)) >= 0)
-            m->guilds[g].muted = 1;
-        if (!json_get(e, "channel_overrides", &overrides))
-            continue;
-        json_iter(overrides, &oit);
-        while (json_next(&oit, NULL, &o)) {
-            int i;
-            if (!json_get(o, "muted", &v) || !is_true(v) || !json_get(o, "channel_id", &v))
-                continue;
-            json_raw(v, id, sizeof id);
-            i = model_find_channel(m, id);
-            if (i >= 0)
-                m->channels[i].muted = 1;
-        }
-    }
+    while (json_next(&it, NULL, &e))
+        apply_settings_entry(m, e);
 }
+
+static int mute_active(int muted, long long until, long long now_ms)
+{
+    return muted && (!until || until > now_ms);
+}
+
+static int parent_index(const model_t *m, unsigned i)
+{
+    return m->channels[i].parent[0] ? model_find_channel(m, m->channels[i].parent) : -1;
+}
+
+int model_guild_muted(const model_t *m, int g, long long now_ms)
+{
+    return g >= 0 && (unsigned)g < m->nguilds && mute_active(m->guilds[g].muted, m->guilds[g].mute_until, now_ms);
+}
+
+int model_muted(const model_t *m, unsigned i, long long now_ms)
+{
+    int p = parent_index(m, i);
+
+    return mute_active(m->channels[i].muted, m->channels[i].mute_until, now_ms) ||
+           (p >= 0 && mute_active(m->channels[p].muted, m->channels[p].mute_until, now_ms)) ||
+           model_guild_muted(m, model_channel_guild(m, i), now_ms);
+}
+
+int model_notify(const model_t *m, unsigned i)
+{
+    int g = model_channel_guild(m, i), p;
+
+    if (g < 0)
+        return NOTIFY_ALL;
+    if (m->channels[i].notify != NOTIFY_DEFAULT)
+        return m->channels[i].notify;
+    p = parent_index(m, i);
+    if (p >= 0 && m->channels[p].notify != NOTIFY_DEFAULT)
+        return m->channels[p].notify;
+    if (m->guilds[g].notify != NOTIFY_DEFAULT)
+        return m->guilds[g].notify;
+    return m->guilds[g].default_notify ? m->guilds[g].default_notify : NOTIFY_ALL;
+}
+
 
 /* ---- READY ---- */
 
@@ -1078,6 +1177,8 @@ static void carry_state(channel_t *c, const model_t *m)
     copy_id(c->read, m->channels[i].read, sizeof c->read);
     c->mentions = m->channels[i].mentions;
     c->muted = m->channels[i].muted;
+    c->mute_until = m->channels[i].mute_until;
+    c->notify = m->channels[i].notify;
     if (id_cmp(m->channels[i].last_message, c->last_message) > 0)
         copy_id(c->last_message, m->channels[i].last_message, sizeof c->last_message);
 }
@@ -1176,6 +1277,10 @@ static model_t *apply_guild_create(const model_t *m, json_t d)
         carry_state(&n->channels[i], m);
     if (gi >= 0) {
         fresh.muted = m->guilds[gi].muted;
+        fresh.mute_until = m->guilds[gi].mute_until;
+        fresh.notify = m->guilds[gi].notify;
+        fresh.suppress_everyone = m->guilds[gi].suppress_everyone;
+        fresh.suppress_roles = m->guilds[gi].suppress_roles;
         fresh.folder = m->guilds[gi].folder;
     }
     else
@@ -1314,6 +1419,19 @@ static model_t *apply_emojis(const model_t *m, json_t d, int stickers)
     return n;
 }
 
+/* USER_GUILD_SETTINGS_UPDATE: one server's settings (or the DMs') changed, here or elsewhere. */
+static model_t *apply_settings(const model_t *m, json_t d)
+{
+    unsigned cap = 0;
+    model_t *n = clone_empty(m, 0);
+
+    for (unsigned g = 0; g < m->nguilds; g++)
+        copy_guild(n, &cap, m, g, NULL);
+    copy_dms(n, &cap, m, NULL, NULL, NULL);
+    apply_settings_entry(n, d);
+    return n;
+}
+
 model_t *model_apply(const model_t *m, const char *event, json_t d)
 {
     if (str_eq(event, "THREAD_CREATE") || str_eq(event, "THREAD_UPDATE")) {
@@ -1330,6 +1448,8 @@ model_t *model_apply(const model_t *m, const char *event, json_t d)
     }
     if (str_eq(event, "THREAD_DELETE"))
         return apply_channel(m, d, 1);
+    if (str_eq(event, "USER_GUILD_SETTINGS_UPDATE"))
+        return apply_settings(m, d);
     if (str_eq(event, "GUILD_EMOJIS_UPDATE"))
         return apply_emojis(m, d, 0);
     if (str_eq(event, "GUILD_STICKERS_UPDATE"))

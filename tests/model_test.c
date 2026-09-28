@@ -53,6 +53,30 @@ static int index_in_guild(const model_t *m, const char *id)
     return i < 0 ? -1 : i - (int)m->guilds[0].first;
 }
 
+static void test_notify(const model_t *m)
+{
+    int general = model_find_channel(m, "11"), top = model_find_channel(m, "14"), dm = model_find_channel(m, "21");
+    model_t *a;
+
+    check(model_notify(m, (unsigned)general) == NOTIFY_ALL && model_notify(m, (unsigned)dm) == NOTIFY_ALL,
+          "everything notifies by default");
+    check(model_muted(m, (unsigned)top, 0) && !model_muted(m, (unsigned)general, 0), "channel mutes are read");
+    a = apply(m, "USER_GUILD_SETTINGS_UPDATE", "{\"guild_id\":\"1\",\"muted\":false,\"message_notifications\":1,\"suppress_everyone\":true,"
+              "\"channel_overrides\":[{\"channel_id\":\"10\",\"message_notifications\":2,\"muted\":false},"
+              "{\"channel_id\":\"14\",\"message_notifications\":0,\"muted\":true,\"mute_config\":{\"end_time\":\"2026-01-01T00:00:00+00:00\"}}]}");
+    check(a != NULL, "settings update applies");
+    if (a) {
+        general = model_find_channel(a, "11");
+        top = model_find_channel(a, "14");
+        check(a->guilds[0].suppress_everyone && a->guilds[0].notify == NOTIFY_MENTIONS, "server level and @everyone");
+        check(model_notify(a, (unsigned)general) == NOTIFY_NOTHING, "channels follow their category");
+        check(model_notify(a, (unsigned)top) == NOTIFY_ALL, "a channel's own level wins");
+        check(model_muted(a, (unsigned)top, 1700000000000ll) && !model_muted(a, (unsigned)top, 1800000000000ll),
+              "timed mutes end");
+        model_free(a);
+    }
+}
+
 static void test_updates(const model_t *m)
 {
     model_t *n, *n2;
@@ -266,6 +290,7 @@ void entry(void)
     test_updates(m);
     test_roles(m);
     test_emojis(m);
+    test_notify(m);
     test_threads(m);
     model_free(m);
     finish();

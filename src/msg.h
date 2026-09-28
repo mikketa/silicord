@@ -154,5 +154,8 @@ msg_batch_t *msg_batch_poll_vote(json_t d, int delta, const char *me);
 /* The emoji of a reaction as the REST API wants it in a URL: "%F0%9F%91%8D" or "name:id". */
 void msg_reaction_path(const msg_reaction_t *r, sb_t *out);
 
+/* "2026-09-28T12:34:56.789+00:00" in milliseconds since the Unix epoch. */
+long long msg_iso_ms(const char *iso);
+
 /* Milliseconds since the Unix epoch encoded in a snowflake. */
 long long snowflake_ms(const char *id);

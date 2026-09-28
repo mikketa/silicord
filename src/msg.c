@@ -332,7 +332,7 @@ static long long days_from_civil(long long y, int m, int d)
 }
 
 /* "2026-09-28T12:34:56.789+00:00" to Unix ms (UTC offsets other than +00:00 are ignored). */
-static long long iso_ms(const char *s)
+long long msg_iso_ms(const char *s)
 {
     int f[6] = {0};
     int k = 0;
@@ -361,7 +361,7 @@ static void parse_poll(json_t poll, msg_t *out)
     if (json_get(poll, "expiry", &v) && json_type(v) == JSON_STRING) {
         sb_t iso = {0};
         json_str(v, &iso);
-        p->expiry_ms = iso_ms(iso.data);
+        p->expiry_ms = msg_iso_ms(iso.data);
         sb_free(&iso);
     }
     if (json_get(poll, "answers", &answers)) {

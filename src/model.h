@@ -23,6 +23,9 @@ enum {
     CH_MEDIA = 16,
 };
 
+/* Which messages notify. */
+enum { NOTIFY_DEFAULT, NOTIFY_ALL, NOTIFY_MENTIONS, NOTIFY_NOTHING };
+
 typedef struct {
     char id[24];
     char icon[40];      /* CDN hash, empty if none */
@@ -30,6 +33,11 @@ typedef struct {
     unsigned first;     /* the guild's channels, in display order */
     unsigned count;
     int muted;
+    long long mute_until; /* Unix ms when a timed mute ends, 0 if it does not */
+    int notify;         /* NOTIFY_*: ours, or NOTIFY_DEFAULT for the server's */
+    int default_notify; /* the server's default: NOTIFY_ALL or NOTIFY_MENTIONS */
+    int suppress_everyone;
+    int suppress_roles;
     /* What we need to decide which new channels are visible. */
     unsigned long long base_perms;
     int sees_all;       /* owner, administrator, or our roles are unknown */
@@ -63,6 +71,8 @@ typedef struct {
     char read[24];
     int mentions;
     int muted;
+    long long mute_until;
+    int notify;         /* NOTIFY_*: NOTIFY_DEFAULT follows the category, then the server */
 } channel_t;
 
 typedef struct {
@@ -93,6 +103,13 @@ void model_free(model_t *m);
  * `m` is left untouched; read state carries over by channel id.
  */
 model_t *model_apply(const model_t *m, const char *event, json_t d);
+
+/* What notifies in channel i: NOTIFY_ALL, NOTIFY_MENTIONS or NOTIFY_NOTHING. DMs notify for everything. */
+int model_notify(const model_t *m, unsigned i);
+/* Channel i is muted at `now_ms`, itself, through its category or through its server. */
+int model_muted(const model_t *m, unsigned i, long long now_ms);
+/* Server g is muted at `now_ms`. */
+int model_guild_muted(const model_t *m, int g, long long now_ms);
 
 static __inline int model_is_thread(int type)
 {
