@@ -7,17 +7,25 @@
 
 A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, DirectWrite and a few kilobytes.
 
-> **Status: early.** Silicord logs in with a QR code and covers everyday text chat: servers, channels and direct messages; messages with formatting, custom emoji, images, files, link previews, stickers and reactions; replies, edits and deletes; file uploads; the emoji picker; typing indicators; the member list with statuses and role colors; and user profiles with their banner, badges, avatar decoration and display name style. See the [roadmap](docs/ROADMAP.md).
+> **Status: early.** Silicord logs in with a QR code and covers everyday text chat:
+>
+> - servers (with their folders), channels, threads, forums and direct messages, the friends list
+> - messages with formatting, custom and animated emoji, GIFs, images, files, link previews, stickers, polls, reactions, and bots' buttons and menus
+> - replies, edits and deletes, uploads (plus button, drag and drop, pasting), the emoji, GIF and sticker picker, `@` `#` `:` and slash command suggestions
+> - pins, search, jumping to a message, the quick switcher (Ctrl+K) and Discord's keyboard shortcuts
+> - typing indicators, unread markers, notifications, the member list with statuses and role colors, and user profiles with their banner, badges, roles, avatar decoration and display name style
+>
+> Voice is not there yet. See the [roadmap](docs/ROADMAP.md).
 
 ## Why
 
 The official client ships a full Chromium: several processes, hundreds of MB of RAM and CPU usage even when idle. Silicord aims for the opposite:
 
-- a single `.exe` of a few dozen KB, nothing to install
+- a single `.exe` of a few hundred KB, nothing to install
 - ~0% CPU when idle (the process sleeps until the next network event)
 - a few MB of RAM
 
-Measured while connected to an account with 20 servers: 195 KB executable, 0% CPU over 30 idle seconds, about 8 MB of memory at startup (Task Manager) and 9 MB after browsing eight servers. Silicord's own data, images included, stays around 3 MB.
+Measured while connected to an account with 20 servers: 480 KB executable (the emoji table and its search names included), 0% CPU over 30 idle seconds, about 8 MB of memory at startup (Task Manager) and 9 MB after browsing eight servers. Silicord's own data, images included, stays around 3 MB.
 - a codebase small enough to read end to end
 
 ## ⚠️ Disclaimer

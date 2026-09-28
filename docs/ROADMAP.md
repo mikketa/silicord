@@ -51,17 +51,25 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Typing indicator, both ways
 - [x] Member list with role groups, statuses, activities and bot tags; role colors on names
 - [x] Statuses in direct messages, and picking our own (online, idle, do not disturb, invisible)
-- [ ] Mention and emoji autocomplete in the composer
-- [ ] Threads, forums, pins, search
-- [ ] Friends list
+- [x] Mention, channel and emoji autocomplete in the composer
+- [x] Threads, forums, pins, search, jumping to a message
+- [x] Friends list: online, all, pending, blocked, adding friends
+- [x] Server folders, right-click menus, quick switcher (Ctrl+K), keyboard shortcuts
+- [x] Polls: results and voting
+- [x] GIF picker (Discord's GIF search) and sticker picker
+- [x] Pasting pictures and files into the composer
+- [x] Slash commands: suggestions, subcommands and options, answers shown as in Discord
+- [x] Bots' buttons and select menus, components v2 text
 - [x] Unread markers, mention badges, read sync with other devices
 - [x] Windows notifications for DMs, mentions and role mentions
 - [x] Profile popouts: banner, avatar decoration, display name fonts and effects, server tag, badges, mutual friends and servers, bio, message box
-- [ ] Profile popouts: roles, animated banners and decorations
+- [x] Profile popouts: roles
+- [ ] Profile popouts: animated banners and decorations
 - [ ] Executable icon from `assets/logo.svg`
 
 ## 5. Later
 
-- [ ] Animated GIFs, emoji and avatars
+- [x] Animated GIFs and emoji
+- [ ] Settings screen, notification settings per server and channel
 - [ ] Themes
 - [ ] Voice (Opus + encryption), the biggest piece
