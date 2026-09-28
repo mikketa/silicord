@@ -228,7 +228,7 @@ static DWORD WINAPI worker(LPVOID arg)
                 (img = r_image_decode(resp.body.data, resp.body.len, j->max_px)) != NULL)
                 cache_write(j->path.data, &resp.body);
             if (!img) { /* one write, so lines from several workers don't interleave */
-                char line[48];
+                char line[64];
                 sb_t out = {0};
                 wsprintfA(line, "[img] failed (HTTP %u, %u bytes): ", resp.status, (unsigned)resp.body.len);
                 sb_add(&out, line);

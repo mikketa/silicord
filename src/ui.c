@@ -1226,7 +1226,7 @@ static void update_title(void)
 /* Red count badge whose right edge is at `right`, vertically centered on `cy`. */
 static void paint_badge(int right, int cy, int count)
 {
-    char label[8];
+    char label[12]; /* any int: counts come from the server */
     int w;
 
     if (count > 99)
@@ -4659,7 +4659,7 @@ static void profiles_clear(void)
 
 static r_image_t *pop_avatar(const profile_t *p)
 {
-    char key[96], path[200];
+    char key[112], path[200]; /* ids of 23 and a hash of 47 fit */
 
     if (!p || !p->avatar[0])
         return user_avatar(g_ui.pop_user, g_ui.pop_avatar);
