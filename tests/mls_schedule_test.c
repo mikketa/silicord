@@ -171,7 +171,7 @@ void entry(void)
         unhex(v->psk_secret, psk);
         unhex(v->tree_hash, th);
         unhex(v->confirmed_transcript_hash, cth);
-        mls_group_context(&gc, gid, gn, (unsigned long long)i, th, cth, "", 0);
+        mls_group_context(&gc, gid, gn, (unsigned long long)i, th, cth, 32, "", 0);
         check(same_hex((unsigned char *)gc.data, gc.len, v->group_context), "group context");
         ok = mls_key_schedule(init, commit, psk, gc.data, gc.len, &e);
         check(ok && same_hex(e.joiner, 32, v->joiner_secret) && same_hex(e.welcome, 32, v->welcome_secret), "joiner and welcome");

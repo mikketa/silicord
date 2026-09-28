@@ -6,7 +6,7 @@
 #include "tls.h"
 
 void mls_group_context(sb_t *out, const void *group_id, size_t gn, unsigned long long epoch,
-                       const unsigned char tree_hash[32], const unsigned char confirmed_transcript_hash[32],
+                       const unsigned char tree_hash[32], const void *confirmed_transcript_hash, size_t tn,
                        const void *extensions, size_t en)
 {
     tls_u16(out, 1); /* mls10 */
@@ -14,7 +14,7 @@ void mls_group_context(sb_t *out, const void *group_id, size_t gn, unsigned long
     tls_vec(out, group_id, gn);
     tls_u64(out, epoch);
     tls_vec(out, tree_hash, 32);
-    tls_vec(out, confirmed_transcript_hash, 32);
+    tls_vec(out, confirmed_transcript_hash, tn);
     tls_vec(out, extensions, en);
 }
 

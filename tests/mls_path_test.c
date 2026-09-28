@@ -696,7 +696,7 @@ static void provisional_context(const case_t *c, const mls_tree_t *t, sb_t *gc)
     unhex_sb(c->gid, &gid);
     unhex32(c->cth, cth);
     mls_tree_hash(t, mls_root(t->nleaves), th);
-    mls_group_context(gc, gid.data, gid.len, c->epoch, th, cth, "", 0);
+    mls_group_context(gc, gid.data, gid.len, c->epoch, th, cth, 32, "", 0);
     sb_free(&gid);
 }
 

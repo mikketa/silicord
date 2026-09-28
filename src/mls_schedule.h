@@ -11,9 +11,10 @@ typedef struct {
     unsigned char external_pub[65];
 } mls_epoch_t;
 
-/* GroupContext: version 1.0, ciphersuite 2, the group id, epoch, tree hash, confirmed transcript hash, extensions. */
+/* GroupContext: version 1.0, ciphersuite 2, the group id, epoch, tree hash, confirmed transcript hash (empty at
+   epoch 0), extensions. */
 void mls_group_context(sb_t *out, const void *group_id, size_t gn, unsigned long long epoch,
-                       const unsigned char tree_hash[32], const unsigned char confirmed_transcript_hash[32],
+                       const unsigned char tree_hash[32], const void *confirmed_transcript_hash, size_t tn,
                        const void *extensions, size_t en);
 /* One epoch's secrets from the previous init secret, the commit secret and the PSK secret (zeros without PSKs). */
 int mls_key_schedule(const unsigned char init_prev[32], const unsigned char commit_secret[32],
