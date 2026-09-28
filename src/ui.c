@@ -1138,7 +1138,9 @@ static void update_ringing(void)
             PlaySoundW(L"Notification.Looping.Call", NULL, SND_ALIAS | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
             FlashWindowEx(&fw);
         } else {
+            FLASHWINFO fw = {sizeof fw, g_ui.wnd, FLASHW_STOP, 0, 0};
             PlaySoundW(NULL, NULL, 0);
+            FlashWindowEx(&fw);
         }
     }
 }
@@ -3734,7 +3736,7 @@ static void paint_main(RECT rc)
             text(g_ui.f_title, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), is_dm_type(c->type) ? "@" : "#",
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         {
-            int nw = text_width(g_ui.f_h, name), right = x0 + w - S(96), tx = x0 + S(46) + nw + S(16);
+            int nw = text_width(g_ui.f_h, name), right = x0 + w - (is_dm_type(c->type) ? S(136) : S(96)), tx = x0 + S(46) + nw + S(16);
             text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, right - x0 - S(46), S(HEADER_H)), name,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (c->topic && tx + S(40) < right) {
