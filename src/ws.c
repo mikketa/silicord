@@ -37,19 +37,35 @@ int ws_connect(ws_t *ws, const wchar_t *host, const wchar_t *path, const wchar_t
     return 1;
 }
 
-int ws_send(ws_t *ws, const sb_t *msg)
+static int send_typed(ws_t *ws, WINHTTP_WEB_SOCKET_BUFFER_TYPE type, const void *data, size_t n)
 {
     DWORD err = ERROR_INVALID_HANDLE;
 
     EnterCriticalSection(&ws->lock);
     if (ws->socket)
-        err = WinHttpWebSocketSend(ws->socket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                   msg->data, (DWORD)msg->len);
+        err = WinHttpWebSocketSend(ws->socket, type, (void *)data, (DWORD)n);
     LeaveCriticalSection(&ws->lock);
     return err == NO_ERROR;
 }
 
+int ws_send(ws_t *ws, const sb_t *msg)
+{
+    return send_typed(ws, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, msg->data, msg->len);
+}
+
+int ws_send_binary(ws_t *ws, const void *data, size_t n)
+{
+    return send_typed(ws, WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE, data, n);
+}
+
 int ws_recv(ws_t *ws, sb_t *msg)
+{
+    int binary;
+
+    return ws_recv_kind(ws, msg, &binary);
+}
+
+int ws_recv_kind(ws_t *ws, sb_t *msg, int *binary)
 {
     sb_clear(msg);
     for (;;) {
@@ -64,6 +80,7 @@ int ws_recv(ws_t *ws, sb_t *msg)
             return 0;
         msg->len += got;
         msg->data[msg->len] = 0;
+        *binary = type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE;
         if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
             type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE)
             return 1;

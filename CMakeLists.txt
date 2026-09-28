@@ -53,6 +53,7 @@ add_library(silicord_core STATIC
   src/profile.c
   src/qr.c
   src/rt.c
+  src/rtp.c
   src/rng.c
   src/sb.c
   src/search.c
@@ -139,6 +140,8 @@ silicord_test(mls_group_test bcrypt)
 add_test(NAME mls_group COMMAND mls_group_test)
 silicord_test(dave_session_test bcrypt)
 add_test(NAME dave_session COMMAND dave_session_test)
+silicord_test(rtp_test)
+add_test(NAME rtp COMMAND rtp_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)

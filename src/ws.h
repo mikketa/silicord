@@ -18,8 +18,11 @@ void ws_init(ws_t *ws);
 /* `headers` may be NULL, otherwise CRLF-separated "Name: value" lines. */
 int ws_connect(ws_t *ws, const wchar_t *host, const wchar_t *path, const wchar_t *headers);
 int ws_send(ws_t *ws, const sb_t *msg);
+int ws_send_binary(ws_t *ws, const void *data, size_t n);
 /* Receives one complete text or binary message. Returns 0 once the socket is closed. */
 int ws_recv(ws_t *ws, sb_t *msg);
+/* The same, telling a binary message from a text one. */
+int ws_recv_kind(ws_t *ws, sb_t *msg, int *binary);
 /*
  * Starts the closing handshake with `code`; a pending ws_recv() then returns 0.
  * Discord ends the session on 1000 and 1001: close with another code to resume.
