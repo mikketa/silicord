@@ -47,6 +47,8 @@ add_library(silicord_core STATIC
   src/mls_path.c
   src/mls_schedule.c
   src/mls_tree.c
+  src/opus.c
+  src/opus_rc.c
   src/model.c
   src/p256.c
   src/msg.c
@@ -143,6 +145,8 @@ silicord_test(dave_session_test bcrypt)
 add_test(NAME dave_session COMMAND dave_session_test)
 silicord_test(rtp_test)
 add_test(NAME rtp COMMAND rtp_test)
+silicord_test(opus_test)
+add_test(NAME opus COMMAND opus_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)
