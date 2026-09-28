@@ -6249,6 +6249,85 @@ static void on_drop(HDROP drop)
     redraw();
 }
 
+/* Pasted pictures become %TEMP%\Silicord-paste\<n>\image.png, named like Discord names them. */
+static void paste_dir(wchar_t *out, unsigned n)
+{
+    DWORD len = GetTempPathW(MAX_PATH, out);
+
+    if (!len || len >= MAX_PATH)
+        out[0] = 0;
+    lstrcatW(out, L"Silicord-paste");
+    if (n)
+        wsprintfW(out + lstrlenW(out), L"\\%u", n);
+}
+
+/* Drops the pictures pasted in earlier runs: uploads read them while sending, so they stay until then. */
+static void paste_cleanup(void)
+{
+    wchar_t *dir = mem_alloc(MAX_PATH * 3 * sizeof(wchar_t)), *path = dir + MAX_PATH;
+    WIN32_FIND_DATAW fd;
+    HANDLE find;
+
+    paste_dir(dir, 0);
+    lstrcpyW(path, dir);
+    lstrcatW(path, L"\\*");
+    find = FindFirstFileW(path, &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.')
+                continue;
+            wsprintfW(path, L"%s\\%s\\image.png", dir, fd.cFileName);
+            DeleteFileW(path);
+            wsprintfW(path, L"%s\\%s", dir, fd.cFileName);
+            RemoveDirectoryW(path);
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(dir);
+    mem_free(dir);
+}
+
+/* Ctrl+V of files or a picture adds them to the uploads, like Discord. Returns 1 when handled. */
+static int paste_files(void)
+{
+    static unsigned count;
+    int done = 0;
+
+    if (!open_is_text() || !OpenClipboard(g_ui.wnd))
+        return 0;
+    if (IsClipboardFormatAvailable(CF_HDROP)) {
+        HDROP drop = (HDROP)GetClipboardData(CF_HDROP);
+        wchar_t *path = mem_alloc(MAX_PATH * 4 * sizeof(wchar_t));
+        UINT n = drop ? DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0) : 0;
+        for (UINT i = 0; i < n; i++)
+            if (DragQueryFileW(drop, i, path, MAX_PATH * 4))
+                upload_add(path);
+        mem_free(path);
+        done = n > 0;
+    } else if (!IsClipboardFormatAvailable(CF_UNICODETEXT) && IsClipboardFormatAvailable(CF_BITMAP)) {
+        HBITMAP bmp = (HBITMAP)GetClipboardData(CF_BITMAP);
+        wchar_t *path = mem_alloc(MAX_PATH * 2 * sizeof(wchar_t));
+        paste_dir(path, 0);
+        CreateDirectoryW(path, NULL);
+        paste_dir(path, GetTickCount() + ++count);
+        CreateDirectoryW(path, NULL);
+        lstrcatW(path, L"\\image.png");
+        if (bmp && r_bitmap_to_png(bmp, path))
+            upload_add(path);
+        else
+            DeleteFileW(path);
+        mem_free(path);
+        done = 1;
+    }
+    CloseClipboard();
+    if (done) {
+        place_composer();
+        clamp_msg_scroll();
+        redraw();
+    }
+    return done;
+}
+
 /* ---- Autocomplete: @members, #channels, :emoji: ---- */
 
 
@@ -8043,6 +8122,8 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     if (msg == WM_CHAR && wp == 5) /* Ctrl+E's control character */
         return 0;
+    if (msg == WM_PASTE && paste_files())
+        return 0;
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE && !g_ui.confirm && !g_ui.bar && g_ui.ac_kind == AC_NONE && g_ui.channel >= 0) {
         /* Esc marks the channel read, like Discord. */
         mark_read(g_ui.channel);
@@ -8188,6 +8269,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_ui.composer, EM_LIMITTEXT, 2000, 0);
         make_fonts();
         img_init(wnd, UI_IMAGE);
+        paste_cleanup();
         DragAcceptFiles(wnd, TRUE);
         return 0;
     case WM_DROPFILES:
