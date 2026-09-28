@@ -1354,6 +1354,97 @@ static DWORD WINAPI forum_main(LPVOID arg)
     return 0;
 }
 
+/* A 429's "retry_after" (seconds, maybe fractional) in ms, capped at 5 s. */
+static DWORD retry_after_ms(const http_resp_t *resp)
+{
+    json_t root, v;
+    char raw[24];
+    DWORD ms = 0, scale = 1000;
+
+    if (!json_parse(resp->body.data, resp->body.len, &root) || !json_get(root, "retry_after", &v))
+        return 1000;
+    json_raw(v, raw, sizeof raw);
+    for (const char *c = raw; *c; c++) {
+        if (*c == '.') {
+            scale = 100;
+            continue;
+        }
+        if (*c < '0' || *c > '9' || !scale)
+            break;
+        if (scale == 1000) {
+            ms = ms * 10 + (DWORD)(*c - '0') * 1000;
+        } else {
+            ms += (DWORD)(*c - '0') * scale;
+            scale /= 10;
+        }
+    }
+    return ms < 100 ? 100 : ms > 5000 ? 5000 : ms;
+}
+
+static DWORD WINAPI gifs_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t path = {0};
+    sb_t *p = mem_alloc(sizeof *p);
+    json_t root, gifs;
+
+    if (j->text.len) {
+        sb_add(&path, "/gifs/search?media_format=tinygif&locale=en-US&limit=40&provider=tenor&q=");
+        for (size_t i = 0; i < j->text.len; i++) {
+            unsigned char c = (unsigned char)j->text.data[i];
+            char e[4];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                sb_addn(&path, (const char *)&c, 1);
+            } else {
+                wsprintfA(e, "%%%02X", c);
+                sb_add(&path, e);
+            }
+        }
+    } else {
+        sb_add(&path, "/gifs/trending-gifs?media_format=tinygif&provider=tenor&locale=en-US&limit=40");
+    }
+    /* Rate limited: wait what Discord asks, then try again. */
+    for (int tries = 0; tries < 3; tries++) {
+        http_resp_free(&resp);
+        if (!http_request("GET", path.data, j->token.data, NULL, 0, &resp) || resp.status != 429)
+            break;
+        Sleep(retry_after_ms(&resp));
+    }
+    sb_addn(p, j->text.data ? j->text.data : "", j->text.len);
+    sb_addn(p, "", 1);
+    if (g_debug && resp.body.len) {
+        char head[301];
+        lstrcpynA(head, resp.body.data, resp.body.len < 300 ? (int)resp.body.len + 1 : 301);
+        log_line("[gifs] ", head);
+    }
+    if (resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root)) {
+        /* Search answers an array; some versions wrap it as {gifs: [...]}. */
+        if (json_type(root) == JSON_OBJECT && json_get(root, "gifs", &gifs))
+            sb_addn(p, gifs.p, (size_t)(gifs.end - gifs.p));
+        else
+            sb_addn(p, resp.body.data, resp.body.len);
+    } else {
+        char e[16];
+        wsprintfA(e, "!%d", resp.status); /* failure marker, with the status for the logs */
+        sb_add(p, e);
+        log_line("[gifs] failed: ", e + 1);
+    }
+    ui_post(UI_GIFS, p);
+    http_resp_free(&resp);
+    sb_free(&path);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_gifs(const char *query)
+{
+    rest_job_t *j = new_job("");
+
+    sb_add(&j->text, query ? query : "");
+    CloseHandle(CreateThread(NULL, 0, gifs_main, j, 0, NULL));
+}
+
 void app_fetch_forum(const char *channel_id)
 {
     CloseHandle(CreateThread(NULL, 0, forum_main, new_job(channel_id), 0, NULL));
