@@ -92,4 +92,5 @@ Everything is written here, from the cryptography to the codec: no third-party c
 - [x] Calls in direct messages: starting and joining them, the call above the conversation, incoming calls with a ringtone, declining
 - [x] VP8 decoder, bit-exact on the eighteen comprehensive test vectors of libvpx
 - [x] Watching cameras in calls: VP8 over RTP (RFC 7741), DAVE, key frame requests, video tiles
+- [x] VP8 encoder: key and inter frames, motion search, rate control; ffmpeg decodes its streams exactly as ours does
 - [ ] Sending video: the camera, and screen sharing (Go Live)

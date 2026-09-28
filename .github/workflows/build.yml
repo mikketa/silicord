@@ -74,3 +74,8 @@ jobs:
 
       - name: VP8 conformance
         run: sh tools/vp8_vectors.sh build-host/vp8_vectors vp8_vectors
+
+      - name: VP8 encoder
+        run: |
+          sudo apt-get install -y ffmpeg
+          sh tools/vp8_encode_check.sh build-host/vp8_roundtrip vp8_vectors

@@ -27,7 +27,7 @@ add_library(core STATIC
   ${ROOT}/src/aes.c ${ROOT}/src/apng.c ${ROOT}/src/b64.c ${ROOT}/src/command.c ${ROOT}/src/dave.c ${ROOT}/src/dave_session.c ${ROOT}/src/emoji.c ${ROOT}/src/emoji_data.c ${ROOT}/src/emoji_alias.c
   ${ROOT}/src/hpke.c ${ROOT}/src/inflate.c ${ROOT}/src/json.c ${ROOT}/src/md.c ${ROOT}/src/mem.c ${ROOT}/src/memberlist.c
   ${ROOT}/src/mixer.c ${ROOT}/src/mls_crypto.c ${ROOT}/src/mls_group.c ${ROOT}/src/mls_msg.c ${ROOT}/src/mls_path.c ${ROOT}/src/mls_schedule.c ${ROOT}/src/mls_tree.c ${ROOT}/src/opus.c ${ROOT}/src/opus_celt.c ${ROOT}/src/opus_math.c ${ROOT}/src/opus_rc.c ${ROOT}/src/opus_silk.c ${ROOT}/src/opus_silk_tables.c ${ROOT}/src/model.c ${ROOT}/src/p256.c ${ROOT}/src/msg.c ${ROOT}/src/profile.c ${ROOT}/src/qr.c ${ROOT}/src/rng.c ${ROOT}/src/rtp.c ${ROOT}/src/sb.c
-  ${ROOT}/src/search.c ${ROOT}/src/sha2.c ${ROOT}/src/stats.c ${ROOT}/src/tls.c ${ROOT}/src/utf.c ${ROOT}/src/vp8.c ${ROOT}/src/vp8_dsp.c ${ROOT}/src/vp8_rtp.c ${ROOT}/src/vp8_tables.c shim/shim.c)
+  ${ROOT}/src/search.c ${ROOT}/src/sha2.c ${ROOT}/src/stats.c ${ROOT}/src/tls.c ${ROOT}/src/utf.c ${ROOT}/src/vp8.c ${ROOT}/src/vp8_dsp.c ${ROOT}/src/vp8_enc.c ${ROOT}/src/vp8_rtp.c ${ROOT}/src/vp8_tables.c shim/shim.c)
 
 # The same test sources as on Windows (crypto, render and QR need Windows).
 enable_testing()
@@ -45,6 +45,9 @@ target_link_libraries(opus_vectors core m)
 # Conformance with libvpx's VP8 test vectors, which CI downloads: tools/vp8_vectors.sh.
 add_executable(vp8_vectors vp8_vectors.c)
 target_link_libraries(vp8_vectors core)
+# The encoder, decoded by ours and by ffmpeg's: tools/vp8_encode_check.sh.
+add_executable(vp8_roundtrip vp8_roundtrip.c)
+target_link_libraries(vp8_roundtrip core m)
 
 # The fuzzer's dictionaries come from the sources and the tests' JSON.
 set(DICT ${CMAKE_CURRENT_BINARY_DIR}/dict)
