@@ -366,6 +366,14 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
         ui_post(UI_TYPING, p);
         return;
     }
+    if (json_str_eq(t, "MESSAGE_POLL_VOTE_ADD") || json_str_eq(t, "MESSAGE_POLL_VOTE_REMOVE")) {
+        b = msg_batch_poll_vote(d, json_str_eq(t, "MESSAGE_POLL_VOTE_ADD") ? 1 : -1, s->me);
+        if (b->n && current(s) && is_open(b->channel_id))
+            ui_post_batch(b);
+        else
+            msg_batch_free(b);
+        return;
+    }
     if (json_str_eq(t, "MESSAGE_REACTION_ADD") || json_str_eq(t, "MESSAGE_REACTION_REMOVE")) {
         b = msg_batch_reaction(d, json_str_eq(t, "MESSAGE_REACTION_ADD") ? 1 : -1, s->me);
         if (b->n && current(s) && is_open(b->channel_id))
@@ -1136,6 +1144,25 @@ void app_request_members(const char *guild_id, const char *const *user_ids, int 
     sb_add(&msg, "],\"presences\":false}}");
     gw_send(&msg);
     sb_free(&msg);
+}
+
+static void rest(const char *method, const char *path, const sb_t *body);
+
+void app_vote(const char *channel_id, const char *message_id, const int *answers, int n)
+{
+    sb_t body = {0};
+    char path[128];
+
+    wsprintfA(path, "/channels/%s/polls/%s/answers/@me", channel_id, message_id);
+    sb_add(&body, "{\"answer_ids\":[");
+    for (int i = 0; i < n; i++) {
+        char a[24];
+        wsprintfA(a, "%s\"%d\"", i ? "," : "", answers[i]);
+        sb_add(&body, a);
+    }
+    sb_add(&body, "]}");
+    rest("PUT", path, &body);
+    sb_free(&body);
 }
 
 void app_fetch_channel(const char *channel_id)

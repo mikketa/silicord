@@ -110,6 +110,8 @@ void app_set_status(const char *status);
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start);
 /* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
 void app_request_members(const char *guild_id, const char *const *user_ids, int n);
+/* Sets our poll answers (none removes our vote). */
+void app_vote(const char *channel_id, const char *message_id, const int *answers, int n);
 /* Adds or removes our reaction; the gateway echoes it back as MESSAGE_REACTION_ADD / _REMOVE. */
 void app_react(const char *channel_id, const char *message_id, const msg_reaction_t *r, int add);
 /* Loads a profile popout; `guild_id` (may be empty) adds the server profile and mutual servers. */
