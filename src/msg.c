@@ -64,7 +64,7 @@ static int mention_name(json_t mentions, const char *id, size_t len, sb_t *out)
 /*
  * Rewrites Discord markup into readable text:
  *   <@id> <@!id>  -> @name (from the mentions array), wrapped in MD_MENTION_OPEN/CLOSE
- *   <@&id>        -> @role, wrapped the same way
+ *   <@&id>        -> left for the UI, which knows role names
  *   <:name:id>    -> :name:   (custom emoji, also <a:name:id>)
  * Channel mentions <#id> are left for the UI, which knows channel names.
  */
@@ -90,7 +90,7 @@ static void format_content(const char *s, size_t n, json_t mentions, sb_t *out)
             if (j < n && s[j] == '>' && j > i + 2 + (role || nick)) {
                 size_t id0 = i + 2 + (role || nick);
                 if (role)
-                    sb_add(out, MD_MENTION_OPEN "@role" MD_MENTION_CLOSE);
+                    sb_addn(out, s + i, j + 1 - i);
                 else if (!mention_name(mentions, s + id0, j - id0, out))
                     sb_add(out, MD_MENTION_OPEN "@unknown-user" MD_MENTION_CLOSE);
                 i = j + 1;

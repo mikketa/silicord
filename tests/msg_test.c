@@ -30,8 +30,7 @@ static void test_content(void)
     expect_text("{\"id\":\"1\",\"content\":\"<:pog:123> <a:dance:456>\"}",
                 MD_EMOJI_OPEN "123:pog" MD_EMOJI_CLOSE " " MD_EMOJI_OPEN "a456:dance" MD_EMOJI_CLOSE, "custom emoji");
     expect_text("{\"id\":\"1\",\"content\":\"<@&9> <@77>\",\"mentions\":[]}",
-                MD_MENTION_OPEN "@role" MD_MENTION_CLOSE " " MD_MENTION_OPEN "@unknown-user" MD_MENTION_CLOSE,
-                "role and unknown mentions");
+                "<@&9> " MD_MENTION_OPEN "@unknown-user" MD_MENTION_CLOSE, "role mentions wait for the UI, unknown users");
     expect_text("{\"id\":\"1\",\"content\":\"see <#5> <3 a<b\"}", "see <#5> <3 a<b",
                 "channel mentions and stray brackets are kept");
     expect_text("{\"id\":\"1\",\"content\":\"look\",\"attachments\":[{\"filename\":\"a.png\"}]}", "look",
