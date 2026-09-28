@@ -2589,6 +2589,44 @@ static void maybe_load_older(void)
     }
 }
 
+/*
+ * The locale's long date without its weekday ("September 29, 2026", "29 septembre 2026"):
+ * the long date pattern with its "dddd" part and the separator after it removed.
+ */
+static void long_date_no_weekday(const SYSTEMTIME *st, wchar_t *out, int n)
+{
+    wchar_t pat[80], fmt[80];
+    int k = 0;
+
+    if (!GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SLONGDATE, pat, ARRAYSIZE(pat))) {
+        GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, st, NULL, out, n, NULL);
+        return;
+    }
+    for (int i = 0; pat[i] && k < (int)ARRAYSIZE(fmt) - 1;) {
+        if (pat[i] == L'\'') { /* quoted text is copied as is */
+            fmt[k++] = pat[i++];
+            while (pat[i] && pat[i] != L'\'' && k < (int)ARRAYSIZE(fmt) - 2)
+                fmt[k++] = pat[i++];
+            if (pat[i])
+                fmt[k++] = pat[i++];
+            continue;
+        }
+        if (pat[i] == L'd' && pat[i + 1] == L'd' && pat[i + 2] == L'd' && pat[i + 3] == L'd') {
+            while (pat[i] == L'd')
+                i++;
+            while (pat[i] == L',' || pat[i] == L' ' || pat[i] == L'.')
+                i++;
+            continue;
+        }
+        fmt[k++] = pat[i++];
+    }
+    while (k > 0 && (fmt[k - 1] == L',' || fmt[k - 1] == L' '))
+        k--; /* a weekday that came last */
+    fmt[k] = 0;
+    if (!GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, st, fmt, out, n, NULL))
+        GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, st, NULL, out, n, NULL);
+}
+
 /* Discord's <t:unix:style> in the user's locale: t, T, d, D, f (default), F, or R for "3 hours ago". */
 static void format_timestamp(long long secs, char style, sb_t *out)
 {
@@ -2621,9 +2659,12 @@ static void format_timestamp(long long secs, char style, sb_t *out)
     FileTimeToLocalFileTime(&ft, &local);
     FileTimeToSystemTime(&local, &st);
     date[0] = clock[0] = 0;
-    if (style != 't' && style != 'T')
+    /* d: short date; D and f: long date without the weekday, which only F shows. */
+    if (style == 'd' || style == 'F')
         GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, style == 'd' ? DATE_SHORTDATE : DATE_LONGDATE, &st, NULL, date,
                         ARRAYSIZE(date), NULL);
+    else if (style == 'D' || style == 'f')
+        long_date_no_weekday(&st, date, ARRAYSIZE(date));
     if (style != 'd' && style != 'D')
         GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, style == 'T' ? 0 : TIME_NOSECONDS, &st, NULL, clock, ARRAYSIZE(clock));
     wsprintfW(text, L"%s%s%s", date, date[0] && clock[0] ? L" " : L"", clock);
@@ -2652,7 +2693,7 @@ static int role_name(const char *id, sb_t *out)
     return 0;
 }
 
-/* Replaces <#id>, <@&id> and <t:...> with channel names, role names and dates. */
+/* Replaces <#id>, <@&id> and <t:...> with channel names, role names and dates, outside code. */
 static void resolve_channels(msg_t *m)
 {
     sb_t out = {0};
@@ -2661,6 +2702,18 @@ static void resolve_channels(msg_t *m)
     int changed = 0;
 
     while (i < n) {
+        size_t code;
+        if (s[i] == '\\' && i + 1 < n) { /* an escaped "<" stays text */
+            sb_addn(&out, s + i, 2);
+            i += 2;
+            continue;
+        }
+        if (s[i] == '`') {
+            size_t j = (code = md_code_end(s, n, i)) != 0 ? code : i + 1;
+            sb_addn(&out, s + i, j - i);
+            i = j;
+            continue;
+        }
         if (s[i] == '<' && i + 3 < n && s[i + 1] == '@' && s[i + 2] == '&') {
             size_t j = i + 3;
             while (j < n && s[j] >= '0' && s[j] <= '9')
@@ -3081,7 +3134,9 @@ static void paint_message(int i, int x0, int y, int w)
     if (m->system) {
         char line[160];
         text(g_ui.f_body, C_GREEN, rect(x0 + S(16), y + S(16), S(40), S(22)), "\xE2\x86\x92", DT_CENTER | DT_SINGLELINE);
-        wsprintfA(line, "%.60s %.90s", m->author.data ? m->author.data : "", m->text.data ? m->text.data : "");
+        /* "Ann joined the server.", "Ann's poll ... has closed." */
+        wsprintfA(line, "%.60s%s%.90s", m->author.data ? m->author.data : "",
+                  m->text.data && m->text.data[0] == '\'' ? "" : " ", m->text.data ? m->text.data : "");
         text(g_ui.f_body, C_MUTED, rect(tx, y + S(16), tw, S(22)), line, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
