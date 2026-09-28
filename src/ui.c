@@ -3469,36 +3469,40 @@ static void make_fonts(void)
     }
 }
 
-static HICON make_icon(int px)
+/* The executable's icon (src/silicord.rc) at the size Windows uses for `metric` at `dpi`. */
+static HICON load_icon(int metric, UINT dpi)
 {
-    int scale = px / 16;
-    BITMAPV5HEADER bi = {0};
-    ICONINFO ii = {0};
-    unsigned *bits;
-    HDC dc = GetDC(NULL);
-    HICON icon;
+    int px = GetSystemMetricsForDpi(metric, dpi);
 
-    bi.bV5Size = sizeof bi;
-    bi.bV5Width = px;
-    bi.bV5Height = -px;
-    bi.bV5Planes = 1;
-    bi.bV5BitCount = 32;
-    bi.bV5Compression = BI_BITFIELDS;
-    bi.bV5RedMask = 0x00FF0000;
-    bi.bV5GreenMask = 0x0000FF00;
-    bi.bV5BlueMask = 0x000000FF;
-    bi.bV5AlphaMask = 0xFF000000;
-    ii.fIcon = TRUE;
-    ii.hbmColor = CreateDIBSection(dc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
-    ii.hbmMask = CreateBitmap(px, px, 1, 1, NULL);
-    for (int y = 0; y < px; y++)
-        for (int x = 0; x < px; x++)
-            bits[y * px + x] = (k_mark[y / scale] >> (15 - x / scale)) & 1 ? 0xFFFFB000u : 0;
-    icon = CreateIconIndirect(&ii);
-    DeleteObject(ii.hbmColor);
-    DeleteObject(ii.hbmMask);
-    ReleaseDC(NULL, dc);
-    return icon;
+    return (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(1), IMAGE_ICON, px, px, LR_DEFAULTCOLOR);
+}
+
+/* Sharp icons for the window's monitor: the title bar, the taskbar and the tray. */
+static void set_icons(UINT dpi)
+{
+    HICON big = load_icon(SM_CXICON, dpi), small = load_icon(SM_CXSMICON, dpi);
+
+    if (!big || !small) {
+        if (big)
+            DestroyIcon(big);
+        if (small)
+            DestroyIcon(small);
+        return;
+    }
+    SendMessageW(g_ui.wnd, WM_SETICON, ICON_BIG, (LPARAM)big);
+    SendMessageW(g_ui.wnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
+    g_ui.tray.hIcon = small;
+    g_ui.tray.hBalloonIcon = big;
+    if (g_ui.tray.hWnd) {
+        g_ui.tray.uFlags = NIF_ICON; /* not NIF_INFO: that would show the last notification again */
+        Shell_NotifyIconW(NIM_MODIFY, &g_ui.tray);
+    }
+    if (g_ui.icon_big)
+        DestroyIcon(g_ui.icon_big);
+    if (g_ui.icon_small)
+        DestroyIcon(g_ui.icon_small);
+    g_ui.icon_big = big;
+    g_ui.icon_small = small;
 }
 
 /* ---- Read markers and notifications ---- */
@@ -9892,6 +9896,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         RECT *r = (RECT *)lp;
         g_ui.dpi = HIWORD(wp);
         make_fonts();
+        set_icons(g_ui.dpi);
         SetWindowPos(wnd, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
@@ -10198,15 +10203,13 @@ HWND ui_create(HINSTANCE inst)
     /* Single-threaded COM on the UI thread: the file dialog needs it (image decoding works either way). */
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     r_init();
-    g_ui.icon_big = make_icon(32);
-    g_ui.icon_small = make_icon(16);
 
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
-    wc.hIcon = g_ui.icon_big;
-    wc.hIconSm = g_ui.icon_small;
+    wc.hIcon = load_icon(SM_CXICON, dpi); /* the window gets its own, per monitor, in set_icons() */
+    wc.hIconSm = load_icon(SM_CXSMICON, dpi);
     wc.lpszClassName = L"Silicord";
     RegisterClassExW(&wc);
     wc.lpfnWndProc = pop_proc;
@@ -10225,6 +10228,7 @@ HWND ui_create(HINSTANCE inst)
                                NULL, NULL, inst, NULL);
     DwmSetWindowAttribute(g_ui.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
     DwmSetWindowAttribute(g_ui.wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof caption);
+    set_icons(GetDpiForWindow(g_ui.wnd));
 
     g_ui.tray.cbSize = sizeof g_ui.tray;
     g_ui.tray.hWnd = g_ui.wnd;
