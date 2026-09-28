@@ -679,6 +679,23 @@ static r_image_t *user_avatar_anim(const char *id, const char *hash, int animate
     return img ? img : user_avatar(id, hash); /* the still one until the GIF arrives */
 }
 
+/* A member's avatar for one server (it lives under the guild), else their own. */
+static r_image_t *member_avatar_anim(const char *guild, const char *id, const char *hash, const char *own, int animate)
+{
+    char key[128], path[200];
+    int gif = animate && hash[0] == 'a' && hash[1] == '_';
+    r_image_t *img;
+
+    if (!guild || !guild[0] || !hash[0])
+        return user_avatar_anim(id, own, animate);
+    wsprintfA(key, "%s:%s:%s:%s", gif ? "mg" : "m", guild, id, hash);
+    wsprintfA(path, "/guilds/%s/users/%s/avatars/%s.%s?size=64", guild, id, hash, gif ? "gif" : "png");
+    img = image_get(key, path, S(40));
+    if (!img && gif) /* the still one until the GIF arrives */
+        return member_avatar_anim(guild, id, hash, own, 0);
+    return img;
+}
+
 static r_image_t *dm_icon(const channel_t *c)
 {
     char key[96], path[160];
@@ -5948,7 +5965,7 @@ static void paint_members(RECT rc)
                 mem_free(wt);
             } else if (it->valid) {
                 int offline = it->status == ML_OFFLINE || it->status == ML_UNKNOWN;
-                r_image_t *img = user_avatar_anim(it->id, it->avatar, g_ui.ml_hover == i);
+                r_image_t *img = member_avatar_anim(g_ui.ml.guild, it->id, it->member_avatar, it->avatar, g_ui.ml_hover == i);
                 unsigned color = model_role_color(g_ui.model, g_ui.guild, it->roles.data ? it->roles.data : "");
                 unsigned ink = color ? 0xFF000000u | color : ARGB(C_INK);
                 int ay = y + (h - S(32)) / 2, tx = x0 + S(56), tw = S(MEMBERS_W) - S(64);

@@ -61,6 +61,13 @@ void entry(void)
     apply(&l, "{\"guild_id\":\"1\",\"id\":\"everyone\",\"ops\":[{\"op\":\"INVALIDATE\",\"range\":[0,2]}]}");
     check(!l.items[0].valid && !l.items[2].valid && l.items[3].valid, "invalidate empties a range");
 
+    apply(&l, "{\"guild_id\":\"1\",\"id\":\"everyone\",\"ops\":[{\"op\":\"SYNC\",\"range\":[3,5],\"items\":["
+              "{\"member\":{\"user\":{\"id\":\"11\",\"username\":\"solo\",\"avatar\":\"own\"},\"avatar\":\"srv\","
+              "\"roles\":[]}}]}]}");
+    check(member_is(&l, 3, "11", "solo") && !l.items[4].valid && !l.items[5].valid, "a sync replaces its whole range");
+    check(lstrcmpA(l.items[3].avatar, "own") == 0 && lstrcmpA(l.items[3].member_avatar, "srv") == 0,
+          "the server avatar is kept apart from the user's own");
+
     check(apply(&l, "{\"guild_id\":\"2\",\"id\":\"everyone\",\"ops\":[]}") && l.n == 0 && lstrcmpA(l.guild, "2") == 0,
           "another server starts over");
     ml_free(&l);

@@ -16,7 +16,8 @@ typedef struct {
     char id[24];        /* group: "online", "offline" or a role id; member: user id */
     int count;          /* group: members in it */
     sb_t name;          /* member: nickname, else display name, else username */
-    char avatar[48];
+    char avatar[48];    /* the user's own avatar */
+    char member_avatar[48]; /* member: the avatar for this server, empty if none */
     sb_t roles;         /* comma-separated role ids */
     int status;         /* ML_* */
     sb_t activity;      /* custom status text or "Playing ..." */

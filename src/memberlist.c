@@ -111,8 +111,8 @@ static void parse_item(json_t obj, ml_item_t *out)
         return;
     }
     get_raw(user, "id", out->id, sizeof out->id);
-    if (!get_raw(m, "avatar", out->avatar, sizeof out->avatar))
-        get_raw(user, "avatar", out->avatar, sizeof out->avatar);
+    get_raw(user, "avatar", out->avatar, sizeof out->avatar);
+    get_raw(m, "avatar", out->member_avatar, sizeof out->member_avatar);
     if (!get_str(m, "nick", &out->name) && !get_str(user, "global_name", &out->name))
         get_str(user, "username", &out->name);
     out->bot = json_get(user, "bot", &v) && json_type(v) == JSON_TRUE;
@@ -198,6 +198,9 @@ int ml_apply(ml_t *l, json_t d)
         if (json_str_eq(kind, "SYNC") && range_of(op, &a, &b) && json_get(op, "items", &items)) {
             int k = a;
             grow(l, b + 1);
+            /* The range is replaced: slots the items do not reach are empty now. */
+            for (int x = a; x <= b; x++)
+                item_free(&l->items[x]);
             json_iter(items, &iit);
             while (k <= b && json_next(&iit, NULL, &item))
                 parse_item(item, &l->items[k++]);
