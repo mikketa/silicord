@@ -30,6 +30,7 @@ add_library(silicord_core STATIC
   src/b64.c
   src/command.c
   src/crypto.c
+  src/dave.c
   src/emoji.c
   src/emoji_data.c
   src/emoji_alias.c
@@ -116,6 +117,9 @@ add_test(NAME command COMMAND command_test)
 
 silicord_test(aes_test)
 add_test(NAME aes COMMAND aes_test)
+
+silicord_test(dave_test bcrypt)
+add_test(NAME dave COMMAND dave_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)
