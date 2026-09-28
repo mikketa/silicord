@@ -331,14 +331,17 @@ static long long days_from_civil(long long y, int m, int d)
     return era * 146097 + doe - 719468;
 }
 
-/* "2026-09-28T12:34:56.789+00:00" to Unix ms (UTC offsets other than +00:00 are ignored). */
+/* "2026-09-28T12:34:56.789+00:00" to Unix ms (UTC offsets other than +00:00 are ignored); 0 if it is not a date. */
 long long msg_iso_ms(const char *s)
 {
+    static const unsigned char k_mdays[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     int f[6] = {0};
-    int k = 0;
+    int k = 0, leap;
 
     for (const char *p = s; *p && k < 6; p++) {
         if (*p >= '0' && *p <= '9') {
+            if (f[k] > 99999)
+                return 0;
             f[k] = f[k] * 10 + (*p - '0');
         } else if (*p == '.' || *p == '+' || *p == 'Z') {
             break;
@@ -346,6 +349,10 @@ long long msg_iso_ms(const char *s)
             k++;
         }
     }
+    leap = f[0] % 4 == 0 && (f[0] % 100 != 0 || f[0] % 400 == 0);
+    if (f[0] < 1 || f[0] > 9999 || f[1] < 1 || f[1] > 12 || f[2] < 1 || f[2] > k_mdays[f[1] - 1] ||
+        (f[1] == 2 && f[2] == 29 && !leap) || f[3] > 23 || f[4] > 59 || f[5] > 60)
+        return 0;
     return ((days_from_civil(f[0], f[1], f[2]) * 24 + f[3]) * 60 + f[4]) * 60000ll + f[5] * 1000ll;
 }
 

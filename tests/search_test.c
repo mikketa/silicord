@@ -21,6 +21,8 @@ void entry(void)
     check(search_day_snowflake("2015-01-02", 0) == 86400000ull << 22, "a day's first snowflake");
     check(search_day_snowflake("2015-01-01", 1) == 86400000ull << 22, "the next day's");
     check(search_day_snowflake("yesterday", 0) == 0, "not a date");
+    check(search_day_snowflake("2026-02-30", 0) == 0 && search_day_snowflake("2026-13-01", 0) == 0, "not a day of the calendar");
+    check(search_day_snowflake("2014-12-31", 0) == 0, "before Discord's epoch");
     sb_free(&content);
     finish();
 }

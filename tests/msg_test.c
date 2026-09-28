@@ -254,6 +254,19 @@ static void test_batch(void)
     check(snowflake_ms("175928847299117063") == 1462015105796ll, "snowflake timestamp");
 }
 
+static void test_iso(void)
+{
+    check(msg_iso_ms("1970-01-01T00:00:00+00:00") == 0, "epoch");
+    check(msg_iso_ms("2026-09-29T12:00:00.000000+00:00") == 1790683200000ll, "timestamp with microseconds");
+    check(msg_iso_ms("2024-02-29T00:00:00Z") == 1709164800000ll, "leap day");
+    check(msg_iso_ms("2025-02-29") == 0, "no leap day in a common year");
+    check(msg_iso_ms("2026-02-30") == 0 && msg_iso_ms("2026-13-01") == 0 && msg_iso_ms("2026-00-10") == 0,
+          "reject impossible dates");
+    check(msg_iso_ms("2026-01-01T24:00:00") == 0 && msg_iso_ms("2026-01-01T10:60:00") == 0, "reject impossible times");
+    check(msg_iso_ms("99999999999999999999-01-01") == 0, "reject huge fields without overflowing");
+    check(msg_iso_ms("") == 0 && msg_iso_ms("soon") == 0, "reject text");
+}
+
 void entry(void)
 {
     test_content();
@@ -266,5 +279,6 @@ void entry(void)
     test_poll();
     test_search();
     test_batch();
+    test_iso();
     finish();
 }
