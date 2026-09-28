@@ -540,6 +540,8 @@ static unsigned order_slice(channel_t *v, unsigned n)
     const channel_t **cats = mem_alloc((n + 1) * sizeof *cats);
     const channel_t **kids = mem_alloc((n + 1) * sizeof *kids);
     channel_t *out = mem_alloc((n + 1) * sizeof *out);
+    /* Each channel is placed once, even if a broken payload repeats an id. */
+    unsigned char *placed = mem_alloc(n + 1);
     unsigned nr = 0, nc = 0, k = 0;
 
     for (unsigned i = 0; i < n; i++) {
@@ -557,29 +559,40 @@ static unsigned order_slice(channel_t *v, unsigned n)
     }
     sort_ptrs(roots, nr);
     sort_ptrs(cats, nc);
+#define PLACE(ch)                                                                   \
+    do {                                                                            \
+        placed[(ch) - v] = 1;                                                       \
+        out[k++] = *(ch);                                                           \
+    } while (0)
 #define WITH_THREADS(ch)                                                            \
     do {                                                                            \
-        out[k++] = *(ch);                                                           \
+        PLACE(ch);                                                                  \
         for (unsigned t_ = 0; t_ < n; t_++)                                         \
-            if (model_is_thread(v[t_].type) && str_eq(v[t_].parent, (ch)->id))      \
-                out[k++] = v[t_];                                                   \
+            if (!placed[t_] && model_is_thread(v[t_].type) && str_eq(v[t_].parent, (ch)->id)) \
+                PLACE(&v[t_]);                                                      \
     } while (0)
     for (unsigned i = 0; i < nr; i++)
         WITH_THREADS(roots[i]);
     for (unsigned c = 0; c < nc; c++) {
         unsigned nk = 0;
-        out[k++] = *cats[c];
+        PLACE(cats[c]);
         for (unsigned i = 0; i < n; i++)
-            if (v[i].type != CH_CATEGORY && !model_is_thread(v[i].type) && v[i].parent[0] &&
-                str_eq(v[i].parent, cats[c]->id))
+            if (!placed[i] && v[i].type != CH_CATEGORY && !model_is_thread(v[i].type) && v[i].parent[0] &&
+                str_eq(v[i].parent, cats[c]->id)) {
+                placed[i] = 1;
                 kids[nk++] = &v[i];
+            }
         sort_ptrs(kids, nk);
-        for (unsigned i = 0; i < nk; i++)
+        for (unsigned i = 0; i < nk; i++) {
+            placed[kids[i] - v] = 0; /* claimed above so a repeated category does not take it again */
             WITH_THREADS(kids[i]);
+        }
     }
 #undef WITH_THREADS
+#undef PLACE
     for (unsigned i = 0; i < k; i++)
         v[i] = out[i];
+    mem_free(placed);
     mem_free(out);
     mem_free(kids);
     mem_free(cats);

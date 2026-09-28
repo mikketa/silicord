@@ -220,6 +220,23 @@ static void test_emojis(const model_t *m)
     model_free(a);
 }
 
+/* A payload repeating channel ids must not place a channel twice (it used to overflow the ordering buffer). */
+static void test_repeated_ids(void)
+{
+    static const char ready[] =
+        "{\"user\":{\"id\":\"100\"},\"guilds\":[{\"id\":\"1\",\"name\":\"G\",\"owner_id\":\"100\",\"channels\":["
+        "{\"id\":\"10\",\"type\":4,\"name\":\"Cat\"},{\"id\":\"10\",\"type\":4,\"name\":\"Cat again\"},"
+        "{\"id\":\"11\",\"type\":0,\"name\":\"a\",\"parent_id\":\"10\"},{\"id\":\"11\",\"type\":0,\"name\":\"a again\"},"
+        "{\"id\":\"12\",\"type\":11,\"name\":\"thread\",\"parent_id\":\"11\"}]}]}";
+    json_t d;
+    model_t *m;
+
+    check(json_parse(ready, sizeof ready - 1, &d), "repeated ids fixture parses");
+    m = model_from_ready(d);
+    check(m->nguilds == 1 && m->guilds[0].count <= 5, "each channel is placed at most once");
+    model_free(m);
+}
+
 static void test_roles(const model_t *m)
 {
     model_t *a, *b, *c;
@@ -306,6 +323,7 @@ void entry(void)
     test_notify(m);
     test_user_settings(m);
     test_threads(m);
+    test_repeated_ids();
     model_free(m);
     finish();
 }
