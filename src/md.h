@@ -32,8 +32,9 @@ enum {
 enum { MD_PARA, MD_QUOTE, MD_CODEBLOCK, MD_H1, MD_H2, MD_H3, MD_SUBTEXT, MD_LIST };
 
 typedef struct {
-    int kind;
+    int kind;         /* quoted paragraphs are MD_QUOTE; other quoted blocks keep their kind */
     int start, len;   /* UTF-16 range in md_doc_t.text */
+    int quoted;       /* inside a "> " or ">>> " quote: drawn with the quote bar */
 } md_block_t;
 
 typedef struct {
@@ -55,5 +56,11 @@ typedef struct {
 } md_doc_t;
 
 void md_parse(const char *s, size_t n, md_doc_t *doc);
+/*
+ * If s[i] opens a code span or block (a run of backticks closed by a run of
+ * the same length), the index just after it; else 0. Mentions and emoji
+ * inside code stay as typed, as in Discord.
+ */
+size_t md_code_end(const char *s, size_t n, size_t i);
 void md_free(md_doc_t *doc);
 const char *md_link(const md_doc_t *doc, int i);

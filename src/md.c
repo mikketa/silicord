@@ -95,14 +95,60 @@ static int is_url(const char *s, size_t n)
     return starts(s, n, 0, "https://") || starts(s, n, 0, "http://");
 }
 
-static int escapable(char c)
+/* Bytes a backslash escapes, like Discord: any ASCII punctuation, or a whole non-ASCII character. */
+static size_t escaped_len(const char *s, size_t n, size_t i)
 {
-    const char *set = "*_~`|\\<>#-[]():@";
+    unsigned char c;
 
-    for (; *set; set++)
-        if (*set == c)
-            return 1;
+    if (i >= n)
+        return 0;
+    c = (unsigned char)s[i];
+    if (c < 0x80)
+        return c > ' ' && !is_alnum((char)c) ? 1 : 0;
+    if (c == 0xEE && i + 1 < n && (unsigned char)s[i + 1] == 0x80)
+        return 0; /* our own mention and emoji markers */
+    {
+        size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        return i + len <= n ? len : 0;
+    }
+}
+
+static size_t run_of(const char *s, size_t n, size_t i, char c)
+{
+    size_t k = i;
+
+    while (k < n && s[k] == c)
+        k++;
+    return k - i;
+}
+
+size_t md_code_end(const char *s, size_t n, size_t i)
+{
+    size_t r = run_of(s, n, i, '`');
+
+    if (!r)
+        return 0;
+    for (size_t j = i + r; j < n;) {
+        size_t k = run_of(s, n, j, '`');
+        if (k == r && j > i + r)
+            return j + k;
+        j += k ? k : 1;
+    }
     return 0;
+}
+
+/* The ")" closing a link's "(" at s[i], nested parentheses included; NPOS if none. */
+static size_t close_paren(const char *s, size_t n, size_t i)
+{
+    int depth = 0;
+
+    for (size_t j = i; j < n && s[j] != '\n'; j++) {
+        if (s[j] == '(')
+            depth++;
+        else if (s[j] == ')' && --depth == 0)
+            return j;
+    }
+    return NPOS;
 }
 
 /* End of a bare URL: stops at whitespace, drops trailing punctuation. */
@@ -153,10 +199,10 @@ static void inline_md(md_doc_t *d, const char *s, size_t n, unsigned flags, int 
         size_t j, k;
         int matched = 0;
 
-        if (c == '\\' && i + 1 < n && escapable(s[i + 1])) {
+        if (c == '\\' && (k = escaped_len(s, n, i + 1)) != 0) {
             FLUSH();
-            emit(d, s + i + 1, 1, flags, link);
-            i = run = i + 2;
+            emit(d, s + i + 1, k, flags, link);
+            i = run = i + 1 + k;
             continue;
         }
         if (starts(s, n, i, MD_EDITED_MARK)) {
@@ -181,16 +227,13 @@ static void inline_md(md_doc_t *d, const char *s, size_t n, unsigned flags, int 
             i = run = j + 3;
             continue;
         }
-        if (c == '`') {
-            const char *tok = starts(s, n, i, "``") ? "``" : "`";
-            k = (size_t)lstrlenA(tok);
-            j = find(s, n, i + k, tok);
-            if (j != NPOS && j > i + k) {
-                FLUSH();
-                emit(d, s + i + k, j - i - k, flags | MD_CODE, link);
-                i = run = j + k;
-                continue;
-            }
+        /* `code`, ``co`de``, and ```code``` within a line */
+        if (c == '`' && (j = md_code_end(s, n, i)) != 0) {
+            k = run_of(s, n, i, '`');
+            FLUSH();
+            emit(d, s + i + k, j - i - 2 * k, flags | MD_CODE, link);
+            i = run = j;
+            continue;
         }
         /* ||spoiler|| **bold** __underline__ ~~strike~~ */
         for (int p = 0; p < (int)(sizeof pairs / sizeof pairs[0]) && !matched; p++) {
@@ -209,27 +252,42 @@ static void inline_md(md_doc_t *d, const char *s, size_t n, unsigned flags, int 
         }
         if (matched)
             continue;
-        /* *italic* or _italic_, ending on a matching char not preceded by a space. */
-        if ((c == '*' || c == '_') && i + 1 < n && !is_space(s[i + 1]) &&
+        /*
+         * *italic* or _italic_, ending on a matching char not preceded by a space,
+         * across lines too. A "**" inside is bold, not the end; a lone "**" is text.
+         */
+        if ((c == '*' || c == '_') && i + 1 < n && !is_space(s[i + 1]) && s[i + 1] != c &&
             (c == '*' || i == 0 || !is_alnum(s[i - 1]))) {
-            for (j = i + 1; j < n && s[j] != '\n'; j++)
+            for (j = i + 1; j < n; j++) {
+                if (s[j] == c && j + 1 < n && s[j + 1] == c && c == '*') {
+                    j++;
+                    continue;
+                }
                 if (s[j] == c && !is_space(s[j - 1]) && (c == '*' || j + 1 >= n || !is_alnum(s[j + 1])))
                     break;
-            if (j < n && s[j] == c) {
+            }
+            if (j < n && s[j] == c && j > i + 1) {
                 FLUSH();
                 inline_md(d, s + i + 1, j - i - 1, flags | MD_ITALIC, link);
                 i = run = j + 1;
                 continue;
             }
         }
-        /* [text](https://...) */
-        if (c == '[' && !(flags & MD_LINK) && (j = find(s, n, i + 1, "](")) != NPOS &&
-            (k = find(s, n, j + 2, ")")) != NPOS && is_url(s + j + 2, k - j - 2) && find(s, j, i, "\n") == NPOS) {
-            int idx = add_link(d, s + j + 2, k - j - 2);
-            FLUSH();
-            inline_md(d, s + i + 1, j - i - 1, flags | MD_LINK, idx);
-            i = run = k + 1;
-            continue;
+        /* [text](https://...) or [text](<https://...>): the text ends at the first "]" */
+        if (c == '[' && !(flags & MD_LINK) && (j = find(s, n, i + 1, "]")) != NPOS && j + 1 < n && s[j + 1] == '(' &&
+            find(s, j, i, "\n") == NPOS && (k = close_paren(s, n, j + 1)) != NPOS) {
+            size_t a = j + 2, b = k;
+            if (b > a + 1 && s[a] == '<' && s[b - 1] == '>') {
+                a++;
+                b--;
+            }
+            if (is_url(s + a, b - a)) {
+                int idx = add_link(d, s + a, b - a);
+                FLUSH();
+                inline_md(d, s + i + 1, j - i - 1, flags | MD_LINK, idx);
+                i = run = k + 1;
+                continue;
+            }
         }
         /* Bare link, or <link> which Discord shows without a preview. */
         if (!(flags & MD_LINK) && (i == 0 || !is_alnum(s[i - 1])) &&
@@ -254,7 +312,7 @@ static void inline_md(md_doc_t *d, const char *s, size_t n, unsigned flags, int 
 
 /* ---- Blocks ---- */
 
-static void add_block(md_doc_t *d, int kind, const char *s, size_t n, int raw)
+static void add_block(md_doc_t *d, int kind, const char *s, size_t n, int raw, int quoted)
 {
     int start = d->len;
 
@@ -268,17 +326,41 @@ static void add_block(md_doc_t *d, int kind, const char *s, size_t n, int raw)
         d->cap_blocks = d->cap_blocks ? d->cap_blocks * 2 : 8;
         d->blocks = mem_realloc(d->blocks, (size_t)d->cap_blocks * sizeof *d->blocks);
     }
-    d->blocks[d->nblocks].kind = kind;
+    d->blocks[d->nblocks].kind = quoted && kind == MD_PARA ? MD_QUOTE : kind;
+    d->blocks[d->nblocks].quoted = quoted;
     d->blocks[d->nblocks].start = start;
     d->blocks[d->nblocks].len = d->len - start;
     d->nblocks++;
 }
 
-static void flush(md_doc_t *d, int kind, sb_t *pending)
+static void flush(md_doc_t *d, int kind, sb_t *pending, int quoted)
 {
     if (pending->len)
-        add_block(d, kind, pending->data, pending->len, 0);
+        add_block(d, kind, pending->data, pending->len, 0, quoted);
     sb_clear(pending);
+}
+
+/* A list item: "- ", "* " or "1. ", after up to 8 spaces of nesting. Sets the marker's end and the level. */
+static int list_item(const char *s, size_t n, size_t i, size_t end, size_t *from, int *level, int *number)
+{
+    size_t k = i, digits;
+
+    while (k < end && s[k] == ' ' && k - i < 8)
+        k++;
+    *level = (int)(k - i) / 2;
+    *number = -1; /* a bullet */
+    if (starts(s, n, k, "- ") || starts(s, n, k, "* ")) {
+        *from = k + 2;
+        return 1;
+    }
+    for (digits = 0; k + digits < end && s[k + digits] >= '0' && s[k + digits] <= '9' && digits < 9; digits++)
+        *number = (*number < 0 ? 0 : *number * 10) + (s[k + digits] - '0');
+    if (digits && starts(s, n, k + digits, ". ")) {
+        *from = k + digits + 2;
+        return 1;
+    }
+    *number = -1;
+    return 0;
 }
 
 /* Emoji-only messages (custom or unicode, up to 30) are drawn large, like Discord does. */
@@ -302,7 +384,8 @@ static int only_emoji(const md_doc_t *d)
     return count > 0 && count <= 30;
 }
 
-void md_parse(const char *s, size_t n, md_doc_t *doc)
+/* The blocks of s[0..n); inside a quote (quoted), "> " is plain text: Discord quotes one level. */
+static void parse_blocks(md_doc_t *doc, const char *s, size_t n, int quoted)
 {
     sb_t pending = {0};
     int pending_kind = MD_PARA;
@@ -310,7 +393,7 @@ void md_parse(const char *s, size_t n, md_doc_t *doc)
 
     while (i < n) {
         size_t end = i, from;
-        int kind = MD_PARA;
+        int kind = MD_PARA, level, number;
 
         while (end < n && s[end] != '\n')
             end++;
@@ -330,29 +413,40 @@ void md_parse(const char *s, size_t n, md_doc_t *doc)
                 }
                 while (b > a && (s[b - 1] == '\n' || s[b - 1] == '\r'))
                     b--;
-                flush(doc, pending_kind, &pending);
-                add_block(doc, MD_CODEBLOCK, s + a, b - a, 1);
+                flush(doc, pending_kind, &pending, quoted);
+                add_block(doc, MD_CODEBLOCK, s + a, b - a, 1, quoted);
                 i = j + 3;
                 if (i < n && s[i] == '\n')
                     i++;
                 continue;
             }
         }
-        /* >>> quotes the rest of the message */
-        if (starts(s, n, i, ">>> ")) {
-            flush(doc, pending_kind, &pending);
-            add_block(doc, MD_QUOTE, s + i + 4, n - i - 4, 0);
-            break;
+        if (!quoted) {
+            /* >>> quotes the rest of the message, "> " each line: their content has blocks of its own. */
+            if (starts(s, n, i, ">>> ")) {
+                flush(doc, pending_kind, &pending, quoted);
+                parse_blocks(doc, s + i + 4, n - i - 4, 1);
+                break;
+            }
+            if (starts(s, n, i, "> ")) {
+                sb_t inner = {0};
+                flush(doc, pending_kind, &pending, quoted);
+                while (i < n && starts(s, n, i, "> ")) {
+                    for (end = i; end < n && s[end] != '\n'; end++)
+                        ;
+                    if (inner.len)
+                        sb_add(&inner, "\n");
+                    sb_addn(&inner, s + i + 2, end - i - 2);
+                    i = end + (end < n);
+                }
+                parse_blocks(doc, inner.data ? inner.data : "", inner.len, 1);
+                sb_free(&inner);
+                continue;
+            }
         }
 
         from = i;
-        if (starts(s, n, i, "> ")) {
-            kind = MD_QUOTE;
-            from = i + 2;
-        } else if (end == i + 1 && s[i] == '>') {
-            kind = MD_QUOTE;
-            from = end;
-        } else if (starts(s, n, i, "### ")) {
+        if (starts(s, n, i, "### ")) {
             kind = MD_H3;
             from = i + 4;
         } else if (starts(s, n, i, "## ")) {
@@ -364,28 +458,40 @@ void md_parse(const char *s, size_t n, md_doc_t *doc)
         } else if (starts(s, n, i, "-# ")) {
             kind = MD_SUBTEXT;
             from = i + 3;
-        } else if (starts(s, n, i, "- ") || starts(s, n, i, "* ")) {
+        } else if (list_item(s, n, i, end, &from, &level, &number)) {
             kind = MD_LIST;
-            from = i + 2;
         }
 
         if (kind == MD_H1 || kind == MD_H2 || kind == MD_H3 || kind == MD_SUBTEXT) {
-            flush(doc, pending_kind, &pending);
-            add_block(doc, kind, s + from, end - from, 0);
+            flush(doc, pending_kind, &pending, quoted);
+            add_block(doc, kind, s + from, end - from, 0, quoted);
         } else {
             if (kind != pending_kind)
-                flush(doc, pending_kind, &pending);
+                flush(doc, pending_kind, &pending, quoted);
             pending_kind = kind;
             if (pending.len)
                 sb_add(&pending, "\n");
-            if (kind == MD_LIST)
-                sb_add(&pending, "\xE2\x80\xA2  "); /* bullet */
+            if (kind == MD_LIST) {
+                for (int l = 0; l < level && l < 4; l++)
+                    sb_add(&pending, "\xE2\x80\x83\xE2\x80\x83"); /* two em spaces per level */
+                if (number >= 0) {
+                    sb_i64(&pending, number);
+                    sb_add(&pending, ".  ");
+                } else {
+                    sb_add(&pending, level ? "\xE2\x97\xA6  " : "\xE2\x80\xA2  "); /* white bullet nested */
+                }
+            }
             sb_addn(&pending, s + from, end - from);
         }
         i = end + 1;
     }
-    flush(doc, pending_kind, &pending);
+    flush(doc, pending_kind, &pending, quoted);
     sb_free(&pending);
+}
+
+void md_parse(const char *s, size_t n, md_doc_t *doc)
+{
+    parse_blocks(doc, s, n, 0);
     doc->jumbo = doc->nblocks == 1 && doc->blocks[0].kind == MD_PARA && only_emoji(doc);
 }
 

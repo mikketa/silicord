@@ -117,9 +117,57 @@ static void test_blocks(void)
     check(g_doc.nblocks == 1 && g_doc.blocks[0].kind == MD_QUOTE, "block quote takes the rest");
 }
 
+/* Cases where Discord's rules differ from a naive reading. */
+static void test_discord_rules(void)
+{
+    parse("2 ** 3 = 8");
+    check(text_is("2 ** 3 = 8"), "a lone ** stays text");
+    parse("**a");
+    check(text_is("**a"), "an unclosed ** stays text");
+    parse("*a **b** c*");
+    check(text_is("a b c") && flags_of("a ") == MD_ITALIC && flags_of("b") == (MD_ITALIC | MD_BOLD), "italic around bold");
+    parse("*one\ntwo*");
+    check(text_is("one\ntwo") && flags_of("one") == MD_ITALIC && flags_of("two") == MD_ITALIC, "italic across lines");
+    parse("a ```x``` b ``c`d``");
+    check(text_is("a x b c`d") && flags_of("x") == MD_CODE && flags_of("c`d") == MD_CODE, "code spans of any length");
+    parse("\\. \\! \\= \\\xC3\xA9 \\a");
+    check(text_is(". ! = \xC3\xA9 \\a"), "a backslash escapes any punctuation or non-ASCII character, not letters");
+    parse("[docs](<https://x.com>)");
+    check(text_is("docs") && flags_of("docs") == MD_LINK && lstrcmpA(md_link(&g_doc, 0), "https://x.com") == 0,
+          "masked link with an angle-bracketed URL");
+    parse("[1] see [here](https://x.com)");
+    check(text_is("[1] see here") && flags_of("here") == MD_LINK && flags_of("[1] see ") == 0,
+          "masked link text starts at the nearest bracket");
+    parse("[w](https://en.wikipedia.org/wiki/Foo_(bar)) end");
+    check(text_is("w end") && lstrcmpA(md_link(&g_doc, 0), "https://en.wikipedia.org/wiki/Foo_(bar)") == 0,
+          "masked link URL with parentheses");
+}
+
+static void test_nested_blocks(void)
+{
+    parse(">>> # Title\n- a\n```\ncode\n```\ntext");
+    check(g_doc.nblocks == 4 && g_doc.blocks[0].kind == MD_H1 && g_doc.blocks[0].quoted && g_doc.blocks[1].kind == MD_LIST &&
+              g_doc.blocks[1].quoted && g_doc.blocks[2].kind == MD_CODEBLOCK && g_doc.blocks[3].kind == MD_QUOTE,
+          "blocks inside a block quote (forwarded messages)");
+    parse("> # T\nafter");
+    check(g_doc.nblocks == 2 && g_doc.blocks[0].kind == MD_H1 && g_doc.blocks[0].quoted && g_doc.blocks[1].kind == MD_PARA &&
+              !g_doc.blocks[1].quoted,
+          "a heading in a one-line quote");
+    parse(">no space");
+    check(g_doc.nblocks == 1 && g_doc.blocks[0].kind == MD_PARA && text_is(">no space"), "a quote needs a space");
+    parse("1. one\n2. two\n  - sub");
+    check(g_doc.nblocks == 1 && g_doc.blocks[0].kind == MD_LIST &&
+              text_is("1.  one\n2.  two\n\xE2\x80\x83\xE2\x80\x83\xE2\x97\xA6  sub"),
+          "numbered and nested lists");
+    check(md_code_end("`<@1>` x", 8, 0) == 6 && md_code_end("```a```", 7, 0) == 7 && md_code_end("`open", 5, 0) == 0,
+          "code regions for the formatters");
+}
+
 void entry(void)
 {
     test_inline();
+    test_discord_rules();
+    test_nested_blocks();
     test_links();
     test_emoji();
     test_blocks();
