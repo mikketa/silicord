@@ -189,6 +189,9 @@ typedef struct {
     int results_open, results_scroll, results_content, result_hover;
     int result_y[64], result_h[64];
     int detached;              /* showing older messages after a jump: new ones are not appended */
+    void *posts;               /* forum posts (post_t) */
+    int nposts, forum_loaded, forum_scroll, forum_content, post_hover;
+    int post_y[64];
     int pins_open, pins_scroll, pins_content;
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
@@ -1330,6 +1333,11 @@ static void pop_place(void);
 static void on_font(int id, sb_t *data);
 static void on_profile(profile_t *p);
 static void paint_toolbar(void);
+static void posts_clear(void);
+static void on_forum(const sb_t *p);
+static int forum_view(void);
+static void paint_forum(RECT rc, int x0, int w);
+static void replace_model(model_t *m);
 static wchar_t *plain_text(const sb_t *text);
 static void place_search(void);
 static void paint_search(void);
@@ -2672,6 +2680,10 @@ static void paint_main(RECT rc)
             paint_welcome(x0 + S(8), rc.bottom - S(24) - S(WELCOME_H), w, name, 1);
             return;
         }
+        if (forum_view()) {
+            paint_forum(rc, x0, w);
+            return;
+        }
         paint_messages(rc, name);
         paint_toolbar();
         paint_autocomplete();
@@ -3133,6 +3145,17 @@ static void open_channel(int index)
     sb_clear(&g_ui.send_error);
     g_ui.msgs_channel[0] = 0;
     g_ui.detached = 0;
+    posts_clear();
+    if (index >= 0 && g_ui.model && (chan(index)->type == CH_FORUM || chan(index)->type == CH_MEDIA)) {
+        lstrcpynA(g_ui.msgs_channel, chan(index)->id, sizeof g_ui.msgs_channel);
+        g_ui.msgs_loading = 0;
+        app_open_channel("");
+        app_fetch_forum(chan(index)->id);
+        place_composer();
+        place_friend_input();
+        place_search();
+        return;
+    }
     if (index < 0 || !g_ui.model || is_voice_type(chan(index)->type)) {
         g_ui.msgs_loading = 0;
         app_open_channel("");
@@ -3453,6 +3476,16 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
 
     if (msg == UI_MESSAGES) {
         on_batch((msg_batch_t *)lp);
+        redraw();
+        return;
+    }
+    if (msg == UI_FORUM) {
+        if (p)
+            on_forum(p);
+        if (p) {
+            sb_free(p);
+            mem_free(p);
+        }
         redraw();
         return;
     }
@@ -7327,6 +7360,157 @@ static int click_detached(int x, int y)
     return 1;
 }
 
+/* ---- Forum channels ---- */
+
+#define POST_H 96
+
+typedef struct {
+    char id[24];
+    sb_t name, preview, author, raw;
+    char author_id[24], avatar[48];
+    int count;
+} post_t;
+
+static void posts_clear(void)
+{
+    for (int i = 0; i < g_ui.nposts; i++) {
+        post_t *pt = &((post_t *)g_ui.posts)[i];
+        sb_free(&pt->name);
+        sb_free(&pt->preview);
+        sb_free(&pt->author);
+        sb_free(&pt->raw);
+    }
+    mem_free(g_ui.posts);
+    g_ui.posts = NULL;
+    g_ui.nposts = 0;
+    g_ui.forum_loaded = 0;
+    g_ui.forum_scroll = 0;
+}
+
+/* {threads: [...], first_messages: [...]} from threads/search. */
+static void on_forum(const sb_t *p)
+{
+    const char *channel = p->data, *body = channel + lstrlenA(channel) + 1;
+    size_t n = p->len - (size_t)(body - p->data);
+    json_t root, threads, firsts, t, v, m;
+    json_iter_t it, fit;
+
+    if (lstrcmpA(channel, g_ui.msgs_channel) != 0)
+        return;
+    posts_clear();
+    g_ui.forum_loaded = 1;
+    if (!n || !json_parse(body, n, &root) || !json_get(root, "threads", &threads))
+        return;
+    g_ui.posts = mem_alloc((json_count(threads) + 1) * sizeof(post_t));
+    json_iter(threads, &it);
+    while (json_next(&it, NULL, &t)) {
+        post_t *pt = &((post_t *)g_ui.posts)[g_ui.nposts];
+        long long count = 0;
+        if (!json_get(t, "id", &v))
+            continue;
+        json_raw(v, pt->id, sizeof pt->id);
+        if (json_get(t, "name", &v))
+            json_str(v, &pt->name);
+        if (json_get(t, "message_count", &v))
+            json_int(v, &count);
+        pt->count = (int)count;
+        sb_addn(&pt->raw, t.p, (size_t)(t.end - t.p));
+        /* The post's first message has the thread's id. */
+        if (json_get(root, "first_messages", &firsts)) {
+            json_iter(firsts, &fit);
+            while (json_next(&fit, NULL, &m)) {
+                msg_t msg = {0};
+                if (msg_parse(m, &msg) && lstrcmpA(msg.id, pt->id) == 0) {
+                    sb_addn(&pt->preview, msg.text.data ? msg.text.data : "", msg.text.len);
+                    sb_addn(&pt->author, msg.author.data ? msg.author.data : "", msg.author.len);
+                    lstrcpynA(pt->author_id, msg.author_id, sizeof pt->author_id);
+                    lstrcpynA(pt->avatar, msg.avatar, sizeof pt->avatar);
+                    msg_free(&msg);
+                    break;
+                }
+                msg_free(&msg);
+            }
+        }
+        g_ui.nposts++;
+    }
+}
+
+static void paint_forum(RECT rc, int x0, int w)
+{
+    int y = S(HEADER_H) + S(16) - g_ui.forum_scroll;
+
+    if (!g_ui.forum_loaded) {
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, w, S(24)), "Loading posts\xE2\x80\xA6", DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    if (!g_ui.nposts) {
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, w, S(24)), "There are no posts here yet.", DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    r_clip(x0, S(HEADER_H), w, rc.bottom - S(HEADER_H));
+    for (int i = 0; i < g_ui.nposts; i++, y += S(POST_H) + S(8)) {
+        post_t *pt = &((post_t *)g_ui.posts)[i];
+        int cx = x0 + S(24), cw = w - S(48);
+        char count[16];
+        wchar_t *prev;
+        r_image_t *img;
+        if (!r_visible(y, S(POST_H)))
+            continue;
+        g_ui.post_y[i < 64 ? i : 63] = y;
+        r_round(cx, y, cw, S(POST_H), S(8), g_ui.post_hover == i ? 0xFF222222 : 0xFF1A1A1A);
+        text(g_ui.f_title, C_INK, rect(cx + S(16), y + S(12), cw - S(100), S(26)), pt->name.data ? pt->name.data : "",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        img = pt->author_id[0] ? user_avatar(pt->author_id, pt->avatar) : NULL;
+        if (img)
+            r_image(img, cx + S(16), y + S(46), S(18), S(18), S(9));
+        text(g_ui.f_h, C_MUTED, rect(cx + S(40), y + S(44), S(160), S(22)), pt->author.data ? pt->author.data : "",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        prev = plain_text(&pt->preview);
+        r_text(g_ui.f_body, ARGB(C_MUTED), cx + S(206), y + S(44), cw - S(300), S(22), prev, -1, R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
+        mem_free(prev);
+        wsprintfA(count, "%d", pt->count);
+        text_w(g_ui.f_icon, C_FAINT, rect(cx + cw - S(76), y + S(12), S(24), S(26)), L"\xE8F2", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_h, C_MUTED, rect(cx + cw - S(52), y + S(12), S(40), S(26)), count, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    g_ui.forum_content = y + g_ui.forum_scroll - S(HEADER_H);
+    r_unclip();
+}
+
+static int forum_view(void)
+{
+    return g_ui.model && g_ui.channel >= 0 && (chan(g_ui.channel)->type == CH_FORUM || chan(g_ui.channel)->type == CH_MEDIA);
+}
+
+static int post_hit(int x, int y)
+{
+    int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0;
+
+    if (!forum_view() || y < S(HEADER_H) || x < x0 + S(24) || x >= x0 + w - S(24))
+        return -1;
+    for (int i = 0; i < g_ui.nposts && i < 64; i++)
+        if (y >= g_ui.post_y[i] && y < g_ui.post_y[i] + S(POST_H))
+            return i;
+    return -1;
+}
+
+/* Opens a post: it joins the model as a channel under its forum, then opens like any thread. */
+static void open_post(int i)
+{
+    post_t *pt = &((post_t *)g_ui.posts)[i];
+    char id[24];
+    int c;
+
+    lstrcpynA(id, pt->id, sizeof id);
+    if (model_find_channel(g_ui.model, id) < 0) {
+        json_t d;
+        model_t *m;
+        if (json_parse(pt->raw.data, pt->raw.len, &d) && (m = model_apply(g_ui.model, "CHANNEL_CREATE", d)) != NULL)
+            replace_model(m);
+    }
+    if ((c = model_find_channel(g_ui.model, id)) >= 0)
+        go_to_channel(c);
+}
+
 /* ---- Composer ---- */
 
 static void send_composer(void)
@@ -7456,6 +7640,14 @@ static void update_hover(int x, int y)
             redraw();
         }
         link = link || th >= 0 || att;
+    }
+    {
+        int ph = post_hit(x, y);
+        if (ph != g_ui.post_hover) {
+            g_ui.post_hover = ph;
+            redraw();
+        }
+        link = link || ph >= 0;
     }
     {
         int rh = result_hit(x, y);
@@ -7627,6 +7819,13 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             if (click_results(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || click_detached(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
                 return 0;
             {
+                int ph = post_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (ph >= 0) {
+                    open_post(ph);
+                    return 0;
+                }
+            }
+            {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
                 if (open_is_text() && y < S(HEADER_H) && x >= pins_button_x() && x < pins_button_x() + S(32)) {
                     if (g_ui.pins_open) {
@@ -7720,6 +7919,16 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.view != VIEW_APP)
             return 0;
         pop_close();
+        if (forum_view() && pt.x >= S(RAIL_W + SIDE_W) && pt.x < main_right()) {
+            int max = g_ui.forum_content - (int)(S(HEADER_H));
+            g_ui.forum_scroll += delta;
+            if (g_ui.forum_scroll > max)
+                g_ui.forum_scroll = max;
+            if (g_ui.forum_scroll < 0)
+                g_ui.forum_scroll = 0;
+            redraw();
+            return 0;
+        }
         if (g_ui.results_open) {
             RECT sr = results_rect();
             if (pt.x >= sr.left && pt.x < sr.right && pt.y >= sr.top && pt.y < sr.bottom) {
@@ -7825,7 +8034,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_FRIEND_RESULT) {
+        if (msg >= UI_QR && msg <= UI_FORUM) {
             on_worker(msg, wp, lp);
             return 0;
         }
