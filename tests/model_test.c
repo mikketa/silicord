@@ -28,7 +28,7 @@ static const char k_ready[] =
     "{\"id\":\"14\",\"last_message_id\":\"300\"},"
     "{\"id\":\"21\",\"last_message_id\":\"850\",\"mention_count\":1}]},"
     "\"user_settings\":{\"status\":\"dnd\",\"developer_mode\":true,"
-    "\"custom_status\":{\"text\":\"busy\",\"emoji_name\":\"ð¥\"},\"guild_folders\":[{\"id\":42,\"name\":\"Pals\",\"color\":255,\"guild_ids\":[\"1\"]}]},"
+    "\"custom_status\":{\"text\":\"busy\",\"emoji_name\":\"\xF0\x9F\x94\xA5\"},\"guild_folders\":[{\"id\":42,\"name\":\"Pals\",\"color\":255,\"guild_ids\":[\"1\"]}]},"
     "\"user_guild_settings\":{\"entries\":[{\"guild_id\":\"1\",\"muted\":false,"
     "\"channel_overrides\":[{\"channel_id\":\"14\",\"muted\":true}]}]}"
     "}";
@@ -59,7 +59,7 @@ static void test_user_settings(const model_t *m)
     model_t *a;
 
     check(lstrcmpA(m->status, "dnd") == 0 && m->developer_mode, "status and developer mode from READY");
-    check(lstrcmpA(model_str(m, m->custom_status), "ð¥ busy") == 0, "custom status with its emoji");
+    check(lstrcmpA(model_str(m, m->custom_status), "\xF0\x9F\x94\xA5 busy") == 0, "custom status with its emoji");
     a = apply(m, "USER_SETTINGS_UPDATE", "{\"status\":\"idle\",\"custom_status\":null}");
     check(a && lstrcmpA(a->status, "idle") == 0 && !a->custom_status && a->developer_mode,
           "settings updates change only what they carry");
