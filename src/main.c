@@ -711,7 +711,6 @@ static int multipart(rest_job_t *j, sb_t *body)
         wchar_t *wpath = utf8_to_wide(p, (size_t)lstrlenA(p));
         HANDLE f = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         const char *name = p;
-        char head[64];
         DWORD size, got = 0;
 
         mem_free(wpath);
@@ -723,8 +722,9 @@ static int multipart(rest_job_t *j, sb_t *body)
             break;
         }
         size = GetFileSize(f, NULL);
-        wsprintfA(head, "--" BOUNDARY "\r\nContent-Disposition: form-data; name=\"files[%d]\"; filename=", i);
-        sb_add(&out, head);
+        sb_add(&out, "--" BOUNDARY "\r\nContent-Disposition: form-data; name=\"files[");
+        sb_i64(&out, i);
+        sb_add(&out, "]\"; filename=");
         sb_json_str(&out, name, (size_t)lstrlenA(name)); /* a quoted, escaped string */
         sb_add(&out, "\r\nContent-Type: application/octet-stream\r\n\r\n");
         if (size == INVALID_FILE_SIZE || size > (100u << 20)) {
