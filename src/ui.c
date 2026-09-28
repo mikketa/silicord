@@ -2926,7 +2926,7 @@ static void on_batch(msg_batch_t *b)
 
 static void paint_welcome(int x0, int y, int w, const char *name, int voice)
 {
-    char title[160];
+    char title[192]; /* the longest format, 58 bytes, and 120 of the name */
     const channel_t *c = g_ui.channel >= 0 ? chan(g_ui.channel) : NULL;
 
     if (c && is_dm_type(c->type)) {
