@@ -18,8 +18,9 @@ function(silicord_no_crt target)
   set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
   target_include_directories(${target} PRIVATE src)
   target_compile_definitions(${target} PRIVATE WIN32_LEAN_AND_MEAN SILICORD_VERSION="${PROJECT_VERSION}")
-  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:C>:/W4 /GS- /utf-8>
-    $<$<COMPILE_LANGUAGE:CXX>:/W4 /GS- /utf-8 /GR- /EHs-c- /Zc:threadSafeInit->)
+  # /WX: the build has no warnings at /W4, and stays so.
+  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:C>:/W4 /WX /GS- /utf-8>
+    $<$<COMPILE_LANGUAGE:CXX>:/W4 /WX /GS- /utf-8 /GR- /EHs-c- /Zc:threadSafeInit->)
 endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
