@@ -25,9 +25,9 @@ The official client ships a full Chromium: several processes, hundreds of MB of 
 - a single `.exe` of a few hundred KB, nothing to install
 - ~0% CPU when idle (the process sleeps until the next network event)
 - a few MB of RAM
+- a codebase small enough to read end to end
 
 Measured while connected to an account with 20 servers: 480 KB executable (the emoji table and its search names included), 0% CPU over 30 idle seconds, about 8 MB of memory at startup (Task Manager) and 9 MB after browsing eight servers. Silicord's own data, images included, stays around 3 MB.
-- a codebase small enough to read end to end
 
 ## ⚠️ Disclaimer
 
@@ -67,6 +67,15 @@ ctest --test-dir build
 
 CI builds every push, runs the tests and publishes `silicord.exe` as an artifact.
 
+The platform-independent code (JSON, inflate, markdown, messages, the model, slash commands, APNG...) also builds on Linux, where the same tests and a fuzzer run under AddressSanitizer and UBSan. CI runs them on every push too:
+
+```sh
+cmake -S tests/host -B build-host -G Ninja
+cmake --build build-host
+ctest --test-dir build-host --output-on-failure
+build-host/fuzz 100000 json 42   # a longer run: iterations, target (all, json, command, text, inflate, apng), seed
+```
+
 If Smart App Control is enabled, Windows blocks unsigned executables you build yourself. Use the CI artifact instead.
 
 ## Layout
@@ -74,8 +83,9 @@ If Smart App Control is enabled, Windows blocks unsigned executables you build y
 ```
 src/     C sources (Win32, no CRT)
 asm/     x64 assembly routines (NASM, Win64 ABI)
-tests/   unit tests (same no-CRT setup)
-assets/  logo and banners
+tests/   unit tests (same no-CRT setup); tests/host: Linux build with sanitizers and a fuzzer
+assets/  logo, icon and banners
+tools/   make_icon.py: assets/silicord.ico from assets/logo.svg
 docs/    roadmap and architecture
 ```
 

@@ -2,7 +2,7 @@
 
 ## Principles
 
-1. **No C runtime.** The entry point is `entry` (`/ENTRY:entry /NODEFAULTLIB`). Only Windows libraries are linked (`kernel32`, `user32`, `winhttp`, `d2d1`, `dwrite`, `windowscodecs`, ...). What the compiler itself needs (`memset`, `memcpy`) lives in `src/rt.c`.
+1. **No C runtime.** The entry point is `entry` (`/ENTRY:entry /NODEFAULTLIB`). Only Windows libraries are linked (`kernel32`, `user32`, `winhttp`, `dwrite`, `windowscodecs`, ...). What the compiler itself needs (`memset`, `memcpy`) lives in `src/rt.c`.
 2. **Windows does the heavy lifting.** TLS, HTTP and WebSocket go through WinHTTP. No OpenSSL, no libcurl. DirectWrite lays out and draws the text, color emoji included, into a bitmap Silicord owns; images are decoded by WIC. Neither Direct2D nor the GPU is used.
 3. **Event-driven.** No busy loop: the thread blocks (`WaitForMultipleObjects`, `GetMessage`) until the next event.
 4. **Assembly where it measurably helps.** C first, then hot functions (JSON parsing, inflate, text) are rewritten in NASM only when a benchmark shows a gain.
@@ -38,3 +38,9 @@ Display name fonts are the only files fetched outside Discord: they come from a 
 A frame is drawn in bands of 256 rows through one bitmap as wide as the window: the UI repeats its paint for each band and anything outside it is skipped before any work is done. The bitmap stays around 2 MB instead of a full-window back buffer, and there is no Direct2D device or WARP rasterizer, whose caches used to take 20 to 30 MB.
 
 DirectWrite does not clip to a rectangle, so the pixels a text layout can touch outside the visible area are saved before drawing it and put back after; the same copy gives translucent text. Styled display names are drawn as a coverage mask (white glyphs, grayscale anti-aliasing) and composited with their gradient or effect.
+
+## Testing
+
+The unit tests in `tests/` are built like the client (no C runtime, `entry` as the entry point) and run by CTest on Windows. Most of them cover code that does not depend on Windows: the JSON reader, the inflater, markdown, messages, the model, slash commands, APNG, the member list. `tests/host` builds that code on Linux, with a small shim for the handful of Win32 calls it makes (`HeapAlloc`, `MultiByteToWideChar`, `lstrcpynA`...), and runs the same tests under AddressSanitizer and UBSan.
+
+It also builds `fuzz`, a deterministic fuzzer for everything that parses data from Discord. JSON documents are either generated from the keys the code looks up (taken from the sources) or made by replacing values in the JSON of the unit tests, then given to every consumer: messages and batches, READY and the gateway events applied to the model, profiles, member list updates, slash commands. Markdown, search filters and emoji expansion get random text; the inflater's output is compared with zlib's; APNGs are corrupted. A sanitizer report or a broken invariant (a markdown span outside the text, invalid JSON from `cmd_build`) stops it.

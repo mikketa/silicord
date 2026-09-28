@@ -66,7 +66,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Profile popouts: banner, avatar decoration, display name fonts and effects, server tag, badges, mutual friends and servers, bio, message box
 - [x] Profile popouts: roles
 - [x] Profile popouts: animated avatars, banners and decorations (own APNG player)
-- [ ] Executable icon from `assets/logo.svg`
+- [x] Executable icon from `assets/logo.svg`, sharp at every scale
 
 ## 5. Later
 
