@@ -559,8 +559,9 @@ static int compose(r_image_t *img, UINT index)
                             d[c] = (BYTE)(s[c] + d[c] * (255 - a) / 255);
                     }
                 }
-            img->area.left = (LONG)fx;
-            img->area.top = (LONG)fy;
+            /* Clamped on every side: a frame placed past the canvas leaves an empty area, not a negative one. */
+            img->area.left = (LONG)(fx < img->w ? fx : img->w);
+            img->area.top = (LONG)(fy < img->h ? fy : img->h);
             img->area.right = (LONG)(fx + fw < img->w ? fx + fw : img->w);
             img->area.bottom = (LONG)(fy + fh < img->h ? fy + fh : img->h);
             ok = 1;
