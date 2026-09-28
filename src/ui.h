@@ -78,7 +78,8 @@ void app_send_message(const char *channel_id, const char *text);
 /* Loads 50 messages around one (BATCH_HISTORY with `around` set), to jump to it. */
 void app_fetch_around(const char *channel_id, const char *message_id);
 /* Searches a server's messages (or a DM's); results come back as a BATCH_SEARCH batch. */
-void app_search(const char *guild_id, const char *dm_channel_id, const char *query);
+/* `params` are extra query parameters ("&author_id=1&has=image"), already encoded. */
+void app_search(const char *guild_id, const char *dm_channel_id, const char *query, const char *params);
 /* Trending GIFs (empty query) or a search, from Discord's GIF picker API; answered with UI_GIFS. */
 void app_fetch_gifs(const char *query);
 /* The slash commands usable in a server (guild_id) or a DM (channel_id); answered with UI_COMMANDS. */

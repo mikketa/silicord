@@ -1373,7 +1373,9 @@ static DWORD WINAPI search_main(LPVOID arg)
     /* j->channel: server id, or the DM channel when j->flag; j->text: the query. */
     sb_add(&path, j->flag ? "/channels/" : "/guilds/");
     sb_add(&path, j->channel);
-    sb_add(&path, "/messages/search?content=");
+    sb_add(&path, "/messages/search?");
+    if (j->text.len)
+        sb_add(&path, "content=");
     for (size_t i = 0; i < j->text.len; i++) {
         unsigned char c = (unsigned char)j->text.data[i];
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
@@ -1384,6 +1386,9 @@ static DWORD WINAPI search_main(LPVOID arg)
             sb_add(&path, e);
         }
     }
+    /* The filters, already encoded ("&author_id=..."); j->files is free for them in a search. */
+    if (j->files.len)
+        sb_addn(&path, j->files.data + !j->text.len, j->files.len - !j->text.len);
     /* Discord answers 202 while it indexes: give it a moment, like the client does. */
     for (int tries = 0; tries < 3; tries++) {
         http_resp_free(&resp);
@@ -1406,12 +1411,13 @@ static DWORD WINAPI search_main(LPVOID arg)
     return 0;
 }
 
-void app_search(const char *guild_id, const char *dm_channel_id, const char *query)
+void app_search(const char *guild_id, const char *dm_channel_id, const char *query, const char *params)
 {
     rest_job_t *j = new_job(guild_id ? guild_id : dm_channel_id);
 
     j->flag = guild_id == NULL;
     sb_add(&j->text, query);
+    sb_add(&j->files, params ? params : "");
     CloseHandle(CreateThread(NULL, 0, search_main, j, 0, NULL));
 }
 

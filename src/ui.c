@@ -16,6 +16,7 @@
 #include "md.h"
 #include "memberlist.h"
 #include "command.h"
+#include "search.h"
 #include "emoji.h"
 #include "mem.h"
 #include "qr.h"
@@ -9036,23 +9037,122 @@ static void search_close(void)
     g_ui.results_scroll = 0;
 }
 
+/* A user's id from a name typed in a filter: members, authors, friends, then the open DM. */
+static int find_user_id(const char *name, char *out)
+{
+    for (int i = 0; i < g_ui.ml.n; i++)
+        if (g_ui.ml.items[i].valid && !g_ui.ml.items[i].group && g_ui.ml.items[i].name.data &&
+            lstrcmpiA(g_ui.ml.items[i].name.data, name) == 0) {
+            lstrcpynA(out, g_ui.ml.items[i].id, 24);
+            return 1;
+        }
+    for (int i = g_ui.nmsgs; i-- > 0;)
+        if (!g_ui.msgs[i].system && lstrcmpiA(author_name(&g_ui.msgs[i]), name) == 0) {
+            lstrcpynA(out, g_ui.msgs[i].author_id, 24);
+            return 1;
+        }
+    for (int i = 0; i < g_ui.nrels; i++)
+        if ((g_ui.rels[i].name.data && lstrcmpiA(g_ui.rels[i].name.data, name) == 0) ||
+            (g_ui.rels[i].username.data && lstrcmpiA(g_ui.rels[i].username.data, name) == 0)) {
+            lstrcpynA(out, g_ui.rels[i].id, 24);
+            return 1;
+        }
+    if (g_ui.model && lstrcmpiA(model_str(g_ui.model, g_ui.model->user_name), name) == 0) {
+        lstrcpynA(out, g_ui.model->user_id, 24);
+        return 1;
+    }
+    return 0;
+}
+
+/* Filters to query parameters; what cannot be resolved stays in the text. */
+static void search_params(const search_filter_t *f, int n, sb_t *params, sb_t *content)
+{
+    static const char *const has[] = {"link", "embed", "file", "video", "image", "sound", "sticker", "poll", "forward"};
+    char buf[96], id[24];
+
+    for (int k = 0; k < n; k++) {
+        int ok = 0;
+        unsigned long long lo, hi;
+        switch (f[k].key) {
+        case SF_FROM:
+        case SF_MENTIONS:
+            if ((ok = find_user_id(f[k].value, id)) != 0) {
+                wsprintfA(buf, f[k].key == SF_FROM ? "&author_id=%s" : "&mentions=%s", id);
+                sb_add(params, buf);
+            }
+            break;
+        case SF_HAS:
+            for (int h = 0; h < (int)ARRAYSIZE(has) && !ok; h++)
+                if (lstrcmpiA(f[k].value, has[h]) == 0) {
+                    wsprintfA(buf, "&has=%s", has[h]);
+                    sb_add(params, buf);
+                    ok = 1;
+                }
+            break;
+        case SF_IN:
+            if (g_ui.guild >= 0) {
+                const guild_t *gd = &g_ui.model->guilds[g_ui.guild];
+                for (unsigned c = gd->first; c < gd->first + gd->count && !ok; c++)
+                    if (chan((int)c)->type != CH_CATEGORY && lstrcmpiA(model_str(g_ui.model, chan((int)c)->name), f[k].value) == 0) {
+                        wsprintfA(buf, "&channel_id=%s", chan((int)c)->id);
+                        sb_add(params, buf);
+                        ok = 1;
+                    }
+            }
+            break;
+        case SF_BEFORE:
+        case SF_AFTER:
+        case SF_DURING:
+            lo = search_day_snowflake(f[k].value, f[k].key == SF_AFTER);
+            hi = search_day_snowflake(f[k].value, 1);
+            if ((ok = lo != 0) != 0) {
+                if (f[k].key != SF_BEFORE) {
+                    wsprintfA(buf, "&min_id=%I64u", f[k].key == SF_AFTER ? hi : lo);
+                    sb_add(params, buf);
+                }
+                if (f[k].key != SF_AFTER) {
+                    wsprintfA(buf, "&max_id=%I64u", f[k].key == SF_BEFORE ? lo : hi);
+                    sb_add(params, buf);
+                }
+            }
+            break;
+        case SF_PINNED:
+            ok = lstrcmpiA(f[k].value, "true") == 0 || lstrcmpiA(f[k].value, "false") == 0;
+            if (ok)
+                sb_add(params, lstrcmpiA(f[k].value, "true") == 0 ? "&pinned=true" : "&pinned=false");
+            break;
+        }
+        if (!ok) {
+            if (content->len)
+                sb_add(content, " ");
+            sb_add(content, f[k].value);
+        }
+    }
+}
+
 static void search_run(void)
 {
     wchar_t w[128];
-    sb_t q = {0};
+    sb_t q = {0}, content = {0}, params = {0};
+    search_filter_t f[8];
+    int n;
 
     GetWindowTextW(g_ui.search_edit, w, 128);
     wide_to_utf8(w, (size_t)lstrlenW(w), &q);
     if (q.len && open_is_text()) {
+        n = search_parse(q.data, f, (int)ARRAYSIZE(f), &content);
+        search_params(f, n, &params, &content);
         search_close();
         g_ui.results_open = 1;
         pins_close();
         if (g_ui.guild >= 0)
-            app_search(g_ui.model->guilds[g_ui.guild].id, NULL, q.data);
+            app_search(g_ui.model->guilds[g_ui.guild].id, NULL, content.data ? content.data : "", params.data);
         else
-            app_search(NULL, g_ui.msgs_channel, q.data);
+            app_search(NULL, g_ui.msgs_channel, content.data ? content.data : "", params.data);
     }
     sb_free(&q);
+    sb_free(&content);
+    sb_free(&params);
     redraw();
 }
 
