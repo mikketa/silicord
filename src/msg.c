@@ -503,6 +503,36 @@ void msg_components_free(msg_t *m)
     m->ncomponents = 0;
 }
 
+/* A forwarded message carries a copy of the original: shown quoted under "Forwarded", as in Discord. */
+static void parse_forward(json_t obj, msg_t *out)
+{
+    json_t ref, snaps, snap, orig, v, list, mentions = {0};
+    json_iter_t it;
+    sb_t raw = {0}, inner = {0};
+
+    if (!json_get(obj, "message_reference", &ref) || get_num(ref, "type") != 1 ||
+        !json_get(obj, "message_snapshots", &snaps))
+        return;
+    json_iter(snaps, &it);
+    if (!json_next(&it, NULL, &snap) || !json_get(snap, "message", &orig))
+        return;
+    json_get(orig, "mentions", &mentions);
+    if (json_get(orig, "content", &v) && json_str(v, &raw) && raw.len)
+        format_content(raw.data, raw.len, mentions, &inner);
+    sb_clear(&out->text);
+    sb_add(&out->text, "\xE2\x86\xAA *Forwarded*");
+    if (inner.len) {
+        sb_add(&out->text, "\n>>> ");
+        sb_addn(&out->text, inner.data, inner.len);
+    }
+    if (!out->nfiles && json_get(orig, "attachments", &list))
+        parse_files(list, out);
+    if (!out->nembeds && json_get(orig, "embeds", &list))
+        parse_embeds(list, out);
+    sb_free(&raw);
+    sb_free(&inner);
+}
+
 static void parse_reactions(json_t list, msg_t *out)
 {
     json_iter_t it;
@@ -585,6 +615,7 @@ int msg_parse(json_t obj, msg_t *out)
         parse_reactions(list, out);
     if (json_get(obj, "poll", &list) && json_type(list) == JSON_OBJECT)
         parse_poll(list, out);
+    parse_forward(obj, out);
     if (json_get(obj, "components", &list) && json_type(list) == JSON_ARRAY) {
         sb_t v2 = {0};
         int row = 0;

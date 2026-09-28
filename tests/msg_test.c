@@ -145,6 +145,18 @@ static void test_reaction_event(void)
     msg_batch_free(b);
 }
 
+static void test_forward(void)
+{
+    msg_t m;
+
+    check(parse("{\"id\":\"1\",\"content\":\"\",\"message_reference\":{\"type\":1,\"message_id\":\"9\"},"
+                "\"message_snapshots\":[{\"message\":{\"content\":\"look <@5>\",\"mentions\":[{\"id\":\"5\",\"username\":\"bo\"}],"
+                "\"attachments\":[{\"filename\":\"a.png\",\"url\":\"https://cdn.discordapp.com/a.png\",\"size\":3}]}}]}", &m) &&
+              str_eq(&m.text, "\xE2\x86\xAA *Forwarded*\n>>> look " MD_MENTION_OPEN "@bo" MD_MENTION_CLOSE) && m.nfiles == 1,
+          "forwarded messages show the original, quoted, with its files");
+    msg_free(&m);
+}
+
 static void test_interaction(void)
 {
     msg_t m;
@@ -248,6 +260,7 @@ void entry(void)
     test_author_and_reply();
     test_parts();
     test_reaction_event();
+    test_forward();
     test_interaction();
     test_components();
     test_poll();
