@@ -269,7 +269,7 @@ int ra_login(const ra_events_t *ev, sb_t *token)
         WaitForSingleObject(r->heartbeat, INFINITE);
         CloseHandle(r->heartbeat);
     }
-    ws_shutdown(&r->ws);
+    ws_shutdown(&r->ws, WS_CLOSE_NORMAL);
     ws_close(&r->ws);
     rsa_free(r->key);
     r->key = NULL;
@@ -284,7 +284,7 @@ void ra_cancel(void)
     if (!r->ready)
         return;
     SetEvent(r->cancel);
-    ws_shutdown(&r->ws);
+    ws_shutdown(&r->ws, WS_CLOSE_NORMAL);
 }
 
 void ra_reset(void)

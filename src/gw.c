@@ -110,7 +110,7 @@ static DWORD WINAPI heartbeat_main(LPVOID arg)
         if (!InterlockedExchange(&g->acked, 0)) {
             /* Zombie connection: close it and let gw_run() resume. */
             InterlockedExchange(&g->zombie, 1);
-            ws_shutdown(&g->ws);
+            ws_shutdown(&g->ws, WS_CLOSE_RESUME);
             break;
         }
         if (!send_heartbeat(g))
@@ -306,7 +306,8 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
         WaitForSingleObject(g->heartbeat, INFINITE);
         CloseHandle(g->heartbeat);
     }
-    ws_shutdown(&g->ws);
+    /* Closing with 1000 would end the session on Discord's side: keep it when we mean to resume. */
+    ws_shutdown(&g->ws, result == GW_RESUME ? WS_CLOSE_RESUME : WS_CLOSE_NORMAL);
     ws_close(&g->ws);
     sb_free(&msg);
     return (gw_result_t)result;
@@ -340,7 +341,7 @@ void gw_stop(void)
     if (!g->ready)
         return;
     SetEvent(g->cancel);
-    ws_shutdown(&g->ws);
+    ws_shutdown(&g->ws, WS_CLOSE_NORMAL);
 }
 
 void gw_reset(void)

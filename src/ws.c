@@ -70,11 +70,11 @@ int ws_recv(ws_t *ws, sb_t *msg)
     }
 }
 
-void ws_shutdown(ws_t *ws)
+void ws_shutdown(ws_t *ws, unsigned short code)
 {
     EnterCriticalSection(&ws->lock);
     if (ws->socket)
-        WinHttpWebSocketShutdown(ws->socket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0);
+        WinHttpWebSocketShutdown(ws->socket, code, NULL, 0);
     LeaveCriticalSection(&ws->lock);
 }
 
