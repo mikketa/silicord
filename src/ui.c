@@ -2631,6 +2631,28 @@ static void maybe_load_older(void)
     }
 }
 
+/* How far local time is ahead of UTC on day "YYYY-MM-DD" (its own daylight saving time), in ms. */
+static long long local_offset_ms(const char *date)
+{
+    long long ms = msg_iso_ms(date);
+    unsigned long long t = (unsigned long long)ms * 10000ull + 116444736000000000ull;
+    FILETIME ft, uft;
+    SYSTEMTIME local, utc;
+    ULARGE_INTEGER u;
+
+    if (!ms)
+        return 0;
+    ft.dwLowDateTime = (DWORD)t;
+    ft.dwHighDateTime = (DWORD)(t >> 32);
+    /* Midnight of that day, read as local time, converted to UTC. */
+    if (!FileTimeToSystemTime(&ft, &local) || !TzSpecificLocalTimeToSystemTime(NULL, &local, &utc) ||
+        !SystemTimeToFileTime(&utc, &uft))
+        return 0;
+    u.LowPart = uft.dwLowDateTime;
+    u.HighPart = uft.dwHighDateTime;
+    return ((long long)t - (long long)u.QuadPart) / 10000;
+}
+
 /*
  * The locale's long date without its weekday ("September 29, 2026", "29 septembre 2026"):
  * the long date pattern with its "dddd" part and the separator after it removed.
@@ -9282,8 +9304,8 @@ static void search_params(const search_filter_t *f, int n, sb_t *params, sb_t *c
         case SF_BEFORE:
         case SF_AFTER:
         case SF_DURING:
-            lo = search_day_snowflake(f[k].value, f[k].key == SF_AFTER);
-            hi = search_day_snowflake(f[k].value, 1);
+            lo = search_day_snowflake(f[k].value, f[k].key == SF_AFTER, local_offset_ms(f[k].value));
+            hi = search_day_snowflake(f[k].value, 1, local_offset_ms(f[k].value));
             if ((ok = lo != 0) != 0) {
                 if (f[k].key != SF_BEFORE) {
                     wsprintfA(buf, "&min_id=%I64u", f[k].key == SF_AFTER ? hi : lo);

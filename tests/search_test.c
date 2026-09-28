@@ -18,11 +18,14 @@ void entry(void)
     sb_clear(&content);
     check(search_parse("from: alone", f, 8, &content) == 0 && str_eq(&content, "from: alone"), "a filter needs a value");
 
-    check(search_day_snowflake("2015-01-02", 0) == 86400000ull << 22, "a day's first snowflake");
-    check(search_day_snowflake("2015-01-01", 1) == 86400000ull << 22, "the next day's");
-    check(search_day_snowflake("yesterday", 0) == 0, "not a date");
-    check(search_day_snowflake("2026-02-30", 0) == 0 && search_day_snowflake("2026-13-01", 0) == 0, "not a day of the calendar");
-    check(search_day_snowflake("2014-12-31", 0) == 0, "before Discord's epoch");
+    check(search_day_snowflake("2015-01-02", 0, 0) == 86400000ull << 22, "a day's first snowflake");
+    check(search_day_snowflake("2015-01-01", 1, 0) == 86400000ull << 22, "the next day's");
+    check(search_day_snowflake("2015-01-02", 0, 3600000) == 82800000ull << 22,
+          "a local day starts earlier in UTC east of Greenwich");
+    check(search_day_snowflake("yesterday", 0, 0) == 0, "not a date");
+    check(search_day_snowflake("2026-02-30", 0, 0) == 0 && search_day_snowflake("2026-13-01", 0, 0) == 0,
+          "not a day of the calendar");
+    check(search_day_snowflake("2014-12-31", 0, 0) == 0, "before Discord's epoch");
     sb_free(&content);
     finish();
 }

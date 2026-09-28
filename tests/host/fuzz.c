@@ -458,7 +458,7 @@ static void fuzz_text(void)
     lstrcpynA(small, buf, sizeof small);
     msg_iso_ms(small);
     snowflake_ms(small);
-    search_day_snowflake(small, (int)rn(2));
+    search_day_snowflake(small, (int)rn(2), (long long)rn(50400001) - 43200000);
     emoji_by_name(small, strlen(small));
     {
         static qr_t qr;

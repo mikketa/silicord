@@ -14,5 +14,9 @@ typedef struct {
 
 /* Splits `q` into up to `max` filters and the words left, appended to `content`. Returns the filter count. */
 int search_parse(const char *q, search_filter_t *f, int max, sb_t *content);
-/* The first snowflake of day "YYYY-MM-DD" (UTC), or of the day after with `next_day`; 0 if not a date. */
-unsigned long long search_day_snowflake(const char *date, int next_day);
+/*
+ * The first snowflake of day "YYYY-MM-DD", or of the day after with `next_day`,
+ * in a time zone `utc_offset_ms` ahead of UTC (Discord searches by the user's
+ * local days); 0 if not a date.
+ */
+unsigned long long search_day_snowflake(const char *date, int next_day, long long utc_offset_ms);

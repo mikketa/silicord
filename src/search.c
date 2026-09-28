@@ -63,7 +63,7 @@ int search_parse(const char *q, search_filter_t *f, int max, sb_t *content)
     return count;
 }
 
-unsigned long long search_day_snowflake(const char *date, int next_day)
+unsigned long long search_day_snowflake(const char *date, int next_day, long long utc_offset_ms)
 {
     long long ms;
     int digits = 0;
@@ -72,6 +72,8 @@ unsigned long long search_day_snowflake(const char *date, int next_day)
         digits += *c >= '0' && *c <= '9';
     if (digits != 8 || date[4] != '-' || date[7] != '-')
         return 0;
-    ms = msg_iso_ms(date) + (next_day ? 86400000ll : 0);
+    if (!(ms = msg_iso_ms(date)))
+        return 0;
+    ms += (next_day ? 86400000ll : 0) - utc_offset_ms;
     return ms > DISCORD_EPOCH ? (unsigned long long)(ms - DISCORD_EPOCH) << 22 : 0;
 }
