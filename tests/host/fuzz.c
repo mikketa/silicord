@@ -268,7 +268,7 @@ static void fuzz_json(void)
         "CHANNEL_CREATE", "CHANNEL_DELETE", "CHANNEL_UPDATE", "GUILD_CREATE", "GUILD_DELETE", "GUILD_EMOJIS_UPDATE",
         "GUILD_MEMBER_UPDATE", "GUILD_ROLE_CREATE", "GUILD_ROLE_DELETE", "GUILD_ROLE_UPDATE", "GUILD_STICKERS_UPDATE",
         "GUILD_UPDATE", "THREAD_CREATE", "THREAD_DELETE", "THREAD_UPDATE", "USER_GUILD_SETTINGS_UPDATE",
-        "USER_SETTINGS_UPDATE"};
+        "USER_SETTINGS_UPDATE", "THREAD_MEMBER_UPDATE", "THREAD_MEMBERS_UPDATE"};
     sb_t doc = {0};
     json_t v, e;
     model_t *m;
@@ -326,6 +326,10 @@ static void fuzz_json(void)
         model_emoji_t em;
         if (m->guilds[g].first + m->guilds[g].count > m->nchannels)
             fail("a server's channels run past the channel list", doc.data);
+        if (m->guilds[g].hidden_first + m->guilds[g].hidden_count > m->nhidden)
+            fail("a server's hidden channels run past the hidden list", doc.data);
+        if (m->guilds[g].folder >= (int)m->nfolders)
+            fail("a server's folder is not in the folder list", doc.data);
         while (model_role_next(m, (int)g, &c, &role))
             ;
         for (c = 0; model_emoji_next(m, (int)g, &c, &em);)
