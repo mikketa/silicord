@@ -12,7 +12,8 @@ find_package(ZLIB REQUIRED)
 option(WERROR "Treat warnings as errors" OFF)
 
 set(SANITIZE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
-add_compile_options(-std=c11 -g -O1 -fshort-wchar -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
+# -Wshadow as MSVC warns (C4456) on shadowed locals and the Windows build uses /WX.
+add_compile_options(-std=c11 -g -O1 -fshort-wchar -Wall -Wextra -Wshadow -Wno-unused-parameter -Wno-sign-compare
                     -Wno-unknown-pragmas -Wno-missing-field-initializers ${SANITIZE})
 add_link_options(${SANITIZE})
 if(WERROR)
