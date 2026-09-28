@@ -36,3 +36,20 @@ jobs:
         with:
           name: silicord-win64
           path: build/silicord.exe
+
+  # The portable core, its tests and a fuzzer under AddressSanitizer and UBSan.
+  linux-sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zlib
+        run: sudo apt-get install -y zlib1g-dev ninja-build
+
+      - name: Configure
+        run: cmake -S tests/host -B build-host -G Ninja -DFUZZ_ITERATIONS=20000
+
+      - name: Build
+        run: cmake --build build-host
+
+      - name: Test and fuzz
+        run: ctest --test-dir build-host --output-on-failure
