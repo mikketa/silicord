@@ -29,7 +29,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 
 ## 3. Efficiency
 
-- [ ] Gateway `zlib-stream` compression (custom inflate, assembly candidate)
+- [x] Gateway `zlib-stream` compression (own inflater)
 - [ ] Local cache for channels and users
 - [x] Disk cache for CDN images, memory budget for decoded images
 - [x] Memory counters in `--debug` (Silicord's allocations against the whole process)
