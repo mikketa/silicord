@@ -1774,7 +1774,8 @@ static r_image_t *sticker_image(const char *id, int format)
 #define FILE_W 432
 #define REACTION_H 28
 
-enum { PART_NONE, PART_FILE, PART_MEDIA, PART_EMBED_TITLE, PART_REACTION, PART_SPOILER, PART_POLL };
+enum { PART_NONE, PART_FILE, PART_MEDIA, PART_EMBED_TITLE, PART_REACTION, PART_SPOILER, PART_POLL, PART_COMPONENT };
+#define COMP_H 32
 
 typedef struct {
     int kind, index;
@@ -2109,6 +2110,63 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             }
             y += S(160);
         }
+    }
+
+    /* A bot's buttons and select menus, row by row. */
+    if (m->ncomponents) {
+        int cx = x, row = m->components[0].row;
+        y += gap;
+        for (int i = 0; i < m->ncomponents; i++) {
+            msg_component_t *c = &m->components[i];
+            int bw, lw = c->label.len ? text_width(g_ui.f_h, c->label.data) : 0, link = c->style == BUTTON_LINK;
+            int has_emoji = c->emoji.len || c->emoji_id[0];
+            if (c->type == COMP_BUTTON)
+                bw = S(16) + (has_emoji ? S(20) : 0) + (has_emoji && lw ? S(6) : 0) + lw + (link ? S(20) : 0) + S(16);
+            else
+                bw = w < S(400) ? w : S(400);
+            if (c->row != row || (cx + bw > x + w && cx > x)) {
+                row = c->row;
+                cx = x;
+                y += S(COMP_H) + S(8);
+            }
+            if (draw && r_visible(y, S(COMP_H))) {
+                unsigned ink = c->disabled ? C_MUTED : C_INK;
+                if (c->type == COMP_BUTTON) {
+                    static const unsigned colors[] = {0xFF4E5058, 0xFF5865F2, 0xFF4E5058, 0xFF248046, 0xFFDA373C, 0xFF4E5058, 0xFF5865F2};
+                    unsigned fillc = colors[c->style >= 1 && c->style <= 6 ? c->style : 0];
+                    int ix = cx + S(16);
+                    r_round(cx, y, bw, S(COMP_H), S(8), c->disabled ? (fillc & 0x00FFFFFFu) | 0x80000000u : fillc);
+                    if (c->emoji_id[0]) {
+                        r_image_t *img = emoji_image(c->emoji_id, S(20));
+                        if (img)
+                            r_image(img, ix, y + (S(COMP_H) - S(20)) / 2, S(20), S(20), 0);
+                    } else if (c->emoji.len) {
+                        text(g_ui.f_body, ink, rect(ix - S(2), y, S(24), S(COMP_H)), c->emoji.data, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                    if (has_emoji)
+                        ix += S(20) + (lw ? S(6) : 0);
+                    if (lw)
+                        text(g_ui.f_h, ink, rect(ix, y, lw + S(2), S(COMP_H)), c->label.data, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    if (link) /* opens a page: the arrow says so */
+                        text(g_ui.f_small, ink, rect(ix + lw + S(4), y, S(16), S(COMP_H)), "\xE2\x86\x97",
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                } else {
+                    r_round(cx, y, bw, S(COMP_H) + S(8), S(8), 0xFF1E1F22);
+                    r_round_outline(cx, y, bw, S(COMP_H) + S(8), S(8), 1, 0xFF2A2A2A);
+                    text(g_ui.f_body, c->label.len && !c->disabled ? C_MUTED : C_FAINT,
+                         rect(cx + S(12), y, bw - S(48), S(COMP_H) + S(8)), c->label.len ? c->label.data : "Make a selection",
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    text(g_ui.f_body, ink, rect(cx + bw - S(32), y, S(20), S(COMP_H) + S(8)), "\xE2\x96\xBE",
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+            if (hit_part && hit(hx, hy, cx, y, bw, S(COMP_H) + (c->type == COMP_BUTTON ? 0 : S(8))))
+                *hit_part = (part_t){PART_COMPONENT, i};
+            if (c->type != COMP_BUTTON)
+                y += S(8); /* selects are taller */
+            cx += bw + S(8);
+        }
+        y += S(COMP_H);
     }
 
     /* Reactions: pills of emoji and count, ours highlighted. */
@@ -2491,6 +2549,15 @@ static void on_batch(msg_batch_t *b)
                 n->reactions = NULL;
                 n->nreactions = 0;
             }
+            if (n->ncomponents) {
+                msg_components_free(&g_ui.msgs[i]);
+                g_ui.msgs[i].components = n->components;
+                g_ui.msgs[i].ncomponents = n->ncomponents;
+                n->components = NULL;
+                n->ncomponents = 0;
+            }
+            if (n->app_id[0])
+                lstrcpynA(g_ui.msgs[i].app_id, n->app_id, sizeof n->app_id);
             if (n->poll) {
                 msg_poll_free(g_ui.msgs[i].poll);
                 g_ui.msgs[i].poll = n->poll;
@@ -3868,6 +3935,46 @@ static int part_hit(int x, int y, int *msg, part_t *part)
     return part->kind != PART_NONE;
 }
 
+/* A menu of a select's options at the mouse; returns the chosen value (to free) or NULL. */
+static char *pick_option(const sb_t *options)
+{
+    HMENU menu = CreatePopupMenu();
+    const char *p = options->data, *end = options->data + options->len;
+    POINT pt;
+    int n = 0, chosen;
+    char *value = NULL;
+
+    while (p < end && n < 25) {
+        const char *tab = p, *nl;
+        wchar_t *label;
+        while (tab < end && *tab != '\t')
+            tab++;
+        for (nl = tab; nl < end && *nl != '\n'; nl++)
+            ;
+        label = utf8_to_wide(p, (int)(tab - p));
+        AppendMenuW(menu, MF_STRING, (UINT_PTR)(++n), label);
+        mem_free(label);
+        p = nl + 1;
+    }
+    GetCursorPos(&pt);
+    chosen = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_ui.wnd, NULL);
+    DestroyMenu(menu);
+    for (p = options->data, n = 1; chosen && p < end; n++) {
+        const char *tab = p, *nl;
+        while (tab < end && *tab != '\t')
+            tab++;
+        for (nl = tab; nl < end && *nl != '\n'; nl++)
+            ;
+        if (n == chosen && tab < end) {
+            value = mem_alloc((size_t)(nl - tab));
+            CopyMemory(value, tab + 1, (size_t)(nl - tab - 1));
+            break;
+        }
+        p = nl + 1;
+    }
+    return value;
+}
+
 static int click_part(int x, int y)
 {
     int i;
@@ -3907,6 +4014,24 @@ static int click_part(int x, int y)
                 ids[n++] = pl->answers[k].id;
         }
         app_vote(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, ids, n);
+        break;
+    }
+    case PART_COMPONENT: {
+        msg_component_t *c = &m->components[p.index];
+        const char *channel = m->channel_id[0] ? m->channel_id : g_ui.msgs_channel;
+        if (c->disabled)
+            break;
+        if (c->type == COMP_BUTTON && c->style == BUTTON_LINK) {
+            open_url(c->url.data ? c->url.data : "");
+        } else if (c->type == COMP_BUTTON && c->custom_id.len) {
+            app_press_component(open_guild_id(), channel, m->id, m->app_id, m->flags, c->type, c->custom_id.data, NULL);
+        } else if (c->type == COMP_STRING_SELECT && c->options.len) {
+            char *value = pick_option(&c->options);
+            if (value) {
+                app_press_component(open_guild_id(), channel, m->id, m->app_id, m->flags, c->type, c->custom_id.data, value);
+                mem_free(value);
+            }
+        }
         break;
     }
     case PART_REACTION: {
