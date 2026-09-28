@@ -1592,6 +1592,8 @@ static void guild_state(int g, int *unread, int *mentions);
 static int divider_h(const msg_t *m);
 static void qs_open(void);
 static void qs_close(void);
+static void qs_rebuild(void);
+static void qs_place(void);
 static int pins_button_x(void);
 static void paint_settings(RECT rc);
 static void settings_open(void);
@@ -1624,6 +1626,7 @@ static void paint_tray(int x0, int w, int bottom);
 static void uploads_clear(void);
 static void picker_open(int mode, const char *msg_id, int right, int bottom);
 static void picker_close(void);
+static void picker_rebuild(void);
 static void picker_layout(void);
 static int members_shown(void);
 static int main_right(void);
@@ -3904,6 +3907,20 @@ static void replace_model(model_t *m)
         open_channel(-1); /* the channel is gone */
     } else {
         g_ui.channel = ch; /* same channel, new index: keep its messages */
+    }
+    /* The quick switcher and the picker hold indices into the old model. */
+    if (g_ui.qs) {
+        int sel = g_ui.qs_sel;
+        qs_rebuild();
+        g_ui.qs_sel = sel < g_ui.nqs ? sel : 0;
+        qs_place();
+    }
+    if (g_ui.picker && g_ui.picker_tab != TAB_GIFS) {
+        int scroll = g_ui.pick_scroll, max;
+        picker_rebuild();
+        max = g_ui.pick_content - (S(PICK_H) - S(PICK_FOOT) - S(PICK_TOP));
+        g_ui.pick_scroll = scroll < max ? scroll : max > 0 ? max : 0;
+        InvalidateRect(g_ui.picker, NULL, FALSE);
     }
     clamp_scroll();
     update_title();
