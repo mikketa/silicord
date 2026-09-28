@@ -8071,10 +8071,12 @@ static void paint_pins(void)
         int tw = r.right - r.left - S(76), th;
         wchar_t *body = plain_text(&m->text), when[64];
         r_image_t *img = user_avatar(m->author_id, m->avatar);
+        int eh;
         th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
         if (th > S(88))
             th = S(88);
-        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + S(12), S(6), 0xFF181818);
+        eh = msg_extras(m, r.left + S(60), 0, tw, 0, 0, 0, NULL);
+        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + eh + S(12), S(6), 0xFF181818);
         if (img)
             r_image(img, r.left + S(16), y + S(10), S(32), S(32), S(16));
         text(g_ui.f_h, C_INK, rect(r.left + S(60), y + S(8), tw, S(20)), m->author.data ? m->author.data : "",
@@ -8099,14 +8101,14 @@ static void paint_pins(void)
         }
         if (th)
             r_text(g_ui.f_body, ARGB(C_INK), r.left + S(60), y + S(30), tw, th, body, -1, R_LEFT | R_WRAP | R_ELLIPSIS);
-        else if (m->nfiles || m->nembeds)
-            text(g_ui.f_small, C_MUTED, rect(r.left + S(60), y + S(30), tw, S(18)), "Attachment", DT_LEFT | DT_SINGLELINE);
+        if (eh)
+            msg_extras(m, r.left + S(60), y + S(30) + th, tw, 1, 0, 0, NULL);
         mem_free(body);
         if (k < (int)ARRAYSIZE(g_ui.pin_top)) {
             g_ui.pin_top[k] = y + g_ui.pins_scroll;
-            g_ui.pin_h[k] = S(40) + th + S(12);
+            g_ui.pin_h[k] = S(40) + th + eh + S(12);
         }
-        y += S(40) + (th ? th : S(18)) + S(20);
+        y += S(40) + th + eh + S(20);
     }
     g_ui.pins_content = y + g_ui.pins_scroll - (r.top + S(56));
     r_unclip();
@@ -9415,14 +9417,18 @@ static void paint_search(void)
         wchar_t *body = plain_text(&m->text), when[64];
         r_image_t *img = user_avatar(m->author_id, m->avatar);
         char where[96];
+        int eh;
         th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
         if (th > S(66))
             th = S(66);
+        /* Pictures, GIFs and embeds come along, as in Discord's results. */
+        eh = msg_extras(m, r.left + S(60), 0, tw, 0, 0, 0, NULL);
         g_ui.result_y[k < 64 ? k : 63] = y;
         wsprintfA(where, "# %.80s", c >= 0 ? model_str(g_ui.model, chan(c)->name) : "unknown");
         text(g_ui.f_cat, C_MUTED, rect(r.left + S(16), y, tw, S(18)), where, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         y += S(20);
-        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + S(8), S(6), g_ui.result_hover == k ? 0xFF222222 : 0xFF181818);
+        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + S(8) + eh, S(6),
+                g_ui.result_hover == k ? 0xFF222222 : 0xFF181818);
         if (img)
             r_image(img, r.left + S(16), y + S(8), S(32), S(32), S(16));
         text(g_ui.f_h, C_INK, rect(r.left + S(60), y + S(6), tw, S(20)), m->author.data ? m->author.data : "",
@@ -9432,8 +9438,10 @@ static void paint_search(void)
                                           y + S(8), S(200), S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
         if (th)
             r_text(g_ui.f_body, ARGB(C_INK), r.left + S(60), y + S(28), tw, th, body, -1, R_LEFT | R_WRAP | R_ELLIPSIS);
+        if (eh)
+            msg_extras(m, r.left + S(60), y + S(28) + th, tw, 1, 0, 0, NULL);
         mem_free(body);
-        y += S(40) + th + S(16);
+        y += S(40) + th + eh + S(16);
         g_ui.result_h[k < 64 ? k : 63] = y - g_ui.result_y[k < 64 ? k : 63];
     }
     g_ui.results_content = y + g_ui.results_scroll - (r.top + S(56));
