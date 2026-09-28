@@ -18,6 +18,7 @@ extern "C" {
 #include "render.h"
 
 extern "C" {
+#include "apng.h"
 #include "mem.h"
 }
 
@@ -51,6 +52,7 @@ struct r_image {
     UINT disposal;        /* of the current frame */
     RECT area;            /* of the current frame, in the canvas */
     BYTE *saved;          /* canvas before the current frame, for disposal 3 */
+    apng_t *apng;         /* animated PNGs (avatar decorations) play through their own decoder */
 };
 
 static IDWriteFactory *g_dw;
@@ -503,6 +505,13 @@ static UINT meta_uint(IWICMetadataQueryReader *q, const wchar_t *name, UINT fall
 /* Composes frame `index` over the canvas, applying the previous frame's disposal first. */
 static int compose(r_image_t *img, UINT index)
 {
+    if (img->apng) {
+        unsigned ms = apng_next(img->apng, img->pixels);
+        if (!ms)
+            return 0;
+        img->delay = ms;
+        return 1;
+    }
     IWICBitmapFrameDecode *frame = NULL;
     IWICFormatConverter *conv = NULL;
     IWICMetadataQueryReader *q = NULL;
@@ -618,6 +627,32 @@ fail:
     return 0;
 }
 
+/* An APNG plays at its own size; its first frame replaces WIC's still image only once it decoded. */
+static void adopt_apng(r_image_t *img, const void *data, size_t n)
+{
+    apng_t *a = apng_open(data, n);
+    unsigned w, h, ms;
+    BYTE *canvas;
+
+    if (!a)
+        return;
+    apng_size(a, &w, &h);
+    canvas = (BYTE *)mem_alloc((size_t)w * h * 4);
+    if (!(ms = apng_next(a, canvas))) {
+        mem_free(canvas);
+        apng_free(a);
+        return;
+    }
+    mem_free(img->pixels);
+    img->pixels = canvas;
+    img->w = w;
+    img->h = h;
+    img->apng = a;
+    img->frames = apng_frames(a);
+    img->frame = 0;
+    img->delay = ms;
+}
+
 extern "C" int r_image_frame(const r_image_t *img)
 {
     return img ? (int)img->frame : 0;
@@ -651,7 +686,9 @@ extern "C" int r_image_lost(const r_image_t *img)
 
 extern "C" size_t r_image_bytes(const r_image_t *img)
 {
-    return img ? sizeof *img + (size_t)img->w * img->h * 4 * (img->saved ? 2 : 1) + img->file_n : 0;
+    return img ? sizeof *img + (size_t)img->w * img->h * 4 * (img->saved ? 2 : 1) + img->file_n +
+                     (img->apng ? apng_bytes(img->apng) : 0)
+               : 0;
 }
 
 extern "C" unsigned r_image_average(r_image_t *img)
@@ -1567,7 +1604,8 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
             img = NULL;
         } else {
             img->average = average_of(img);
-            adopt_animation(img, wic, data, n); /* GIFs with several frames play */
+            if (!adopt_animation(img, wic, data, n)) /* GIFs with several frames play */
+                adopt_apng(img, data, n);            /* and so do animated PNGs */
         }
     }
     if (conv)
@@ -1595,6 +1633,7 @@ extern "C" void r_image_free(r_image_t *img)
         img->stream->Release();
     if (img->wic)
         img->wic->Release();
+    apng_free(img->apng);
     mem_free(img->file);
     mem_free(img->saved);
     mem_free(img->pixels);
