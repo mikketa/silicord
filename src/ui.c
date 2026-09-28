@@ -816,6 +816,17 @@ static int rail_y(int i) /* i = -1 for home; a guild in a closed folder gives it
     return -10000;
 }
 
+static int rail_folder_y(int f)
+{
+    static int kind[512], index[512], ys[512];
+    int n = rail_rows(kind, index, ys, 512);
+
+    for (int k = 0; k < n; k++)
+        if (kind[k] == RAIL_FOLDER && index[k] == f)
+            return ys[k];
+    return -10000;
+}
+
 static int rail_content(void)
 {
     static int kind[512], index[512], ys[512];
@@ -3271,7 +3282,8 @@ static void paint_tooltip(void)
     tw = text_width(g_ui.f_h, name) + S(24);
     if (tw > S(320))
         tw = S(320);
-    y = rail_y(g_ui.hover_index) + (S(ICON) - th) / 2;
+    /* hover_index is a folder index for folders, not a guild one. */
+    y = (g_ui.hover_kind == HIT_FOLDER ? rail_folder_y(g_ui.hover_index) : rail_y(g_ui.hover_index)) + (S(ICON) - th) / 2;
     r_round(S(RAIL_W) + S(4), y, tw, th, S(6), ARGB(C_TIP));
     text(g_ui.f_h, C_INK, rect(S(RAIL_W) + S(16), y, tw - S(24), th), name,
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
