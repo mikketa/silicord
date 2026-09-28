@@ -31,6 +31,7 @@ add_library(silicord_core STATIC
   src/crypto.c
   src/emoji.c
   src/emoji_data.c
+  src/emoji_alias.c
   src/inflate.c
   src/json.c
   src/md.c

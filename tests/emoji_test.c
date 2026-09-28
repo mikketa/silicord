@@ -44,5 +44,16 @@ void entry(void)
     check(expands_to("`:smile:` ```\n:smile:\n``` :smile:", "`:smile:` ```\n:smile:\n``` \xF0\x9F\x98\x84"),
           "code is left alone");
     check(expands_to("time 10:30:00", "time 10:30:00"), "colons in text stay");
+    check(expands_to("``a :smile: b`` :smile:", "``a :smile: b`` \xF0\x9F\x98\x84"), "double backtick code stays");
+    check(expands_to("it`s :smile:", "it`s \xF0\x9F\x98\x84"), "a lone backtick does not start code");
+    check(expands_to(":slight_smile: :flag_us: :upside_down:", "\xF0\x9F\x99\x82 \xF0\x9F\x87\xBA\xF0\x9F\x87\xB8 \xF0\x9F\x99\x83"),
+          "Discord's own names");
+    check(expands_to(":thumbsup_tone2: :wave_medium_dark_skin_tone:",
+                     "\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBC \xF0\x9F\x91\x8B\xF0\x9F\x8F\xBE"),
+          "skin tone variants");
+    check(expands_to(":thumbsup::skin-tone-5:", "\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBF"), "a skin tone after the emoji");
+    check(expands_to(":woman_lifting_weights_tone1:",
+                     "\xF0\x9F\x8F\x8B\xF0\x9F\x8F\xBB\xE2\x80\x8D\xE2\x99\x80\xEF\xB8\x8F"),
+          "the tone goes after the first character of a sequence");
     finish();
 }

@@ -23,7 +23,7 @@ add_compile_definitions(__inline=inline WIN32_LEAN_AND_MEAN _GNU_SOURCE)
 include_directories(shim ${ROOT}/src ${ROOT}/tests)
 
 add_library(core STATIC
-  ${ROOT}/src/apng.c ${ROOT}/src/b64.c ${ROOT}/src/command.c ${ROOT}/src/emoji.c ${ROOT}/src/emoji_data.c
+  ${ROOT}/src/apng.c ${ROOT}/src/b64.c ${ROOT}/src/command.c ${ROOT}/src/emoji.c ${ROOT}/src/emoji_data.c ${ROOT}/src/emoji_alias.c
   ${ROOT}/src/inflate.c ${ROOT}/src/json.c ${ROOT}/src/md.c ${ROOT}/src/mem.c ${ROOT}/src/memberlist.c
   ${ROOT}/src/model.c ${ROOT}/src/msg.c ${ROOT}/src/profile.c ${ROOT}/src/qr.c ${ROOT}/src/sb.c
   ${ROOT}/src/search.c ${ROOT}/src/utf.c shim/shim.c)
