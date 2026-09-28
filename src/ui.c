@@ -90,14 +90,16 @@ typedef struct {
 #define PICK_HEAD 28
 
 enum { PICK_COMPOSER, PICK_REACTION };
-enum { PI_HEADER, PI_UNICODE, PI_CUSTOM };
+enum { PI_HEADER, PI_UNICODE, PI_CUSTOM, PI_STICKER };
+enum { TAB_EMOJI, TAB_GIFS, TAB_STICKERS };
+#define STICKER_COLS 4
 
 typedef struct {
     int kind;
-    int index;          /* unicode: into k_emoji; header: category (-1 for the server) */
-    char id[24];        /* custom */
+    int index;          /* unicode: into k_emoji; header: category, or -1 - guild for a server */
+    char id[24];        /* custom emoji, sticker */
     char name[40];
-    int animated;
+    int animated;       /* stickers: their format_type */
     int x, y, w, h;     /* in the picker, before scrolling */
 } pick_item_t;
 
@@ -265,7 +267,7 @@ typedef struct {
     char picker_msg[24];
     void *pick_items;
     int npick, pick_scroll, pick_hover, pick_content;
-    int picker_tab;            /* 0 emoji, 1 GIFs */
+    int picker_tab;            /* TAB_EMOJI, TAB_GIFS or TAB_STICKERS */
     sb_t gif_json;             /* last GIF answer */
     sb_t gif_query;
     int gif_x[40], gif_y[40], gif_w[40], gif_h[40], ngif;
@@ -1746,6 +1748,19 @@ static void request_authors(void)
 
 /* ---- Attachments, embeds, stickers, reactions ---- */
 
+/* A sticker's image (format_type 1 PNG, 2 APNG, 4 GIF), decoded once at message size for the picker too. */
+static r_image_t *sticker_image(const char *id, int format)
+{
+    char key[48], path[128];
+
+    wsprintfA(key, "st:%s", id);
+    if (format == 4)
+        wsprintfA(path, "https://media.discordapp.net/stickers/%s.gif?size=160", id);
+    else
+        wsprintfA(path, "/stickers/%s.png?size=160", id);
+    return image_get(key, path, S(160));
+}
+
 #define MEDIA_MAX_W 550
 #define MEDIA_MAX_H 350
 #define EMBED_MAX_W 516
@@ -2081,14 +2096,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             y += S(18);
         } else {
             if (draw && r_visible(y, S(160))) {
-                char key[48], path[128];
-                r_image_t *img;
-                wsprintfA(key, "st:%s", m->sticker_id);
-                if (m->sticker_format == 4)
-                    wsprintfA(path, "https://media.discordapp.net/stickers/%s.gif?size=160", m->sticker_id);
-                else
-                    wsprintfA(path, "/stickers/%s.png?size=160", m->sticker_id);
-                img = image_get(key, path, S(160));
+                r_image_t *img = sticker_image(m->sticker_id, m->sticker_format);
                 if (img)
                     r_image(img, x, y, S(160), S(160), 0);
             }
@@ -2577,6 +2585,17 @@ static const char *find_str(const char *hay, const char *needle)
 
     for (; *hay; hay++)
         if (CompareStringA(LOCALE_INVARIANT, 0, hay, (int)n, needle, (int)n) == CSTR_EQUAL)
+            return hay;
+    return NULL;
+}
+
+/* Same, ignoring case. */
+static const char *find_str_ci(const char *hay, const char *needle)
+{
+    size_t n = (size_t)lstrlenA(needle);
+
+    for (; *hay; hay++)
+        if (CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, hay, (int)n, needle, (int)n) == CSTR_EQUAL)
             return hay;
     return NULL;
 }
@@ -5476,6 +5495,34 @@ static void on_member_list(json_t d)
 
 /* ---- Emoji picker ---- */
 
+/* The composer's tabs, in Discord's order. */
+#define PICK_TAB_W 90
+static const int k_pick_tabs[] = {TAB_GIFS, TAB_STICKERS, TAB_EMOJI};
+static const char *const k_pick_tab_names[] = {"GIFs", "Stickers", "Emoji"};
+
+static const wchar_t *picker_cue(void)
+{
+    return g_ui.picker_tab == TAB_GIFS       ? L"Search GIFs"
+           : g_ui.picker_tab == TAB_STICKERS ? L"Find the perfect sticker"
+                                             : L"Find the perfect emoji";
+}
+
+/* Sends a GIF link or a sticker from the picker, as a reply when one is being written. */
+static void send_picked(const char *text, const char *sticker)
+{
+    const char *reply = g_ui.bar == BAR_REPLY ? g_ui.bar_msg : NULL;
+
+    if (sticker)
+        app_send_sticker(g_ui.msgs_channel, sticker, reply, g_ui.bar_mention);
+    else if (reply)
+        app_send_reply(g_ui.msgs_channel, text, reply, g_ui.bar_mention);
+    else
+        app_send_message(g_ui.msgs_channel, text);
+    if (g_ui.bar == BAR_REPLY)
+        bar_close();
+    g_ui.msg_scroll = 0;
+}
+
 
 static void picker_rebuild(void)
 {
@@ -5499,6 +5546,34 @@ static void picker_rebuild(void)
         }                                                                              \
         ((pick_item_t *)g_ui.pick_items)[n++] = (it);                                  \
     } while (0)
+    if (g_ui.picker_tab == TAB_STICKERS) {
+        /* The open server's stickers first; other servers' need Nitro. */
+        int ng = g_ui.model ? (int)g_ui.model->nguilds : 0;
+        for (int k = -1; k < ng; k++) {
+            int g = k < 0 ? g_ui.guild : k, header = 0;
+            if (g < 0 || (k >= 0 && (g == g_ui.guild || !g_ui.model->premium)))
+                continue;
+            cursor = 0;
+            while (model_sticker_next(g_ui.model, g, &cursor, &e)) {
+                pick_item_t it = {PI_STICKER, 0};
+                int len = e.name_len < 39 ? e.name_len : 39;
+                if (e.format == 3) /* Lottie: not drawn */
+                    continue;
+                lstrcpynA(it.name, e.name, len + 1);
+                if (q[0] && !find_str_ci(it.name, q))
+                    continue;
+                if (!header) {
+                    pick_item_t h = {PI_HEADER, -1 - g};
+                    PUSH(h);
+                    header = 1;
+                }
+                lstrcpynA(it.id, e.id, sizeof it.id);
+                it.animated = e.format;
+                PUSH(it);
+            }
+        }
+        goto done;
+    }
     /* The server's own emoji first, like Discord. */
     if (g_ui.model && g_ui.guild >= 0) {
         int header = 0;
@@ -5515,7 +5590,7 @@ static void picker_rebuild(void)
             if (!match)
                 continue;
             if (!header) {
-                pick_item_t h = {PI_HEADER, -1};
+                pick_item_t h = {PI_HEADER, -1 - g_ui.guild};
                 PUSH(h);
                 header = 1;
             }
@@ -5539,6 +5614,7 @@ static void picker_rebuild(void)
             PUSH(it);
         }
     }
+done:
 #undef PUSH
     g_ui.npick = n;
     g_ui.pick_scroll = 0;
@@ -5549,31 +5625,33 @@ static void picker_rebuild(void)
 /* Places the items: headers take a full row, emoji fill rows of PICK_COLS. */
 static void picker_layout(void)
 {
-    int col = 0, y = S(PICK_TOP), x0 = (S(PICK_W) - PICK_COLS * S(PICK_CELL)) / 2;
+    int stickers = g_ui.picker_tab == TAB_STICKERS, cols = stickers ? STICKER_COLS : PICK_COLS;
+    int cell = stickers ? (S(PICK_W) - S(24)) / STICKER_COLS : S(PICK_CELL), col = 0, y = S(PICK_TOP);
+    int x0 = (S(PICK_W) - cols * cell) / 2;
 
     for (int i = 0; i < g_ui.npick; i++) {
         pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
         if (it->kind == PI_HEADER) {
             if (col) {
-                y += S(PICK_CELL);
+                y += cell;
                 col = 0;
             }
             it->x = x0;
             it->y = y;
-            it->w = PICK_COLS * S(PICK_CELL);
+            it->w = cols * cell;
             it->h = S(PICK_HEAD);
             y += S(PICK_HEAD);
         } else {
-            it->x = x0 + col * S(PICK_CELL);
+            it->x = x0 + col * cell;
             it->y = y;
-            it->w = it->h = S(PICK_CELL);
-            if (++col == PICK_COLS) {
+            it->w = it->h = cell;
+            if (++col == cols) {
                 col = 0;
-                y += S(PICK_CELL);
+                y += cell;
             }
         }
     }
-    g_ui.pick_content = y + (col ? S(PICK_CELL) : 0) - S(PICK_TOP);
+    g_ui.pick_content = y + (col ? cell : 0) - S(PICK_TOP);
 }
 
 static void picker_paint(void)
@@ -5584,17 +5662,16 @@ static void picker_paint(void)
     r_round(0, 0, w, h, S(8), 0xFF111111);
     r_round_outline(0, 0, w, h, S(8), 1, 0xFF2A2A2A);
     if (g_ui.picker_mode == PICK_COMPOSER) {
-        static const char *const tabs[] = {"Emoji", "GIFs"};
-        for (int t = 0; t < 2; t++) {
-            int tx = S(12) + t * S(76);
-            if (g_ui.picker_tab == t)
-                r_round(tx, S(10), S(68), S(26), S(6), ARGB(C_SELECT));
-            text(g_ui.f_h, g_ui.picker_tab == t ? C_INK : C_MUTED, rect(tx, S(10), S(68), S(26)), tabs[t],
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        for (int t = 0; t < 3; t++) {
+            int tx = S(12) + t * S(PICK_TAB_W), id = k_pick_tabs[t];
+            if (g_ui.picker_tab == id)
+                r_round(tx, S(10), S(PICK_TAB_W) - S(8), S(26), S(6), ARGB(C_SELECT));
+            text(g_ui.f_h, g_ui.picker_tab == id ? C_INK : C_MUTED, rect(tx, S(10), S(PICK_TAB_W) - S(8), S(26)),
+                 k_pick_tab_names[t], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
     r_round(S(12), S(PICK_TABS), w - S(24), S(32), S(6), 0xFF1E1E1E);
-    if (g_ui.picker_tab == 1) {
+    if (g_ui.picker_tab == TAB_GIFS) {
         gifs_paint(w, h);
         return;
     }
@@ -5605,14 +5682,18 @@ static void picker_paint(void)
         if (y_ + h_ <= S(PICK_TOP) - S(4) || y_ >= grid_bottom || !r_visible(y_, h_))
             continue;
         if (it->kind == PI_HEADER) {
-            const char *title = it->index < 0 ? model_str(g_ui.model, g_ui.model->guilds[g_ui.guild].name)
+            const char *title = it->index < 0 ? model_str(g_ui.model, g_ui.model->guilds[-1 - it->index].name)
                                               : k_emoji_categories[it->index].name;
             text(g_ui.f_cat, C_MUTED, rect(x_ + S(4), y_, w_ - S(8), h_), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             continue;
         }
         if (g_ui.pick_hover == i)
             r_round(x_ + S(2), y_ + S(2), w_ - S(4), h_ - S(4), S(6), ARGB(C_SELECT));
-        if (it->kind == PI_CUSTOM) {
+        if (it->kind == PI_STICKER) {
+            r_image_t *img = sticker_image(it->id, it->animated);
+            if (img)
+                r_image(img, x_ + S(6), y_ + S(6), w_ - S(12), h_ - S(12), 0);
+        } else if (it->kind == PI_CUSTOM) {
             char key[48], path[96];
             r_image_t *img;
             wsprintfA(key, "e:%s", it->id);
@@ -5637,11 +5718,13 @@ static void picker_paint(void)
             r_text(g_ui.f_emoji, ARGB(C_INK), S(12), grid_bottom, S(40), S(PICK_FOOT), we, -1, R_CENTER | R_VCENTER | R_SINGLE);
             mem_free(we);
         }
-        wsprintfA(label, ":%.40s:", it->name);
+        wsprintfA(label, it->kind == PI_STICKER ? "%.40s" : ":%.40s:", it->name);
         text(g_ui.f_h, C_INK, rect(S(60), grid_bottom, w - S(72), S(PICK_FOOT)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     } else {
         text(g_ui.f_small, C_FAINT, rect(S(16), grid_bottom, w - S(32), S(PICK_FOOT)),
-             g_ui.npick ? "Pick an emoji" : "No emoji match", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+             g_ui.picker_tab == TAB_STICKERS ? (g_ui.npick ? "Pick a sticker" : "No stickers here")
+                                             : g_ui.npick ? "Pick an emoji" : "No emoji match",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -5697,7 +5780,11 @@ static void picker_choose(int i)
 {
     const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[i];
 
-    if (g_ui.picker_mode == PICK_REACTION) {
+    if (it->kind == PI_STICKER) {
+        if (open_is_text())
+            send_picked(NULL, it->id);
+        picker_close();
+    } else if (g_ui.picker_mode == PICK_REACTION) {
         int m = find_msg(g_ui.picker_msg);
         if (m >= 0) {
             msg_reaction_t r = {0};
@@ -5773,7 +5860,7 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_COMMAND:
         if ((HWND)lp == g_ui.picker_edit && HIWORD(wp) == EN_CHANGE) {
-            if (g_ui.picker_tab == 1) {
+            if (g_ui.picker_tab == TAB_GIFS) {
                 SetTimer(wnd, 1, 400, NULL); /* search once typing pauses */
             } else {
                 picker_rebuild();
@@ -5811,19 +5898,18 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     case WM_LBUTTONUP: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), h;
-        if (g_ui.picker_mode == PICK_COMPOSER && y >= S(10) && y < S(36) && x >= S(12) && x < S(12) + 2 * S(76)) {
-            g_ui.picker_tab = (x - S(12)) / S(76);
+        if (g_ui.picker_mode == PICK_COMPOSER && y >= S(10) && y < S(36) && x >= S(12) && x < S(12) + 3 * S(PICK_TAB_W)) {
+            g_ui.picker_tab = k_pick_tabs[(x - S(12)) / S(PICK_TAB_W)];
             SetWindowTextW(g_ui.picker_edit, L"");
-            SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE,
-                         (LPARAM)(g_ui.picker_tab == 1 ? L"Search GIFs" : L"Find the perfect emoji"));
-            g_ui.pick_scroll = 0;
+            SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE, (LPARAM)picker_cue());
             KillTimer(wnd, 1); /* clearing the edit armed a search */
-            if (g_ui.picker_tab == 1)
+            picker_rebuild();
+            if (g_ui.picker_tab == TAB_GIFS)
                 app_fetch_gifs("");
             InvalidateRect(wnd, NULL, FALSE);
             return 0;
         }
-        if (g_ui.picker_tab == 1) {
+        if (g_ui.picker_tab == TAB_GIFS) {
             gifs_click(x, y);
             return 0;
         }
@@ -5856,7 +5942,7 @@ static void on_gifs(const sb_t *p)
     wchar_t now[64];
     sb_t cur = {0};
 
-    if (!g_ui.picker || g_ui.picker_tab != 1)
+    if (!g_ui.picker || g_ui.picker_tab != TAB_GIFS)
         return;
     GetWindowTextW(g_ui.picker_edit, now, 64);
     wide_to_utf8(now, (size_t)lstrlenW(now), &cur);
@@ -5947,7 +6033,7 @@ static void gifs_click(int x, int y)
             if (json_get(g, "url", &v))
                 json_str(v, &url);
             if (url.len && open_is_text())
-                app_send_message(g_ui.msgs_channel, url.data);
+                send_picked(url.data, NULL);
             sb_free(&url);
             picker_close();
             return;
@@ -5979,7 +6065,7 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     g_ui.picker_mode = mode;
     lstrcpynA(g_ui.picker_msg, msg_id ? msg_id : "", sizeof g_ui.picker_msg);
     if (mode != PICK_COMPOSER)
-        g_ui.picker_tab = 0;
+        g_ui.picker_tab = TAB_EMOJI;
     if (!g_ui.picker_brush)
         g_ui.picker_brush = CreateSolidBrush(RGB(0x1E, 0x1E, 0x1E));
     g_ui.picker = CreateWindowExW(0, L"SilicordEmoji", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, x, y, w, h,
@@ -5989,10 +6075,9 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     g_ui.picker_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.picker_edit, GWLP_WNDPROC, (LONG_PTR)picker_edit_proc);
     font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
     SendMessageW(g_ui.picker_edit, WM_SETFONT, (WPARAM)font, FALSE);
-    SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE,
-                 (LPARAM)(g_ui.picker_tab == 1 ? L"Search GIFs" : L"Find the perfect emoji"));
+    SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE, (LPARAM)picker_cue());
     picker_rebuild();
-    if (g_ui.picker_tab == 1)
+    if (g_ui.picker_tab == TAB_GIFS)
         app_fetch_gifs("");
     SetWindowPos(g_ui.picker, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     SetFocus(g_ui.picker_edit);
