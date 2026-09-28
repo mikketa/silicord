@@ -1,44 +1,9 @@
 #include <string.h>
-#include "vp8.h"
+#include "vp8_int.h"
 #include "vp8_tables.h"
 #include "mem.h"
 
 #define BORDER 32 /* around the luma planes; half of it around chroma */
-
-/* Macroblock modes, then subblock modes, numbered as the probability tables are indexed. */
-enum { DC_PRED, V_PRED, H_PRED, TM_PRED, B_PRED, NEARESTMV, NEARMV, ZEROMV, NEWMV, SPLITMV };
-enum { B_DC_PRED, B_TM_PRED, B_VE_PRED, B_HE_PRED, B_LD_PRED, B_RD_PRED, B_VR_PRED, B_VL_PRED, B_HD_PRED, B_HU_PRED,
-       LEFT4X4, ABOVE4X4, ZERO4X4, NEW4X4 };
-enum { CURRENT, LAST, GOLDEN, ALTREF };
-enum { TYPE_Y_AFTER_Y2, TYPE_Y2, TYPE_UV, TYPE_Y }; /* coefficient probability sets */
-
-/* Trees (RFC 6386, section 8.1): positive entries index the next pair, others are negated leaves. */
-static const signed char k_kf_y_mode_tree[8] = {-B_PRED, 2, 4, 6, -DC_PRED, -V_PRED, -H_PRED, -TM_PRED};
-static const signed char k_y_mode_tree[8] = {-DC_PRED, 2, 4, 6, -V_PRED, -H_PRED, -TM_PRED, -B_PRED};
-static const signed char k_uv_mode_tree[6] = {-DC_PRED, 2, -V_PRED, 4, -H_PRED, -TM_PRED};
-static const signed char k_b_mode_tree[18] = {-B_DC_PRED, 2, -B_TM_PRED, 4, -B_VE_PRED, 6, 8, 12, -B_HE_PRED, 10,
-                                              -B_RD_PRED, -B_VR_PRED, -B_LD_PRED, 14, -B_VL_PRED, 16, -B_HD_PRED, -B_HU_PRED};
-static const signed char k_small_mv_tree[14] = {2, 8, 4, 6, -0, -1, -2, -3, 10, 12, -4, -5, -6, -7};
-static const signed char k_mv_ref_tree[8] = {-ZEROMV, 2, -NEARESTMV, 4, -NEARMV, 6, -NEWMV, -SPLITMV};
-static const signed char k_submv_ref_tree[6] = {-LEFT4X4, 2, -ABOVE4X4, 4, -ZERO4X4, -NEW4X4};
-static const signed char k_split_mv_tree[6] = {-3, 2, -2, 4, -0, -1};
-
-static const unsigned char k_zigzag[16] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
-static const unsigned char k_bands[16] = {0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7};
-/* Extra bits of the DCT_CAT3..6 tokens, most significant first (DCT_CAT1 and 2 are written inline). */
-static const unsigned char k_cat3[] = {173, 148, 140, 0};
-static const unsigned char k_cat4[] = {176, 155, 140, 135, 0};
-static const unsigned char k_cat5[] = {180, 157, 141, 134, 130, 0};
-static const unsigned char k_cat6[] = {254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129, 0};
-
-static const short k_sixtap[8][6] = {
-    {0, 0, 128, 0, 0, 0},     {0, -6, 123, 12, -1, 0}, {2, -11, 108, 36, -8, 1}, {0, -9, 93, 50, -6, 0},
-    {3, -16, 77, 77, -16, 3}, {0, -6, 50, 93, -9, 0},  {1, -8, 36, 108, -11, 2}, {0, -1, 12, 123, -6, 0},
-};
-static const short k_bilinear[8][6] = {
-    {0, 0, 128, 0, 0, 0}, {0, 0, 112, 16, 0, 0}, {0, 0, 96, 32, 0, 0}, {0, 0, 80, 48, 0, 0},
-    {0, 0, 64, 64, 0, 0}, {0, 0, 48, 80, 0, 0},  {0, 0, 32, 96, 0, 0}, {0, 0, 16, 112, 0, 0},
-};
 
 /* ---- Boolean entropy decoder (section 7) ---- */
 
@@ -121,17 +86,6 @@ static int bd_tree(bd_t *d, const signed char *tree, const unsigned char *probs)
 /* ---- State ---- */
 
 typedef struct {
-    short x, y; /* in eighths of a pixel (quarter-pel values, doubled) */
-} mv_t;
-
-typedef struct {
-    unsigned char y_mode, uv_mode, segment, ref, skip, coded;
-    mv_t mv;
-    mv_t mvs[16];              /* SPLITMV */
-    unsigned char modes[16];   /* B_PRED */
-} mb_t;
-
-typedef struct {
     unsigned char *mem, *y, *u, *v;
 } frame_t;
 
@@ -145,7 +99,7 @@ struct vp8_decoder {
     int w, h, mb_cols, mb_rows, stride, uv_stride, have_key;
     frame_t frames[4];
     int ref[4];               /* frames[] index of CURRENT, LAST, GOLDEN and ALTREF */
-    mb_t *mbs;                /* (mb_rows + 1) x (mb_cols + 1): a border row above and column left */
+    vp8_mb_t *mbs;                /* (mb_rows + 1) x (mb_cols + 1): a border row above and column left */
     unsigned char (*above_ctx)[9], left_ctx[9];
 
     int key, version, show;
@@ -165,11 +119,9 @@ struct vp8_decoder {
     int refresh_last, refresh_gf, refresh_arf, copy_gf, copy_arf, sign_bias[4], refresh_entropy;
     entropy_t ent, saved;
     int skip_enabled, prob_skip, prob_inter, prob_last, prob_gf;
-    const short (*filters)[6];
 
     short coeffs[25 * 16];
-    unsigned char edge[32 * 32];   /* a reference block extended past the frame edges */
-    unsigned char pass[16 * 21];   /* the horizontal pass of subpixel filtering */
+    vp8i_scratch_t scratch;
 };
 
 vp8_decoder_t *vp8_decoder_new(void)
@@ -222,11 +174,11 @@ static void alloc_frames(vp8_decoder_t *d, int w, int h)
         f->u = f->mem + y_size + BORDER / 2 * d->uv_stride + BORDER / 2;
         f->v = f->u + uv_size;
     }
-    d->mbs = mem_alloc(sizeof(mb_t) * (size_t)(d->mb_cols + 1) * (size_t)(d->mb_rows + 1));
+    d->mbs = mem_alloc(sizeof(vp8_mb_t) * (size_t)(d->mb_cols + 1) * (size_t)(d->mb_rows + 1));
     d->above_ctx = mem_alloc(9 * (size_t)d->mb_cols);
 }
 
-static mb_t *mb_at(vp8_decoder_t *d, int row, int col)
+static vp8_mb_t *mb_at(vp8_decoder_t *d, int row, int col)
 {
     return &d->mbs[(row + 1) * (d->mb_cols + 1) + col + 1];
 }
@@ -354,7 +306,7 @@ static void read_entropy(vp8_decoder_t *d, bd_t *b)
 
 /* ---- Modes and motion vectors (sections 11, 16 and 17) ---- */
 
-static int above_b_mode(const mb_t *m, const mb_t *above, int b)
+static int above_b_mode(const vp8_mb_t *m, const vp8_mb_t *above, int b)
 {
     if (b >= 4)
         return m->modes[b - 4];
@@ -372,7 +324,7 @@ static int above_b_mode(const mb_t *m, const mb_t *above, int b)
     }
 }
 
-static int left_b_mode(const mb_t *m, const mb_t *left, int b)
+static int left_b_mode(const vp8_mb_t *m, const vp8_mb_t *left, int b)
 {
     if (b & 3)
         return m->modes[b - 1];
@@ -404,117 +356,57 @@ static int read_mv_component(bd_t *b, const unsigned char *p)
         if (!(x & 0xFFF0) || bd_get(b, p[LONG + 3]))
             x += 8;
     } else {
-        x = bd_tree(b, k_small_mv_tree, p + SHORT);
+        x = bd_tree(b, vp8_small_mv_tree, p + SHORT);
     }
     if (x && bd_get(b, p[SIGN]))
         x = -x;
     return x * 2;
 }
 
-static mv_t read_mv(vp8_decoder_t *d, bd_t *b)
+static vp8_mv_t read_mv(vp8_decoder_t *d, bd_t *b)
 {
-    mv_t mv;
+    vp8_mv_t mv;
 
     mv.y = (short)read_mv_component(b, d->ent.mv[0]);
     mv.x = (short)read_mv_component(b, d->ent.mv[1]);
     return mv;
 }
 
-static int mv_eq(mv_t a, mv_t b)
-{
-    return a.x == b.x && a.y == b.y;
-}
-
-static int mv_zero(mv_t a)
-{
-    return !a.x && !a.y;
-}
-
-static mv_t clamp_mv(mv_t mv, int left, int right, int top, int bottom)
-{
-    mv.x = (short)(mv.x < left ? left : mv.x > right ? right : mv.x);
-    mv.y = (short)(mv.y < top ? top : mv.y > bottom ? bottom : mv.y);
-    return mv;
-}
-
-/* The neighbours' vectors (above, left, above-left), weighted into best, nearest and near (section 16.3). */
-static void find_near_mvs(vp8_decoder_t *d, const mb_t *m, const mb_t *above, const mb_t *left, mv_t near_mvs[4],
-                          int cnt[4])
-{
-    const mb_t *neighbours[3] = {above, left, above - 1};
-    static const int weight[3] = {2, 2, 1};
-    int n = 0; /* index of the last vector found */
-
-    memset(near_mvs, 0, sizeof(mv_t) * 4);
-    cnt[0] = cnt[1] = cnt[2] = cnt[3] = 0;
-    for (int k = 0; k < 3; k++) {
-        const mb_t *nb = neighbours[k];
-        if (nb->ref == CURRENT)
-            continue;
-        if (!mv_zero(nb->mv)) {
-            mv_t mv = nb->mv;
-            if (d->sign_bias[nb->ref] ^ d->sign_bias[m->ref]) {
-                mv.x = (short)-mv.x;
-                mv.y = (short)-mv.y;
-            }
-            if (k == 0 || !mv_eq(mv, near_mvs[n]))
-                near_mvs[++n] = mv;
-            cnt[n] += weight[k];
-        } else {
-            cnt[0] += weight[k];
-        }
-    }
-    /* Three distinct vectors: the above-left one may merge with nearest. */
-    if (cnt[3] && mv_eq(near_mvs[3], near_mvs[1]))
-        cnt[1] += 1;
-    cnt[3] = (above->y_mode == SPLITMV) * 2 + (left->y_mode == SPLITMV) * 2 + ((above - 1)->y_mode == SPLITMV);
-    if (cnt[2] > cnt[1]) {
-        int t = cnt[1];
-        mv_t v = near_mvs[1];
-        cnt[1] = cnt[2];
-        cnt[2] = t;
-        near_mvs[1] = near_mvs[2];
-        near_mvs[2] = v;
-    }
-    if (cnt[1] >= cnt[0])
-        near_mvs[0] = near_mvs[1];
-}
-
-static mv_t left_block_mv(const mb_t *m, const mb_t *left, int b)
+static vp8_mv_t left_block_mv(const vp8_mb_t *m, const vp8_mb_t *left, int b)
 {
     if (b & 3)
         return m->mvs[b - 1];
     return left->y_mode == SPLITMV ? left->mvs[b + 3] : left->mv;
 }
 
-static mv_t above_block_mv(const mb_t *m, const mb_t *above, int b)
+static vp8_mv_t above_block_mv(const vp8_mb_t *m, const vp8_mb_t *above, int b)
 {
     if (b >= 4)
         return m->mvs[b - 4];
     return above->y_mode == SPLITMV ? above->mvs[b + 12] : above->mv;
 }
 
-static void read_split_mv(vp8_decoder_t *d, bd_t *b, mb_t *m, const mb_t *left, const mb_t *above, mv_t best)
+static void read_split_mv(vp8_decoder_t *d, bd_t *b, vp8_mb_t *m, const vp8_mb_t *left, const vp8_mb_t *above, vp8_mv_t best)
 {
-    int id = bd_tree(b, k_split_mv_tree, vp8_split_mv_probs), mask = 0;
+    int id = bd_tree(b, vp8_split_mv_tree, vp8_split_mv_probs), mask = 0;
     const unsigned char *part = vp8_mv_partitions[id];
 
     for (int j = 0; mask != 0xFFFF; j++) {
         int k = 0, ctx;
-        mv_t l, a, mv;
+        vp8_mv_t l, a, mv;
         while (part[k] != j)
             k++;
         l = left_block_mv(m, left, k);
         a = above_block_mv(m, above, k);
-        if (mv_eq(l, a))
-            ctx = mv_zero(l) ? 4 : 3;
-        else if (mv_zero(a))
+        if (vp8i_mv_eq(l, a))
+            ctx = vp8i_mv_zero(l) ? 4 : 3;
+        else if (vp8i_mv_zero(a))
             ctx = 2;
-        else if (mv_zero(l))
+        else if (vp8i_mv_zero(l))
             ctx = 1;
         else
             ctx = 0;
-        switch (bd_tree(b, k_submv_ref_tree, vp8_submv_ref_probs[ctx])) {
+        switch (bd_tree(b, vp8_submv_ref_tree, vp8_submv_ref_probs[ctx])) {
         case LEFT4X4:
             mv = l;
             break;
@@ -538,44 +430,44 @@ static void read_split_mv(vp8_decoder_t *d, bd_t *b, mb_t *m, const mb_t *left, 
     }
 }
 
-static void read_inter_modes(vp8_decoder_t *d, bd_t *b, mb_t *m, int row, int col)
+static void read_inter_modes(vp8_decoder_t *d, bd_t *b, vp8_mb_t *m, int row, int col)
 {
-    mb_t *above = mb_at(d, row - 1, col), *left = m - 1;
-    mv_t near_mvs[4];
+    vp8_mb_t *above = mb_at(d, row - 1, col), *left = m - 1;
+    vp8_mv_t near_mvs[4];
     int cnt[4];
     unsigned char probs[4];
     int to_left = -((col + 1) << 7), to_right = (d->mb_cols - col) << 7;
     int to_top = -((row + 1) << 7), to_bottom = (d->mb_rows - row) << 7;
 
     m->ref = (unsigned char)(bd_get(b, d->prob_last) ? 2 + bd_get(b, d->prob_gf) : LAST);
-    find_near_mvs(d, m, above, left, near_mvs, cnt);
+    vp8i_find_near_mvs(d->sign_bias, m, above, left, near_mvs, cnt);
     for (int i = 0; i < 4; i++)
         probs[i] = vp8_mv_counts_to_probs[cnt[i]][i];
-    m->y_mode = m->uv_mode = (unsigned char)bd_tree(b, k_mv_ref_tree, probs);
+    m->y_mode = m->uv_mode = (unsigned char)bd_tree(b, vp8_mv_ref_tree, probs);
     switch (m->y_mode) {
     case NEARESTMV:
-        m->mv = clamp_mv(near_mvs[1], to_left, to_right, to_top, to_bottom);
+        m->mv = vp8i_clamp_mv(near_mvs[1], to_left, to_right, to_top, to_bottom);
         break;
     case NEARMV:
-        m->mv = clamp_mv(near_mvs[2], to_left, to_right, to_top, to_bottom);
+        m->mv = vp8i_clamp_mv(near_mvs[2], to_left, to_right, to_top, to_bottom);
         break;
     case ZEROMV:
         m->mv.x = m->mv.y = 0;
         break;
     case NEWMV: {
-        mv_t best = clamp_mv(near_mvs[0], to_left, to_right, to_top, to_bottom), mv = read_mv(d, b);
+        vp8_mv_t best = vp8i_clamp_mv(near_mvs[0], to_left, to_right, to_top, to_bottom), mv = read_mv(d, b);
         m->mv.x = (short)(mv.x + best.x);
         m->mv.y = (short)(mv.y + best.y);
         break;
     }
     default:
-        read_split_mv(d, b, m, left, above, clamp_mv(near_mvs[0], to_left, to_right, to_top, to_bottom));
+        read_split_mv(d, b, m, left, above, vp8i_clamp_mv(near_mvs[0], to_left, to_right, to_top, to_bottom));
         m->mv = m->mvs[15];
         break;
     }
 }
 
-static void read_modes(vp8_decoder_t *d, bd_t *b, mb_t *m, int row, int col)
+static void read_modes(vp8_decoder_t *d, bd_t *b, vp8_mb_t *m, int row, int col)
 {
     if (d->seg.update_map)
         m->segment = (unsigned char)(bd_get(b, d->seg.probs[0]) ? 2 + bd_get(b, d->seg.probs[2]) : bd_get(b, d->seg.probs[1]));
@@ -583,22 +475,22 @@ static void read_modes(vp8_decoder_t *d, bd_t *b, mb_t *m, int row, int col)
         m->segment = 0;
     m->skip = (unsigned char)(d->skip_enabled ? bd_get(b, d->prob_skip) : 0);
     if (d->key) {
-        const mb_t *above = mb_at(d, row - 1, col), *left = m - 1;
-        m->y_mode = (unsigned char)bd_tree(b, k_kf_y_mode_tree, vp8_kf_y_mode_probs);
+        const vp8_mb_t *above = mb_at(d, row - 1, col), *left = m - 1;
+        m->y_mode = (unsigned char)bd_tree(b, vp8_kf_y_mode_tree, vp8_kf_y_mode_probs);
         if (m->y_mode == B_PRED)
             for (int i = 0; i < 16; i++)
-                m->modes[i] = (unsigned char)bd_tree(b, k_b_mode_tree,
+                m->modes[i] = (unsigned char)bd_tree(b, vp8_b_mode_tree,
                                                      vp8_kf_b_mode_probs[above_b_mode(m, above, i)][left_b_mode(m, left, i)]);
-        m->uv_mode = (unsigned char)bd_tree(b, k_uv_mode_tree, vp8_kf_uv_mode_probs);
+        m->uv_mode = (unsigned char)bd_tree(b, vp8_uv_mode_tree, vp8_kf_uv_mode_probs);
     } else if (bd_get(b, d->prob_inter)) {
         read_inter_modes(d, b, m, row, col);
         return;
     } else {
-        m->y_mode = (unsigned char)bd_tree(b, k_y_mode_tree, d->ent.y_mode);
+        m->y_mode = (unsigned char)bd_tree(b, vp8_y_mode_tree, d->ent.y_mode);
         if (m->y_mode == B_PRED)
             for (int i = 0; i < 16; i++)
-                m->modes[i] = (unsigned char)bd_tree(b, k_b_mode_tree, vp8_default_b_mode_probs);
-        m->uv_mode = (unsigned char)bd_tree(b, k_uv_mode_tree, d->ent.uv_mode);
+                m->modes[i] = (unsigned char)bd_tree(b, vp8_b_mode_tree, vp8_default_b_mode_probs);
+        m->uv_mode = (unsigned char)bd_tree(b, vp8_uv_mode_tree, d->ent.uv_mode);
     }
     m->ref = CURRENT;
     m->mv.x = m->mv.y = 0;
@@ -618,7 +510,7 @@ static int read_extra(bd_t *b, const unsigned char *probs)
 /* One block's tokens, dequantized into out[] (natural order). Returns whether any token was coded. */
 static int read_block(bd_t *b, const unsigned char (*probs)[3][11], int ctx, int first, short *out, const short *dq)
 {
-    const unsigned char *p = probs[k_bands[first]][ctx];
+    const unsigned char *p = probs[vp8_bands[first]][ctx];
     int c = first;
 
     if (!bd_get(b, p[0]))
@@ -628,7 +520,7 @@ static int read_block(bd_t *b, const unsigned char (*probs)[3][11], int ctx, int
         if (!bd_get(b, p[1])) { /* a zero: the next token cannot be the end of block */
             if (++c == 16)
                 break;
-            p = probs[k_bands[c]][0];
+            p = probs[vp8_bands[c]][0];
             continue;
         }
         if (!bd_get(b, p[2])) {
@@ -640,17 +532,17 @@ static int read_block(bd_t *b, const unsigned char (*probs)[3][11], int ctx, int
             else if (!bd_get(b, p[6]))
                 v = !bd_get(b, p[7]) ? 5 + bd_get(b, 159) : 7 + (bd_get(b, 165) << 1) + bd_get(b, 145);
             else if (!bd_get(b, p[8]))
-                v = !bd_get(b, p[9]) ? 11 + read_extra(b, k_cat3) : 19 + read_extra(b, k_cat4);
+                v = !bd_get(b, p[9]) ? 11 + read_extra(b, vp8_cat3) : 19 + read_extra(b, vp8_cat4);
             else
-                v = !bd_get(b, p[10]) ? 35 + read_extra(b, k_cat5) : 67 + read_extra(b, k_cat6);
+                v = !bd_get(b, p[10]) ? 35 + read_extra(b, vp8_cat5) : 67 + read_extra(b, vp8_cat6);
             next = 2;
         }
         if (bd_bit(b))
             v = -v;
-        out[k_zigzag[c]] = (short)(v * dq[c > 0]);
+        out[vp8_zigzag[c]] = (short)(v * dq[c > 0]);
         if (++c == 16)
             break;
-        p = probs[k_bands[c]][next];
+        p = probs[vp8_bands[c]][next];
         if (!bd_get(b, p[0]))
             break;
     }
@@ -658,7 +550,7 @@ static int read_block(bd_t *b, const unsigned char (*probs)[3][11], int ctx, int
 }
 
 /* All of a macroblock's blocks: Y2 (when present), 16 Y, 4 U, 4 V, with their above and left contexts. */
-static int read_tokens(vp8_decoder_t *d, bd_t *b, const mb_t *m, unsigned char *above, unsigned char *left)
+static int read_tokens(vp8_decoder_t *d, bd_t *b, const vp8_mb_t *m, unsigned char *above, unsigned char *left)
 {
     const short (*dq)[2] = d->dq[d->seg.enabled ? m->segment : 0];
     int y2 = m->y_mode != B_PRED && m->y_mode != SPLITMV, any = 0, type = y2 ? TYPE_Y_AFTER_Y2 : TYPE_Y;
@@ -684,225 +576,13 @@ static int read_tokens(vp8_decoder_t *d, bd_t *b, const mb_t *m, unsigned char *
 
 /* ---- Inverse transforms (section 14) ---- */
 
-static unsigned char clamp255(int v)
-{
-    return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
-}
 
-/* The Y2 block's inverse Walsh-Hadamard transform into the Y blocks' DC coefficients. */
-static void iwht(short *coeffs)
-{
-    const short *in = coeffs + 24 * 16;
-    short tmp[16];
-
-    for (int i = 0; i < 4; i++) {
-        int a1 = in[i] + in[12 + i], b1 = in[4 + i] + in[8 + i], c1 = in[4 + i] - in[8 + i], d1 = in[i] - in[12 + i];
-        tmp[i] = (short)(a1 + b1);
-        tmp[4 + i] = (short)(c1 + d1);
-        tmp[8 + i] = (short)(a1 - b1);
-        tmp[12 + i] = (short)(d1 - c1);
-    }
-    for (int i = 0; i < 4; i++) {
-        const short *r = tmp + 4 * i;
-        int a1 = r[0] + r[3], b1 = r[1] + r[2], c1 = r[1] - r[2], d1 = r[0] - r[3];
-        coeffs[(4 * i + 0) * 16] = (short)((a1 + b1 + 3) >> 3);
-        coeffs[(4 * i + 1) * 16] = (short)((c1 + d1 + 3) >> 3);
-        coeffs[(4 * i + 2) * 16] = (short)((a1 - b1 + 3) >> 3);
-        coeffs[(4 * i + 3) * 16] = (short)((d1 - c1 + 3) >> 3);
-    }
-}
-
-#define COS_M1 20091 /* cos(pi/8) * sqrt(2) - 1, Q16 */
-#define SIN 35468    /* sin(pi/8) * sqrt(2), Q16 */
-
-/* Adds a block's inverse DCT to the prediction already at dst. */
-static void idct_add(unsigned char *dst, int stride, const short *in)
-{
-    short tmp[16];
-
-    for (int i = 0; i < 4; i++) {
-        int a1 = in[i] + in[8 + i], b1 = in[i] - in[8 + i];
-        int c1 = ((in[4 + i] * SIN) >> 16) - (in[12 + i] + ((in[12 + i] * COS_M1) >> 16));
-        int d1 = (in[4 + i] + ((in[4 + i] * COS_M1) >> 16)) + ((in[12 + i] * SIN) >> 16);
-        tmp[i] = (short)(a1 + d1);
-        tmp[12 + i] = (short)(a1 - d1);
-        tmp[4 + i] = (short)(b1 + c1);
-        tmp[8 + i] = (short)(b1 - c1);
-    }
-    for (int i = 0; i < 4; i++, dst += stride) {
-        const short *r = tmp + 4 * i;
-        int a1 = r[0] + r[2], b1 = r[0] - r[2];
-        int c1 = ((r[1] * SIN) >> 16) - (r[3] + ((r[3] * COS_M1) >> 16));
-        int d1 = (r[1] + ((r[1] * COS_M1) >> 16)) + ((r[3] * SIN) >> 16);
-        dst[0] = clamp255(dst[0] + ((a1 + d1 + 4) >> 3));
-        dst[3] = clamp255(dst[3] + ((a1 - d1 + 4) >> 3));
-        dst[1] = clamp255(dst[1] + ((b1 + c1 + 4) >> 3));
-        dst[2] = clamp255(dst[2] + ((b1 - c1 + 4) >> 3));
-    }
-}
 
 /* ---- Intra prediction (section 12), in place in the frame ---- */
 
-static void predict_dc(unsigned char *p, int stride, int n, int shift)
-{
-    int sum = 0;
 
-    for (int i = 0; i < n; i++)
-        sum += p[-stride + i] + p[i * stride - 1];
-    sum = (sum + (1 << (shift - 1))) >> shift;
-    for (int i = 0; i < n; i++)
-        memset(p + i * stride, sum, (size_t)n);
-}
 
-static void predict_block(unsigned char *p, int stride, int n, int mode)
-{
-    switch (mode) {
-    case DC_PRED:
-        predict_dc(p, stride, n, n == 16 ? 5 : n == 8 ? 4 : 3);
-        break;
-    case V_PRED:
-        for (int i = 0; i < n; i++)
-            memcpy(p + i * stride, p - stride, (size_t)n);
-        break;
-    case H_PRED:
-        for (int i = 0; i < n; i++)
-            memset(p + i * stride, p[i * stride - 1], (size_t)n);
-        break;
-    default: /* TM_PRED */
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++)
-                p[i * stride + j] = clamp255(p[i * stride - 1] + p[-stride + j] - p[-stride - 1]);
-        break;
-    }
-}
-
-#define AVG3(a, b, c) (unsigned char)(((a) + 2 * (b) + (c) + 2) >> 2)
-#define AVG2(a, b) (unsigned char)(((a) + (b) + 1) >> 1)
-
-/* A 4x4 subblock: above[-1..7] and left[0..3] are its edges in the frame. */
-static void predict_sub(unsigned char *p, int s, int mode)
-{
-    const unsigned char *A = p - s;
-    int L[4] = {p[-1], p[s - 1], p[2 * s - 1], p[3 * s - 1]}, P = A[-1];
-    unsigned char o[4][4];
-
-    switch (mode) {
-    case B_DC_PRED:
-        predict_dc(p, s, 4, 3);
-        return;
-    case B_TM_PRED:
-        predict_block(p, s, 4, TM_PRED);
-        return;
-    case B_VE_PRED:
-        for (int j = 0; j < 4; j++)
-            o[0][j] = AVG3(A[j - 1], A[j], A[j + 1]);
-        for (int i = 1; i < 4; i++)
-            memcpy(o[i], o[0], 4);
-        break;
-    case B_HE_PRED:
-        memset(o[0], AVG3(P, L[0], L[1]), 4);
-        memset(o[1], AVG3(L[0], L[1], L[2]), 4);
-        memset(o[2], AVG3(L[1], L[2], L[3]), 4);
-        memset(o[3], AVG3(L[2], L[3], L[3]), 4);
-        break;
-    case B_LD_PRED:
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++) {
-                int k = i + j;
-                o[i][j] = k < 6 ? AVG3(A[k], A[k + 1], A[k + 2]) : AVG3(A[6], A[7], A[7]);
-            }
-        break;
-    case B_RD_PRED: {
-        /* The edge from the bottom of the left column to the right end of the above row. */
-        int e[9] = {L[3], L[2], L[1], L[0], P, A[0], A[1], A[2], A[3]};
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++) {
-                int k = 3 - i + j;
-                o[i][j] = AVG3(e[k], e[k + 1], e[k + 2]);
-            }
-        break;
-    }
-    case B_VR_PRED: {
-        int e[9] = {L[3], L[2], L[1], L[0], P, A[0], A[1], A[2], A[3]};
-        o[3][0] = AVG3(e[1], e[2], e[3]);
-        o[2][0] = AVG3(e[2], e[3], e[4]);
-        o[3][1] = o[1][0] = AVG3(e[3], e[4], e[5]);
-        o[2][1] = o[0][0] = AVG2(e[4], e[5]);
-        o[3][2] = o[1][1] = AVG3(e[4], e[5], e[6]);
-        o[2][2] = o[0][1] = AVG2(e[5], e[6]);
-        o[3][3] = o[1][2] = AVG3(e[5], e[6], e[7]);
-        o[2][3] = o[0][2] = AVG2(e[6], e[7]);
-        o[1][3] = AVG3(e[6], e[7], e[8]);
-        o[0][3] = AVG2(e[7], e[8]);
-        break;
-    }
-    case B_VL_PRED:
-        o[0][0] = AVG2(A[0], A[1]);
-        o[1][0] = AVG3(A[0], A[1], A[2]);
-        o[2][0] = o[0][1] = AVG2(A[1], A[2]);
-        o[1][1] = o[3][0] = AVG3(A[1], A[2], A[3]);
-        o[2][1] = o[0][2] = AVG2(A[2], A[3]);
-        o[3][1] = o[1][2] = AVG3(A[2], A[3], A[4]);
-        o[2][2] = o[0][3] = AVG2(A[3], A[4]);
-        o[3][2] = o[1][3] = AVG3(A[3], A[4], A[5]);
-        o[2][3] = AVG3(A[4], A[5], A[6]);
-        o[3][3] = AVG3(A[5], A[6], A[7]);
-        break;
-    case B_HD_PRED: {
-        int e[9] = {L[3], L[2], L[1], L[0], P, A[0], A[1], A[2], A[3]};
-        o[3][0] = AVG2(e[0], e[1]);
-        o[3][1] = AVG3(e[0], e[1], e[2]);
-        o[2][0] = o[3][2] = AVG2(e[1], e[2]);
-        o[2][1] = o[3][3] = AVG3(e[1], e[2], e[3]);
-        o[2][2] = o[1][0] = AVG2(e[2], e[3]);
-        o[2][3] = o[1][1] = AVG3(e[2], e[3], e[4]);
-        o[1][2] = o[0][0] = AVG2(e[3], e[4]);
-        o[1][3] = o[0][1] = AVG3(e[3], e[4], e[5]);
-        o[0][2] = AVG3(e[4], e[5], e[6]);
-        o[0][3] = AVG3(e[5], e[6], e[7]);
-        break;
-    }
-    default: /* B_HU_PRED */
-        o[0][0] = AVG2(L[0], L[1]);
-        o[0][1] = AVG3(L[0], L[1], L[2]);
-        o[0][2] = o[1][0] = AVG2(L[1], L[2]);
-        o[0][3] = o[1][1] = AVG3(L[1], L[2], L[3]);
-        o[1][2] = o[2][0] = AVG2(L[2], L[3]);
-        o[1][3] = o[2][1] = AVG3(L[2], L[3], L[3]);
-        o[2][2] = o[2][3] = o[3][0] = o[3][1] = o[3][2] = o[3][3] = (unsigned char)L[3];
-        break;
-    }
-    for (int i = 0; i < 4; i++)
-        memcpy(p + i * s, o[i], 4);
-}
-
-/*
- * The edges outside the frame: 127 above, 129 to the left, and for DC
- * prediction a copy of the other edge, which averages that edge alone.
- */
-static void fixup_left(unsigned char *p, int stride, int n, int row, int mode)
-{
-    if (mode == DC_PRED && row) {
-        for (int i = 0; i < n; i++)
-            p[i * stride - 1] = p[-stride + i];
-    } else {
-        for (int i = -1; i < n; i++)
-            p[i * stride - 1] = 129;
-    }
-}
-
-static void fixup_above(unsigned char *p, int stride, int n, int col, int mode)
-{
-    if (mode == DC_PRED && col) {
-        for (int i = 0; i < n; i++)
-            p[-stride + i] = p[i * stride - 1];
-    } else {
-        memset(p - stride - 1, 127, (size_t)n + 1);
-    }
-    memset(p - stride + n, 127, 4);
-}
-
-static void predict_intra(vp8_decoder_t *d, const mb_t *m, unsigned char *y, unsigned char *u, unsigned char *v)
+static void predict_intra(vp8_decoder_t *d, const vp8_mb_t *m, unsigned char *y, unsigned char *u, unsigned char *v)
 {
     short *c = d->coeffs;
     int s = d->stride, us = d->uv_stride;
@@ -913,93 +593,41 @@ static void predict_intra(vp8_decoder_t *d, const mb_t *m, unsigned char *y, uns
             memcpy(y + (r - 1) * s + 16, y - s + 16, 4);
         for (int i = 0; i < 16; i++) {
             unsigned char *p = y + (i >> 2) * 4 * s + (i & 3) * 4;
-            predict_sub(p, s, m->modes[i]);
-            idct_add(p, s, c + i * 16);
+            vp8i_predict_sub(p, s, m->modes[i]);
+            vp8i_idct_add(p, s, c + i * 16);
         }
     } else {
-        predict_block(y, s, 16, m->y_mode);
-        iwht(c);
+        vp8i_predict_block(y, s, 16, m->y_mode);
+        vp8i_iwht(c);
         for (int i = 0; i < 16; i++)
-            idct_add(y + (i >> 2) * 4 * s + (i & 3) * 4, s, c + i * 16);
+            vp8i_idct_add(y + (i >> 2) * 4 * s + (i & 3) * 4, s, c + i * 16);
     }
-    predict_block(u, us, 8, m->uv_mode);
-    predict_block(v, us, 8, m->uv_mode);
+    vp8i_predict_block(u, us, 8, m->uv_mode);
+    vp8i_predict_block(v, us, 8, m->uv_mode);
     for (int i = 0; i < 4; i++) {
-        idct_add(u + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (16 + i) * 16);
-        idct_add(v + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (20 + i) * 16);
+        vp8i_idct_add(u + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (16 + i) * 16);
+        vp8i_idct_add(v + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (20 + i) * 16);
     }
 }
 
 /* ---- Inter prediction (section 18) ---- */
-
-/*
- * A bw x bh block of plane `ref` (pw x ph, the macroblock-aligned size)
- * at (x, y) moved by mv, into dst. Pixels past the edges repeat the edge;
- * fractional positions go through the frame's six-tap or bilinear filters,
- * horizontally then vertically.
- */
-static void predict_inter_block(vp8_decoder_t *d, unsigned char *dst, int ds, const unsigned char *ref, int rs, int pw,
-                                int ph, int x, int y, int bw, int bh, mv_t mv)
-{
-    int mx = mv.x & 7, my = mv.y & 7;
-    const unsigned char *src;
-    int ss;
-
-    x += mv.x >> 3;
-    y += mv.y >> 3;
-    if (x < 2 || y < 2 || x + bw + 3 > pw || y + bh + 3 > ph) {
-        for (int r = 0; r < bh + 5; r++) {
-            int yy = y - 2 + r;
-            const unsigned char *row = ref + (yy < 0 ? 0 : yy >= ph ? ph - 1 : yy) * rs;
-            for (int c = 0; c < bw + 5; c++) {
-                int xx = x - 2 + c;
-                d->edge[r * 32 + c] = row[xx < 0 ? 0 : xx >= pw ? pw - 1 : xx];
-            }
-        }
-        src = d->edge + 2 * 32 + 2;
-        ss = 32;
-    } else {
-        src = ref + y * rs + x;
-        ss = rs;
-    }
-    if (!(mx | my)) {
-        for (int r = 0; r < bh; r++)
-            memcpy(dst + r * ds, src + r * ss, (size_t)bw);
-        return;
-    }
-    {
-        const short *fh = d->filters[mx], *fv = d->filters[my];
-        for (int r = -2; r < bh + 3; r++) {
-            const unsigned char *s = src + r * ss;
-            for (int c = 0; c < bw; c++)
-                d->pass[(r + 2) * 16 + c] = clamp255((s[c - 2] * fh[0] + s[c - 1] * fh[1] + s[c] * fh[2] + s[c + 1] * fh[3] +
-                                                      s[c + 2] * fh[4] + s[c + 3] * fh[5] + 64) >> 7);
-        }
-        for (int r = 0; r < bh; r++)
-            for (int c = 0; c < bw; c++) {
-                const unsigned char *t = d->pass + (r + 2) * 16 + c;
-                dst[r * ds + c] = clamp255((t[-32] * fv[0] + t[-16] * fv[1] + t[0] * fv[2] + t[16] * fv[3] + t[32] * fv[4] +
-                                            t[48] * fv[5] + 64) >> 7);
-            }
-    }
-}
 
 static short chroma_half(int v)
 {
     return (short)(v < 0 ? (v - 1) / 2 : (v + 1) / 2);
 }
 
-static void predict_inter(vp8_decoder_t *d, const mb_t *m, int row, int col, unsigned char *y, unsigned char *u,
+static void predict_inter(vp8_decoder_t *d, const vp8_mb_t *m, int row, int col, unsigned char *y, unsigned char *u,
                           unsigned char *v)
 {
     const frame_t *r = &d->frames[d->ref[m->ref]];
     int s = d->stride, us = d->uv_stride, pw = d->mb_cols * 16, ph = d->mb_rows * 16, x = col * 16, yy = row * 16;
     short *c = d->coeffs;
-    mv_t uvmv[4];
+    vp8_mv_t uvmv[4];
 
     if (m->y_mode != SPLITMV) {
-        mv_t mv = m->mv;
-        predict_inter_block(d, y, s, r->y, s, pw, ph, x, yy, 16, 16, mv);
+        vp8_mv_t mv = m->mv;
+        vp8i_predict_inter_block(&d->scratch, y, s, r->y, s, pw, ph, x, yy, 16, 16, mv);
         mv.x = chroma_half(mv.x);
         mv.y = chroma_half(mv.y);
         if (d->version == 3) {
@@ -1008,11 +636,11 @@ static void predict_inter(vp8_decoder_t *d, const mb_t *m, int row, int col, uns
         }
         for (int i = 0; i < 4; i++)
             uvmv[i] = mv;
-        iwht(c);
+        vp8i_iwht(c);
     } else {
         for (int b = 0; b < 16; b++)
-            predict_inter_block(d, y + (b >> 2) * 4 * s + (b & 3) * 4, s, r->y, s, pw, ph, x + (b & 3) * 4, yy + (b >> 2) * 4,
-                                4, 4, m->mvs[b]);
+            vp8i_predict_inter_block(&d->scratch, y + (b >> 2) * 4 * s + (b & 3) * 4, s, r->y, s, pw, ph,
+                                     x + (b & 3) * 4, yy + (b >> 2) * 4, 4, 4, m->mvs[b]);
         /* Each chroma subblock moves by the average of the four luma vectors it covers. */
         for (int i = 0; i < 4; i++) {
             int b = (i >> 1) * 8 + (i & 1) * 2;
@@ -1030,14 +658,16 @@ static void predict_inter(vp8_decoder_t *d, const mb_t *m, int row, int col, uns
     }
     for (int i = 0; i < 4; i++) {
         int bx = (i & 1) * 4, by = (i >> 1) * 4;
-        predict_inter_block(d, u + by * us + bx, us, r->u, us, pw / 2, ph / 2, x / 2 + bx, yy / 2 + by, 4, 4, uvmv[i]);
-        predict_inter_block(d, v + by * us + bx, us, r->v, us, pw / 2, ph / 2, x / 2 + bx, yy / 2 + by, 4, 4, uvmv[i]);
+        vp8i_predict_inter_block(&d->scratch, u + by * us + bx, us, r->u, us, pw / 2, ph / 2, x / 2 + bx, yy / 2 + by, 4,
+                                 4, uvmv[i]);
+        vp8i_predict_inter_block(&d->scratch, v + by * us + bx, us, r->v, us, pw / 2, ph / 2, x / 2 + bx, yy / 2 + by, 4,
+                                 4, uvmv[i]);
     }
     for (int i = 0; i < 16; i++)
-        idct_add(y + (i >> 2) * 4 * s + (i & 3) * 4, s, c + i * 16);
+        vp8i_idct_add(y + (i >> 2) * 4 * s + (i & 3) * 4, s, c + i * 16);
     for (int i = 0; i < 4; i++) {
-        idct_add(u + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (16 + i) * 16);
-        idct_add(v + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (20 + i) * 16);
+        vp8i_idct_add(u + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (16 + i) * 16);
+        vp8i_idct_add(v + (i >> 1) * 4 * us + (i & 1) * 4, us, c + (20 + i) * 16);
     }
 }
 
@@ -1084,12 +714,12 @@ static void filter_common(unsigned char *p, int step, int outer)
     a = s8(a);
     f1 = (a + 4 > 127 ? 127 : a + 4) >> 3;
     f2 = (a + 3 > 127 ? 127 : a + 3) >> 3;
-    p[-step] = clamp255(p0 + f2);
-    p[0] = clamp255(q0 - f1);
+    p[-step] = vp8i_clamp255(p0 + f2);
+    p[0] = vp8i_clamp255(q0 - f1);
     if (!outer) {
         a = (f1 + 1) >> 1;
-        p[-2 * step] = clamp255(p1 + a);
-        p[step] = clamp255(q1 - a);
+        p[-2 * step] = vp8i_clamp255(p1 + a);
+        p[step] = vp8i_clamp255(q1 - a);
     }
 }
 
@@ -1099,14 +729,14 @@ static void filter_mb(unsigned char *p, int step)
     int w = s8(s8(p1 - q1) + 3 * (q0 - p0)), a;
 
     a = (27 * w + 63) >> 7;
-    p[-step] = clamp255(p0 + a);
-    p[0] = clamp255(q0 - a);
+    p[-step] = vp8i_clamp255(p0 + a);
+    p[0] = vp8i_clamp255(q0 - a);
     a = (18 * w + 63) >> 7;
-    p[-2 * step] = clamp255(p1 + a);
-    p[step] = clamp255(q1 - a);
+    p[-2 * step] = vp8i_clamp255(p1 + a);
+    p[step] = vp8i_clamp255(q1 - a);
     a = (9 * w + 63) >> 7;
-    p[-3 * step] = clamp255(p2 + a);
-    p[2 * step] = clamp255(q2 - a);
+    p[-3 * step] = vp8i_clamp255(p2 + a);
+    p[2 * step] = vp8i_clamp255(q2 - a);
 }
 
 /* An edge of n pixels: `step` crosses it, `along` follows it. */
@@ -1136,7 +766,7 @@ static void loop_filter(vp8_decoder_t *d, const frame_t *f)
 
     for (int row = 0; row < d->mb_rows; row++)
         for (int col = 0; col < d->mb_cols; col++) {
-            const mb_t *m = mb_at(d, row, col);
+            const vp8_mb_t *m = mb_at(d, row, col);
             unsigned char *y = f->y + row * 16 * s + col * 16, *u = f->u + row * 8 * us + col * 8, *v = f->v + row * 8 * us + col * 8;
             int level = d->lf.level, interior, threshold, inner;
             if (d->seg.enabled) {
@@ -1240,7 +870,7 @@ int vp8_decode(vp8_decoder_t *d, const unsigned char *data, size_t n, vp8_image_
             alloc_frames(d, w, h);
         data += 7;
         n -= 7;
-        d->filters = d->version ? k_bilinear : k_sixtap;
+        d->scratch.filters = d->version ? vp8_bilinear : vp8_sixtap;
         d->have_key = 1;
     } else if (!d->have_key) {
         return -1;
@@ -1295,7 +925,7 @@ int vp8_decode(vp8_decoder_t *d, const unsigned char *data, size_t n, vp8_image_
         unsigned char *y = f->y + row * 16 * d->stride, *u = f->u + row * 8 * d->uv_stride, *v = f->v + row * 8 * d->uv_stride;
         memset(d->left_ctx, 0, sizeof d->left_ctx);
         for (int col = 0; col < d->mb_cols; col++, y += 16, u += 8, v += 8) {
-            mb_t *m = mb_at(d, row, col);
+            vp8_mb_t *m = mb_at(d, row, col);
             unsigned char *above = d->above_ctx[col];
             read_modes(d, &b, m, row, col);
             memset(d->coeffs, 0, sizeof d->coeffs);
@@ -1309,16 +939,16 @@ int vp8_decode(vp8_decoder_t *d, const unsigned char *data, size_t n, vp8_image_
                 m->coded = 0;
             }
             if (col == 0) {
-                fixup_left(y, d->stride, 16, row, m->y_mode);
-                fixup_left(u, d->uv_stride, 8, row, m->uv_mode);
-                fixup_left(v, d->uv_stride, 8, row, m->uv_mode);
+                vp8i_fixup_left(y, d->stride, 16, row, m->y_mode);
+                vp8i_fixup_left(u, d->uv_stride, 8, row, m->uv_mode);
+                vp8i_fixup_left(v, d->uv_stride, 8, row, m->uv_mode);
                 if (row == 0)
                     y[-d->stride - 1] = 127;
             }
             if (row == 0) {
-                fixup_above(y, d->stride, 16, col, m->y_mode);
-                fixup_above(u, d->uv_stride, 8, col, m->uv_mode);
-                fixup_above(v, d->uv_stride, 8, col, m->uv_mode);
+                vp8i_fixup_above(y, d->stride, 16, col, m->y_mode);
+                vp8i_fixup_above(u, d->uv_stride, 8, col, m->uv_mode);
+                vp8i_fixup_above(v, d->uv_stride, 8, col, m->uv_mode);
             }
             if (m->ref == CURRENT)
                 predict_intra(d, m, y, u, v);
