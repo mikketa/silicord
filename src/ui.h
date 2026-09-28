@@ -34,6 +34,7 @@ enum {
     UI_FORUM,           /* text = forum channel id, NUL, then the threads/search JSON (empty on failure) */
     UI_GIFS,            /* text = the query, NUL, then a JSON array of GIF objects (empty on failure) */
     UI_COMMANDS,        /* text = the guild or channel id, NUL, then the application-command-index (empty on failure) */
+    UI_VOICE,           /* text = the VOICE_* state as a digit, NUL, then a status line */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -137,6 +138,9 @@ void app_subscribe(const char *guild_id, const char *channel_id);
 void app_relationship(const char *user_id, const char *method);
 /* Sends a friend request by username; the outcome comes back as UI_FRIEND_RESULT. */
 void app_add_friend(const char *username);
+/* Joins a server's voice channel (leaving any other); the connection reports back with UI_VOICE. */
+void app_voice_join(const char *guild_id, const char *channel_id);
+void app_voice_leave(void);
 /* Our status: "online", "idle", "dnd" or "invisible". */
 /* This session's presence: status and custom status text (NULL or empty for none). */
 void app_set_status(const char *status, const char *custom);

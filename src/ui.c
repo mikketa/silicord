@@ -22,6 +22,7 @@
 #include "mem.h"
 #include "qr.h"
 #include "utf.h"
+#include "voice.h"
 
 /* Palette (GDI COLORREF and GDI+ ARGB). */
 #define RGBX(r, g, b) RGB(r, g, b), (0xFF000000u | ((r) << 16) | ((g) << 8) | (b))
@@ -64,11 +65,12 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define SIDE_W 240
 #define HEADER_H 48
 #define PANEL_H 56
+#define VOICE_BAR_H 52 /* above the user panel while in voice */
 #define CAT_H 40
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE };
 
 typedef struct {
     char key[96];
@@ -221,6 +223,10 @@ typedef struct {
     int pref_notify, pref_title; /* this computer's settings */
     voice_t *voices;           /* who is in the servers' voice channels */
     int nvoices, cap_voices;
+    int voice_state;           /* our own connection, VOICE_* */
+    char voice_channel[24];
+    char voice_name[100];      /* its channel name */
+    sb_t voice_status;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
@@ -1126,9 +1132,14 @@ static int side_content(void)
     return h + S(8);
 }
 
+static int voice_bar_h(void)
+{
+    return g_ui.voice_state != VOICE_OFF ? S(VOICE_BAR_H) : 0;
+}
+
 static int side_view(RECT rc)
 {
-    return rc.bottom - S(HEADER_H) - S(PANEL_H);
+    return rc.bottom - S(HEADER_H) - S(PANEL_H) - voice_bar_h();
 }
 
 static void clamp_scroll(void)
@@ -1174,6 +1185,12 @@ static void hit_test(int x, int y, int *kind, int *index)
     } else if (x < S(RAIL_W + SIDE_W)) {
         int top = rc.bottom - S(PANEL_H) + (S(PANEL_H) - S(32)) / 2;
         int right = S(RAIL_W + SIDE_W) - S(8);
+        if (voice_bar_h() && y >= rc.bottom - S(PANEL_H) - voice_bar_h() && y < rc.bottom - S(PANEL_H)) {
+            int vy = rc.bottom - S(PANEL_H) - voice_bar_h() + (voice_bar_h() - S(32)) / 2;
+            if (y >= vy && y < vy + S(32) && x >= right - S(32) && x < right)
+                *kind = HIT_VOICE_LEAVE;
+            return;
+        }
         if (y >= rc.bottom - S(PANEL_H)) {
             if (y >= top && y < top + S(32) && x >= right - S(32) && x < right)
                 *kind = HIT_LOGOUT;
@@ -1579,6 +1596,38 @@ static void paint_user_panel(RECT rc)
     }
 }
 
+/* Our voice connection: its state, the channel, and a button to leave. */
+static void paint_voice_bar(RECT rc)
+{
+    int h = voice_bar_h(), x0 = S(RAIL_W), right = S(RAIL_W + SIDE_W) - S(8), y, cy;
+    int color = g_ui.voice_state == VOICE_CONNECTED ? C_GREEN : g_ui.voice_state == VOICE_FAILED ? C_FAINT : C_AMBER;
+    char code[40], line[160];
+
+    if (!h)
+        return;
+    y = rc.bottom - S(PANEL_H) - h;
+    cy = y + (h - S(32)) / 2;
+    fill(x0, y, S(SIDE_W), h, C_PANEL);
+    fill(x0 + S(8), y, S(SIDE_W) - S(16), 1, C_LINE);
+    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(52), S(20)),
+         g_ui.voice_state == VOICE_CONNECTED ? "Voice Connected" : str_or_empty(&g_ui.voice_status),
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    /* The channel, and the end-to-end encryption code others can compare. */
+    lstrcpynA(line, g_ui.voice_name, 100);
+    if (g_ui.voice_state == VOICE_CONNECTED && voice_privacy_code(code, sizeof code)) {
+        lstrcatA(line, " \xC2\xB7 E2EE ");
+        code[5] = 0;
+        lstrcatA(line, code);
+        lstrcatA(line, "\xE2\x80\xA6");
+    }
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(52), S(18)), line,
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (g_ui.hover_kind == HIT_VOICE_LEAVE)
+        r_round(right - S(32), cy, S(32), S(32), S(6), ARGB(C_SELECT));
+    text_w(g_ui.f_icon, g_ui.hover_kind == HIT_VOICE_LEAVE ? C_INK : C_MUTED, rect(right - S(32), cy, S(32), S(32)),
+           L"\xE778", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
 static void paint_side(RECT rc)
 {
     int x0 = S(RAIL_W), view = side_view(rc);
@@ -1627,6 +1676,7 @@ static void paint_side(RECT rc)
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     fill(x0, S(HEADER_H) - 1, S(SIDE_W), 1, C_LINE);
+    paint_voice_bar(rc);
     paint_user_panel(rc);
 }
 
@@ -4052,6 +4102,17 @@ static void on_click(int kind, int index)
         select_guild(index);
         break;
     case HIT_CHANNEL:
+        if (is_voice_type(chan(index)->type) && g_ui.guild >= 0 &&
+            (g_ui.voice_state == VOICE_OFF || g_ui.voice_state == VOICE_FAILED ||
+             lstrcmpA(g_ui.voice_channel, chan(index)->id) != 0)) {
+            lstrcpynA(g_ui.voice_channel, chan(index)->id, sizeof g_ui.voice_channel);
+            lstrcpynA(g_ui.voice_name, model_str(g_ui.model, chan(index)->name), sizeof g_ui.voice_name);
+            g_ui.voice_state = VOICE_CONNECTING;
+            sb_clear(&g_ui.voice_status);
+            sb_add(&g_ui.voice_status, "Connecting\xE2\x80\xA6");
+            app_voice_join(g_ui.model->guilds[g_ui.guild].id, chan(index)->id);
+            clamp_scroll();
+        }
         if (chan(index)->type == CH_CATEGORY) {
             g_ui.collapsed[index] ^= 1;
             clamp_scroll();
@@ -4072,6 +4133,13 @@ static void on_click(int kind, int index)
         break;
     case HIT_SELF:
         open_self();
+        break;
+    case HIT_VOICE_LEAVE:
+        app_voice_leave();
+        g_ui.voice_state = VOICE_OFF;
+        g_ui.voice_channel[0] = 0;
+        clamp_scroll();
+        redraw();
         break;
     case HIT_FOLDER:
         if (index >= 0 && index < (int)sizeof g_ui.folder_open)
@@ -4394,6 +4462,23 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     if (msg == UI_FORUM) {
         if (p)
             on_forum(p);
+        if (p) {
+            sb_free(p);
+            mem_free(p);
+        }
+        redraw();
+        return;
+    }
+    if (msg == UI_VOICE) {
+        /* A late report from a connection we already left changes nothing. */
+        if (p && p->len >= 2 && g_ui.voice_state != VOICE_OFF) {
+            g_ui.voice_state = p->data[0] - '0';
+            sb_clear(&g_ui.voice_status);
+            sb_add(&g_ui.voice_status, p->data + 2);
+            if (g_ui.voice_state == VOICE_OFF)
+                g_ui.voice_channel[0] = 0;
+            clamp_scroll();
+        }
         if (p) {
             sb_free(p);
             mem_free(p);
@@ -10615,7 +10700,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_COMMANDS) {
+        if (msg >= UI_QR && msg <= UI_VOICE) {
             on_worker(msg, wp, lp);
             return 0;
         }

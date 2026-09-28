@@ -12,6 +12,7 @@
 #include "sb.h"
 #include "ui.h"
 #include "utf.h"
+#include "voice.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -319,11 +320,142 @@ static void forward_event(session_t *s, json_t t, json_t d)
     ui_post(UI_EVENT, p);
 }
 
+/* ---- Voice: op 4 asks to join, the gateway answers with our voice state and the voice server ---- */
+
+static CRITICAL_SECTION g_voice_lock;
+static struct {
+    int active;           /* we asked to be in `channel` */
+    int have_state, have_server;
+    char guild[24], channel[24];
+    voice_params_t p;
+} g_vc;
+
+static void voice_state_changed(void *ctx, int state, const char *text)
+{
+    sb_t *p = mem_alloc(sizeof *p);
+
+    (void)ctx;
+    sb_i64(p, state);
+    sb_addn(p, "", 1);
+    sb_add(p, text);
+    ui_post(UI_VOICE, p);
+}
+
+static unsigned long long parse_u64(const char *s)
+{
+    unsigned long long u = 0;
+
+    for (; *s >= '0' && *s <= '9'; s++)
+        u = u * 10 + (unsigned)(*s - '0');
+    return u;
+}
+
+/* Op 4: into a channel, or out of voice with channel NULL. */
+static void send_voice_state(const char *guild, const char *channel)
+{
+    sb_t m = {0};
+
+    sb_add(&m, "{\"op\":4,\"d\":{\"guild_id\":\"");
+    sb_add(&m, guild);
+    sb_add(&m, "\",\"channel_id\":");
+    if (channel) {
+        sb_add(&m, "\"");
+        sb_add(&m, channel);
+        sb_add(&m, "\"");
+    } else {
+        sb_add(&m, "null");
+    }
+    sb_add(&m, ",\"self_mute\":false,\"self_deaf\":false}}");
+    gw_send(&m);
+    sb_free(&m);
+}
+
+/* Both halves known: connect (again, when Discord moves us to another voice server). */
+static void voice_try_start(void)
+{
+    voice_events_t ev = {0};
+
+    ev.state = voice_state_changed;
+    if (g_vc.active && g_vc.have_state && g_vc.have_server) {
+        g_vc.have_server = 0;
+        voice_start(&g_vc.p, &ev);
+    }
+}
+
+void app_voice_join(const char *guild_id, const char *channel_id)
+{
+    char old[24];
+
+    EnterCriticalSection(&g_voice_lock);
+    lstrcpynA(old, g_vc.active ? g_vc.guild : "", sizeof old);
+    g_vc.active = 1;
+    g_vc.have_state = g_vc.have_server = 0;
+    lstrcpynA(g_vc.guild, guild_id, sizeof g_vc.guild);
+    lstrcpynA(g_vc.channel, channel_id, sizeof g_vc.channel);
+    LeaveCriticalSection(&g_voice_lock);
+    voice_stop();
+    if (old[0] && lstrcmpA(old, guild_id) != 0)
+        send_voice_state(old, NULL);
+    send_voice_state(guild_id, channel_id);
+}
+
+void app_voice_leave(void)
+{
+    char guild[24];
+
+    EnterCriticalSection(&g_voice_lock);
+    lstrcpynA(guild, g_vc.active ? g_vc.guild : "", sizeof guild);
+    g_vc.active = 0;
+    LeaveCriticalSection(&g_voice_lock);
+    voice_stop();
+    if (guild[0])
+        send_voice_state(guild, NULL);
+}
+
+/* Our own VOICE_STATE_UPDATE (the session id) and VOICE_SERVER_UPDATE (token and endpoint). */
+static void voice_dispatch(session_t *s, json_t t, json_t d)
+{
+    json_t v;
+    char user[24] = "", channel[24] = "", guild[24] = "";
+
+    if (json_get(d, "guild_id", &v))
+        json_raw(v, guild, sizeof guild);
+    EnterCriticalSection(&g_voice_lock);
+    if (g_vc.active && lstrcmpA(guild, g_vc.guild) == 0) {
+        if (json_str_eq(t, "VOICE_STATE_UPDATE")) {
+            if (json_get(d, "user_id", &v))
+                json_raw(v, user, sizeof user);
+            if (json_get(d, "channel_id", &v) && json_type(v) == JSON_STRING)
+                json_raw(v, channel, sizeof channel);
+            if (lstrcmpA(user, s->me) == 0 && lstrcmpA(channel, g_vc.channel) == 0 && json_get(d, "session_id", &v)) {
+                json_raw(v, g_vc.p.session_id, sizeof g_vc.p.session_id);
+                g_vc.p.user_id = parse_u64(s->me);
+                g_vc.p.server_id = parse_u64(g_vc.guild);
+                g_vc.p.channel_id = parse_u64(g_vc.channel);
+                g_vc.have_state = 1;
+                voice_try_start();
+            }
+        } else if (json_get(d, "endpoint", &v) && json_type(v) == JSON_STRING && json_get(d, "token", &t)) {
+            json_raw(v, g_vc.p.endpoint, sizeof g_vc.p.endpoint);
+            json_raw(t, g_vc.p.token, sizeof g_vc.p.token);
+            g_vc.have_server = 1;
+            voice_try_start();
+        }
+    }
+    LeaveCriticalSection(&g_voice_lock);
+}
+
 static void on_dispatch(void *ctx, json_t t, json_t d)
 {
     session_t *s = ctx;
     int kind;
     msg_batch_t *b;
+
+    if (current(s) && (json_str_eq(t, "VOICE_STATE_UPDATE") || json_str_eq(t, "VOICE_SERVER_UPDATE"))) {
+        voice_dispatch(s, t, d);
+        if (json_str_eq(t, "VOICE_SERVER_UPDATE"))
+            return;
+    }
 
     if (json_str_eq(t, "MESSAGE_ACK")) {
         json_t v;
@@ -878,6 +1010,7 @@ void app_login_token(const char *token)
 
 void app_logout(void)
 {
+    app_voice_leave();
     stop_session();
     cred_delete();
     sb_free(&g_token);
@@ -1938,6 +2071,8 @@ void app_typing(const char *channel_id)
 
 void app_quit(void)
 {
+    /* Leave voice first, while the gateway can still say so. */
+    app_voice_leave();
     stop_login();
     stop_session();
     ExitProcess(0);
@@ -1994,6 +2129,7 @@ void entry(void)
     g_login_wake = CreateEventW(NULL, TRUE, FALSE, NULL);
     InitializeCriticalSection(&g_open_lock);
     InitializeCriticalSection(&g_session_lock);
+    InitializeCriticalSection(&g_voice_lock);
 
     ShowWindow(ui_create(GetModuleHandleW(NULL)), SW_SHOWDEFAULT);
     if (cred_load(&g_token)) {
