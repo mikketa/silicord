@@ -39,16 +39,19 @@ add_library(silicord_core STATIC
   src/md.c
   src/mem.c
   src/memberlist.c
+  src/mls_crypto.c
   src/model.c
   src/p256.c
   src/msg.c
   src/profile.c
   src/qr.c
   src/rt.c
+  src/rng.c
   src/sb.c
   src/search.c
   src/sha2.c
   src/stats.c
+  src/tls.c
   src/utf.c
   asm/str.asm
 )
@@ -113,6 +116,9 @@ add_test(NAME command COMMAND command_test)
 
 silicord_test(aes_test)
 add_test(NAME aes COMMAND aes_test)
+
+silicord_test(mls_crypto_test bcrypt)
+add_test(NAME mls_crypto COMMAND mls_crypto_test)
 
 silicord_test(hpke_test)
 add_test(NAME hpke COMMAND hpke_test)
