@@ -146,6 +146,17 @@ static void test_reaction_event(void)
     msg_batch_free(b);
 }
 
+static void test_interaction(void)
+{
+    msg_t m;
+
+    check(parse("{\"id\":\"1\",\"type\":20,\"content\":\"rolled 4\",\"interaction\":{\"type\":2,\"name\":\"roll\","
+                "\"user\":{\"id\":\"5\",\"username\":\"ann\",\"global_name\":\"Ann\"}}}", &m) &&
+              str_eq(&m.reply, "Ann used /roll") && !m.system,
+          "slash command answers say who used which command");
+    msg_free(&m);
+}
+
 static void test_poll(void)
 {
     msg_t m;
@@ -207,6 +218,7 @@ void entry(void)
     test_author_and_reply();
     test_parts();
     test_reaction_event();
+    test_interaction();
     test_poll();
     test_search();
     test_batch();

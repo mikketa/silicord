@@ -157,8 +157,18 @@ static void parse_reply(json_t obj, sb_t *out)
     json_t ref, author, content;
     sb_t raw = {0};
 
-    if (!json_get(obj, "referenced_message", &ref) || json_type(ref) != JSON_OBJECT)
+    if (!json_get(obj, "referenced_message", &ref) || json_type(ref) != JSON_OBJECT) {
+        /* A bot's answer to a slash command: "name used /command", like a reply. */
+        json_t in, name;
+        if (((json_get(obj, "interaction", &in) && json_type(in) == JSON_OBJECT) ||
+             (json_get(obj, "interaction_metadata", &in) && json_type(in) == JSON_OBJECT)) &&
+            json_get(in, "name", &name) && json_type(name) == JSON_STRING && json_get(in, "user", &author)) {
+            user_name(author, out);
+            sb_add(out, " used /");
+            json_str(name, out);
+        }
         return;
+    }
     if (json_get(ref, "author", &author))
         user_name(author, out);
     sb_add(out, ": ");
