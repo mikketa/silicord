@@ -42,6 +42,7 @@ add_library(silicord_core STATIC
   src/memberlist.c
   src/mls_crypto.c
   src/mls_schedule.c
+  src/mls_tree.c
   src/model.c
   src/p256.c
   src/msg.c
@@ -124,6 +125,8 @@ add_test(NAME dave COMMAND dave_test)
 
 silicord_test(mls_schedule_test bcrypt)
 add_test(NAME mls_schedule COMMAND mls_schedule_test)
+silicord_test(mls_tree_test bcrypt)
+add_test(NAME mls_tree COMMAND mls_tree_test)
 
 silicord_test(mls_crypto_test bcrypt)
 add_test(NAME mls_crypto COMMAND mls_crypto_test)
