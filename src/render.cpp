@@ -1486,6 +1486,43 @@ extern "C" void r_rich_free(r_rich_t *r)
 
 /* ---- Decoding ---- */
 
+extern "C" int r_bitmap_to_png(HBITMAP bmp, const wchar_t *path)
+{
+    IWICImagingFactory *wic = NULL;
+    IWICBitmap *src = NULL;
+    IWICStream *stream = NULL;
+    IWICBitmapEncoder *enc = NULL;
+    IWICBitmapFrameEncode *frame = NULL;
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    UINT w = 0, h = 0;
+    int ok = 0;
+
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    /* Clipboard alpha is usually garbage (screenshots): drop it, like Discord's PNGs of pastes. */
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory),
+                                   (void **)&wic)) &&
+        SUCCEEDED(wic->CreateBitmapFromHBITMAP(bmp, NULL, WICBitmapIgnoreAlpha, &src)) &&
+        SUCCEEDED(src->GetSize(&w, &h)) && w && h && SUCCEEDED(wic->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+        SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, NULL, &enc)) &&
+        SUCCEEDED(enc->Initialize(stream, WICBitmapEncoderNoCache)) && SUCCEEDED(enc->CreateNewFrame(&frame, NULL)) &&
+        SUCCEEDED(frame->Initialize(NULL)) && SUCCEEDED(frame->SetSize(w, h)) &&
+        SUCCEEDED(frame->SetPixelFormat(&format)) && SUCCEEDED(frame->WriteSource(src, NULL)) &&
+        SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit()))
+        ok = 1;
+    if (frame)
+        frame->Release();
+    if (enc)
+        enc->Release();
+    if (stream)
+        stream->Release();
+    if (src)
+        src->Release();
+    if (wic)
+        wic->Release();
+    return ok;
+}
+
 extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
 {
     IWICImagingFactory *wic = NULL;
