@@ -8776,8 +8776,10 @@ static void channel_menu(int i)
     }
     lstrcpynA(id, c->id, sizeof id);
     cmd = run_menu(menu);
+    /* The menu ran a message loop: the model may have changed, look both up again. */
     if ((i = model_find_channel(g_ui.model, id)) < 0)
         return;
+    g = model_channel_guild(g_ui.model, (unsigned)i);
     switch (cmd) {
     case CM_MARK_READ:
         mark_read(i);
