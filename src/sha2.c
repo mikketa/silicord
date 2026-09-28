@@ -148,6 +148,11 @@ void hkdf256_extract(const void *salt, size_t sn, const void *ikm, size_t n, uns
 
 int hkdf256_expand(const unsigned char prk[32], const void *info, size_t in, unsigned char *out, size_t n)
 {
+    return hkdf256_expand_n(prk, 32, info, in, out, n);
+}
+
+int hkdf256_expand_n(const unsigned char *prk, size_t pn, const void *info, size_t in, unsigned char *out, size_t n)
+{
     unsigned char t[32];
     size_t done = 0;
     unsigned char counter = 1;
@@ -157,7 +162,7 @@ int hkdf256_expand(const unsigned char prk[32], const void *info, size_t in, uns
     while (done < n) {
         hmac256_t m;
         size_t take = n - done < 32 ? n - done : 32;
-        hmac256_init(&m, prk, 32);
+        hmac256_init(&m, prk, pn);
         if (done)
             hmac256_update(&m, t, 32);
         hmac256_update(&m, info, in);

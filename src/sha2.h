@@ -31,6 +31,8 @@ void hmac256(const void *key, size_t kn, const void *data, size_t n, unsigned ch
 void hkdf256_extract(const void *salt, size_t sn, const void *ikm, size_t n, unsigned char prk[32]);
 /* Up to 255 * 32 bytes of output keying material. Returns 0 if `n` is too large. */
 int hkdf256_expand(const unsigned char prk[32], const void *info, size_t in, unsigned char *out, size_t n);
+/* The same with a pseudorandom key of any size (DAVE's sender ratchets start from 16 bytes). */
+int hkdf256_expand_n(const unsigned char *prk, size_t pn, const void *info, size_t in, unsigned char *out, size_t n);
 
 /* Wipes secrets so the compiler cannot drop the stores. */
 void secure_wipe(void *p, size_t n);
