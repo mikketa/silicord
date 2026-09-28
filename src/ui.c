@@ -15,6 +15,7 @@
 #include "img.h"
 #include "md.h"
 #include "memberlist.h"
+#include "command.h"
 #include "emoji.h"
 #include "mem.h"
 #include "qr.h"
@@ -119,7 +120,7 @@ typedef struct {
 #define AC_MAX 10
 #define AC_ROW 40
 
-enum { AC_NONE, AC_USER, AC_CHANNEL, AC_EMOJI };
+enum { AC_NONE, AC_USER, AC_CHANNEL, AC_EMOJI, AC_COMMAND, AC_OPTION };
 
 typedef struct {
     char label[80];      /* shown */
@@ -127,7 +128,9 @@ typedef struct {
     char id[24];         /* user or channel id, for the mention on send */
     int emoji;           /* unicode emoji index, -1 otherwise */
     char custom[24];     /* custom emoji id */
-    char avatar[48];
+    char avatar[48];     /* user avatar, or the application's icon for commands */
+    char detail[120];    /* commands and options: their description */
+    char app[48];        /* commands: the application's name; options: "required" */
 } ac_item_t;
 
 /* A mention picked from the suggestions: its text in the composer and what is sent. */
@@ -269,6 +272,9 @@ typedef struct {
     int npick, pick_scroll, pick_hover, pick_content;
     int picker_tab;            /* TAB_EMOJI, TAB_GIFS or TAB_STICKERS */
     sb_t gif_json;             /* last GIF answer */
+    sb_t cmd_index;            /* slash commands of cmd_key's server or DM */
+    char cmd_key[24];
+    int cmd_loading;
     sb_t gif_query;
     int gif_x[40], gif_y[40], gif_w[40], gif_h[40], ngif;
 
@@ -1346,6 +1352,7 @@ static void paint_toolbar(void);
 static void gifs_paint(int w, int h);
 static void gifs_click(int x, int y);
 static void on_gifs(const sb_t *p);
+static void on_commands(const sb_t *p);
 static void posts_clear(void);
 static void on_forum(const sb_t *p);
 static int forum_view(void);
@@ -3611,6 +3618,15 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
 
     if (msg == UI_MESSAGES) {
         on_batch((msg_batch_t *)lp);
+        redraw();
+        return;
+    }
+    if (msg == UI_COMMANDS) {
+        if (p) {
+            on_commands(p);
+            sb_free(p);
+            mem_free(p);
+        }
         redraw();
         return;
     }
@@ -6368,6 +6384,195 @@ static void ac_add_user(const char *id, const char *name, const char *avatar)
     lstrcpynA(it->avatar, avatar ? avatar : "", sizeof it->avatar);
 }
 
+/* ---- Slash commands ---- */
+
+static void ac_update(void);
+
+/* `s` starts with `prefix`, ignoring case. */
+static int starts_ci(const char *s, const char *prefix)
+{
+    int n = lstrlenA(prefix);
+
+    return n <= lstrlenA(s) && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, s, n, prefix, n) == CSTR_EQUAL;
+}
+
+static const char *cmd_scope(void)
+{
+    const char *guild = open_guild_id();
+
+    return guild ? guild : g_ui.msgs_channel;
+}
+
+/* Asks for the commands of the open server or DM once; UI_COMMANDS brings them. */
+static void commands_ensure(void)
+{
+    const char *key = cmd_scope();
+
+    if (!key[0] || (lstrcmpA(g_ui.cmd_key, key) == 0 && (g_ui.cmd_index.len || g_ui.cmd_loading)))
+        return;
+    lstrcpynA(g_ui.cmd_key, key, sizeof g_ui.cmd_key);
+    sb_clear(&g_ui.cmd_index);
+    g_ui.cmd_loading = 1;
+    app_fetch_commands(open_guild_id(), open_guild_id() ? NULL : g_ui.msgs_channel);
+}
+
+static void on_commands(const sb_t *p)
+{
+    const char *key = p->data;
+    size_t n = (size_t)lstrlenA(key) + 1;
+
+    if (lstrcmpA(key, g_ui.cmd_key) != 0)
+        return;
+    g_ui.cmd_loading = 0;
+    sb_clear(&g_ui.cmd_index);
+    if (p->len > n)
+        sb_addn(&g_ui.cmd_index, p->data + n, p->len - n);
+    else
+        sb_add(&g_ui.cmd_index, "{}"); /* nothing usable: don't ask again */
+    ac_update();
+}
+
+static void ac_add_command(json_t index, json_t cmd, const char *label, const char *insert)
+{
+    ac_item_t *it;
+    json_t v, app;
+    sb_t s = {0};
+
+    if (g_ui.ac_n == AC_MAX)
+        return;
+    it = &g_ui.ac[g_ui.ac_n++];
+    *it = (ac_item_t){0};
+    it->emoji = -1;
+    lstrcpynA(it->label, label, sizeof it->label);
+    lstrcpynA(it->insert, insert, sizeof it->insert);
+    if (json_get(cmd, "description", &v) && json_str(v, &s))
+        lstrcpynA(it->detail, s.data, sizeof it->detail);
+    sb_free(&s);
+    if (json_get(cmd, "application_id", &v)) {
+        json_raw(v, it->id, sizeof it->id);
+        if (cmd_app(index, it->id, &app)) {
+            if (json_get(app, "name", &v) && json_str(v, &s))
+                lstrcpynA(it->app, s.data, sizeof it->app);
+            sb_free(&s);
+            if (json_get(app, "icon", &v) && json_type(v) == JSON_STRING)
+                json_raw(v, it->avatar, sizeof it->avatar);
+        }
+    }
+}
+
+/*
+ * Suggestions while a slash command is typed: the commands for the first word,
+ * then its subcommands or options. Returns 0 when the text is no command of ours.
+ */
+static int ac_commands(const wchar_t *w, int end)
+{
+    sb_t s = {0};
+    json_t index, cmd, v;
+    size_t sp, word;
+    char q[64];
+
+    commands_ensure();
+    g_ui.ac_n = 0;
+    if (!g_ui.cmd_index.len || !json_parse(g_ui.cmd_index.data, g_ui.cmd_index.len, &index))
+        return 1; /* loading: nothing to show yet */
+    wide_to_utf8(w, (size_t)end, &s);
+    for (sp = 1; sp < s.len && s.data[sp] != ' ' && s.data[sp] != '\n'; sp++)
+        ;
+    /* The word being typed, and where it starts in the composer (UTF-16). */
+    for (word = s.len; word > 0 && s.data[word - 1] != ' '; word--)
+        ;
+    lstrcpynA(q, s.data ? s.data + word : "", sizeof q);
+    g_ui.ac_end = end;
+    g_ui.ac_start = end - MultiByteToWideChar(CP_UTF8, 0, s.data + word, (int)(s.len - word), NULL, 0);
+    if (sp == s.len) {
+        json_iter_t it = {0};
+        g_ui.ac_kind = AC_COMMAND;
+        lstrcpynA(g_ui.ac_query, q + 1, sizeof g_ui.ac_query);
+        while (g_ui.ac_n < AC_MAX && cmd_next(index, &it, &cmd)) {
+            char name[40], label[48], insert[48];
+            if (!json_get(cmd, "name", &v))
+                continue;
+            json_raw(v, name, sizeof name);
+            if (!starts_ci(name, q + 1))
+                continue;
+            wsprintfA(label, "/%s", name);
+            wsprintfA(insert, "/%s ", name);
+            ac_add_command(index, cmd, label, insert);
+        }
+    } else if (cmd_find(index, s.data + 1, sp - 1, &cmd)) {
+        json_t opts, o;
+        json_iter_t it;
+        size_t used;
+        const char *args = s.data + sp + 1;
+        size_t alen = s.len - sp - 1;
+        int leaf = cmd_leaf(cmd, args, word > sp ? word - sp - 1 : 0, &opts, &used);
+        g_ui.ac_kind = AC_OPTION;
+        if (opts.p && !find_str(q, ":")) {
+            json_iter(opts, &it);
+            while (g_ui.ac_n < AC_MAX && json_next(&it, NULL, &o)) {
+                char name[40], label[48], insert[48], mark[44];
+                if (!json_get(o, "name", &v))
+                    continue;
+                json_raw(v, name, sizeof name);
+                if (!starts_ci(name, q))
+                    continue;
+                wsprintfA(mark, "%s:", name);
+                if (leaf && alen && find_str(args, mark)) /* already given */
+                    continue;
+                lstrcpynA(label, name, sizeof label);
+                wsprintfA(insert, leaf ? "%s:" : "%s ", name);
+                ac_add_command(index, o, label, insert);
+                {
+                    ac_item_t *it2 = &g_ui.ac[g_ui.ac_n - 1];
+                    it2->id[0] = it2->avatar[0] = 0;
+                    lstrcpyA(it2->app, leaf && json_get(o, "required", &v) && json_type(v) == JSON_TRUE ? "required" : "");
+                }
+            }
+        }
+    } else {
+        sb_free(&s);
+        return 0;
+    }
+    sb_free(&s);
+    return 1;
+}
+
+/* Sends the composer's "/command ..." as an interaction. Returns 0 when it is no known command. */
+static int send_command(const char *s, size_t n)
+{
+    json_t index, cmd, v;
+    size_t sp;
+    sb_t data = {0};
+    char err[128], app[24] = "";
+
+    if (g_ui.cmd_loading && lstrcmpA(g_ui.cmd_key, cmd_scope()) == 0) {
+        set_text(&g_ui.send_error, "Commands are still loading");
+        redraw();
+        return 1;
+    }
+    if (!g_ui.cmd_index.len || lstrcmpA(g_ui.cmd_key, cmd_scope()) != 0 ||
+        !json_parse(g_ui.cmd_index.data, g_ui.cmd_index.len, &index))
+        return 0;
+    for (sp = 1; sp < n && s[sp] != ' ' && s[sp] != '\n'; sp++)
+        ;
+    if (!cmd_find(index, s + 1, sp - 1, &cmd))
+        return 0;
+    if (!cmd_build(cmd, s + sp, n - sp, &data, err, sizeof err)) {
+        set_text(&g_ui.send_error, err);
+    } else {
+        if (json_get(cmd, "application_id", &v))
+            json_raw(v, app, sizeof app);
+        app_run_command(open_guild_id(), g_ui.msgs_channel, app, data.data);
+        sb_clear(&g_ui.send_error);
+        SetWindowTextW(g_ui.composer, L"");
+        g_ui.nmention = 0;
+        g_ui.msg_scroll = 0;
+    }
+    sb_free(&data);
+    redraw();
+    return 1;
+}
+
 /* Finds the word being typed before the caret; returns its kind and fills g_ui.ac. */
 static void ac_update(void)
 {
@@ -6385,6 +6590,14 @@ static void ac_update(void)
     SendMessageW(g_ui.composer, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
     if ((int)end > len)
         end = (DWORD)len;
+    if (w[0] == '/' && ac_commands(w, (int)end)) {
+        mem_free(w);
+        if (!g_ui.ac_n)
+            g_ui.ac_kind = AC_NONE;
+        if (g_ui.ac_sel >= g_ui.ac_n)
+            g_ui.ac_sel = 0;
+        return;
+    }
     for (k = (int)end - 1; k >= 0 && w[k] != ' ' && w[k] != '\n' && w[k] != '@' && w[k] != '#' && w[k] != ':'; k--)
         ;
     if (k >= 0 && (w[k] == '@' || w[k] == '#' || w[k] == ':') && (k == 0 || w[k - 1] == ' ' || w[k - 1] == '\n')) {
@@ -6482,7 +6695,11 @@ static void paint_autocomplete(void)
     r = ac_rect();
     r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF151515);
     r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
-    title = g_ui.ac_kind == AC_USER ? "MEMBERS" : g_ui.ac_kind == AC_CHANNEL ? "TEXT CHANNELS" : "EMOJI MATCHING";
+    title = g_ui.ac_kind == AC_USER      ? "MEMBERS"
+            : g_ui.ac_kind == AC_CHANNEL ? "TEXT CHANNELS"
+            : g_ui.ac_kind == AC_COMMAND ? "COMMANDS"
+            : g_ui.ac_kind == AC_OPTION  ? "OPTIONS"
+                                         : "EMOJI MATCHING";
     text(g_ui.f_cat, C_MUTED, rect(r.left + S(16), r.top + S(8), S(300), S(24)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     for (int i = 0; i < g_ui.ac_n; i++) {
         const ac_item_t *it = &g_ui.ac[i];
@@ -6497,6 +6714,26 @@ static void paint_autocomplete(void)
                 r_circle(x + S(8), y + S(7), S(24), ARGB(C_ITEM));
         } else if (g_ui.ac_kind == AC_CHANNEL) {
             text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(24), S(AC_ROW)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else if (g_ui.ac_kind == AC_COMMAND || g_ui.ac_kind == AC_OPTION) {
+            r_image_t *img = NULL;
+            int lw = text_width(g_ui.f_body, it->label), right = it->app[0] ? text_width(g_ui.f_small, it->app) + S(16) : 0;
+            if (it->avatar[0]) {
+                char key[64], path[128];
+                wsprintfA(key, "app:%s", it->id);
+                wsprintfA(path, "/app-icons/%s/%s.png?size=64", it->id, it->avatar);
+                img = image_get(key, path, S(24));
+            }
+            if (img)
+                r_image(img, x + S(8), y + S(7), S(24), S(24), S(12));
+            else
+                text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(24), S(AC_ROW)), "/", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            text(g_ui.f_body, C_INK, rect(x + S(44), y, lw + S(4), S(AC_ROW)), it->label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            text(g_ui.f_small, C_MUTED, rect(x + S(56) + lw, y, r.right - x - S(72) - lw - right, S(AC_ROW)), it->detail,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (right)
+                text(g_ui.f_small, C_FAINT, rect(r.right - S(16) - right, y, right - S(8), S(AC_ROW)), it->app,
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            continue;
         } else if (it->custom[0]) {
             r_image_t *img = emoji_image(it->custom, S(24));
             if (img)
@@ -6516,6 +6753,7 @@ static void ac_accept(int i)
 {
     const ac_item_t *it = &g_ui.ac[i];
     wchar_t *w = utf8_to_wide(it->insert, lstrlenA(it->insert));
+    int command = g_ui.ac_kind == AC_COMMAND || g_ui.ac_kind == AC_OPTION;
 
     SendMessageW(g_ui.composer, EM_SETSEL, (WPARAM)g_ui.ac_start, (LPARAM)g_ui.ac_end);
     SendMessageW(g_ui.composer, EM_REPLACESEL, TRUE, (LPARAM)w);
@@ -6528,6 +6766,8 @@ static void ac_accept(int i)
     }
     g_ui.ac_kind = AC_NONE;
     g_ui.ac_n = 0;
+    if (command) /* a command's options come next */
+        ac_update();
     redraw();
 }
 
@@ -6569,8 +6809,12 @@ static int ac_key(WPARAM key)
     case VK_DOWN:
         g_ui.ac_sel = (g_ui.ac_sel + 1) % g_ui.ac_n;
         break;
-    case VK_TAB:
     case VK_RETURN:
+        if (g_ui.ac_kind == AC_OPTION)
+            return 0; /* sends the command */
+        ac_accept(g_ui.ac_sel);
+        return 1;
+    case VK_TAB:
         ac_accept(g_ui.ac_sel);
         return 1;
     case VK_ESCAPE:
@@ -8079,6 +8323,19 @@ static void send_composer(void)
     if (b > a || g_ui.nuploads) {
         sb_t out = {0};
         text.data[b] = 0;
+        if (text.data[a] == '/' && !g_ui.nuploads && g_ui.bar != BAR_EDIT) {
+            sb_t trimmed = {0}, mentioned = {0};
+            int sent;
+            sb_addn(&trimmed, text.data + a, b - a);
+            apply_mentions(&trimmed, &mentioned);
+            sent = send_command(mentioned.data, mentioned.len);
+            sb_free(&trimmed);
+            sb_free(&mentioned);
+            if (sent) {
+                sb_free(&text);
+                return;
+            }
+        }
         /* :smile: and :server_emoji: become the real thing, as in Discord. */
         {
             sb_t trimmed = {0}, mentioned = {0};
@@ -8595,7 +8852,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_GIFS) {
+        if (msg >= UI_QR && msg <= UI_COMMANDS) {
             on_worker(msg, wp, lp);
             return 0;
         }
