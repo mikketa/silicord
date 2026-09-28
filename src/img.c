@@ -1,4 +1,5 @@
 #include "img.h"
+#include "console.h"
 #include "render.h"
 #include "http.h"
 #include "mem.h"
@@ -176,9 +177,11 @@ static int fetch(const char *path, http_resp_t *resp)
     n = (int)(slash - p);
     if (!*slash || n <= 0 || n >= 127)
         return 0;
-    /* Only Discord's own media hosts: *.discordapp.net (media and external image proxies) and the CDN. */
+    /* Only Discord's own media hosts (*.discordapp.net proxies, the CDN) and the GIF picker's providers. */
     if (!(n > 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, slash - 15, 15, ".discordapp.net", 15) == CSTR_EQUAL) &&
-        !(n == 18 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "cdn.discordapp.com", 18) == CSTR_EQUAL))
+        !(n == 18 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "cdn.discordapp.com", 18) == CSTR_EQUAL) &&
+        !(n == 16 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "static.klipy.com", 16) == CSTR_EQUAL) &&
+        !(n == 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "media.tenor.com", 15) == CSTR_EQUAL))
         return 0;
     MultiByteToWideChar(CP_UTF8, 0, p, n, host, 127);
     host[n] = 0;
@@ -224,6 +227,16 @@ static DWORD WINAPI worker(LPVOID arg)
             if (fetch(j->path.data, &resp) && resp.status == 200 &&
                 (img = r_image_decode(resp.body.data, resp.body.len, j->max_px)) != NULL)
                 cache_write(j->path.data, &resp.body);
+            if (!img) { /* one write, so lines from several workers don't interleave */
+                char line[48];
+                sb_t out = {0};
+                wsprintfA(line, "[img] failed (HTTP %u, %u bytes): ", resp.status, (unsigned)resp.body.len);
+                sb_add(&out, line);
+                sb_add(&out, j->path.data);
+                sb_add(&out, "\r\n");
+                con_print_sb(&out);
+                sb_free(&out);
+            }
         }
         http_resp_free(&resp);
 
