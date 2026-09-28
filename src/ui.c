@@ -4421,11 +4421,26 @@ static int click_part(int x, int y)
         } else if (c->type == COMP_BUTTON && c->custom_id.len) {
             app_press_component(open_guild_id(), channel, m->id, m->app_id, m->flags, c->type, c->custom_id.data, NULL);
         } else if (c->type == COMP_STRING_SELECT && c->options.len) {
-            char *value = pick_option(&c->options);
-            if (value) {
-                app_press_component(open_guild_id(), channel, m->id, m->app_id, m->flags, c->type, c->custom_id.data, value);
-                mem_free(value);
-            }
+            /*
+             * The menu runs a message loop: the bot may edit or delete the
+             * message meanwhile, freeing `m` and `c`. Keep copies of what
+             * the interaction needs, and send it only if the message is still there.
+             */
+            char id[24], app[24], chan_id[24];
+            int flags = m->flags;
+            sb_t options = {0}, custom = {0};
+            char *value;
+            lstrcpynA(id, m->id, sizeof id);
+            lstrcpynA(app, m->app_id, sizeof app);
+            lstrcpynA(chan_id, channel, sizeof chan_id);
+            sb_addn(&options, c->options.data, c->options.len);
+            sb_addn(&custom, c->custom_id.data ? c->custom_id.data : "", c->custom_id.len);
+            value = pick_option(&options);
+            if (value && find_msg(id) >= 0)
+                app_press_component(open_guild_id(), chan_id, id, app, flags, COMP_STRING_SELECT, custom.data, value);
+            mem_free(value);
+            sb_free(&options);
+            sb_free(&custom);
         }
         break;
     }
