@@ -119,6 +119,10 @@ void app_ack_bulk(const char *pairs, int n);
 void app_leave_guild(const char *guild_id);
 /* Tells Discord (and your other devices) the channel was read up to message_id. */
 void app_ack(const char *channel_id, const char *message_id);
+/* Marks a channel read up to message_id only, leaving what follows unread ("Mark Unread"). */
+void app_ack_manual(const char *channel_id, const char *message_id);
+/* Pins or unpins a message. */
+void app_pin(const char *channel_id, const char *message_id, int pin);
 /* Looks up a channel we do not know yet (a new DM); the answer comes back as UI_EVENT CHANNEL_CREATE. */
 void app_fetch_channel(const char *channel_id);
 /* Subscribes to a server channel's live typing and member list (op 14), as Discord does when opening it. */

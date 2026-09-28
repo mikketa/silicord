@@ -8771,7 +8771,7 @@ static LRESULT CALLBACK settings_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM l
 enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
-    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD,
+    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD,
     CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
     CM_NOTIFY = 120,     /* + NOTIFY_* */
 };
@@ -8861,6 +8861,38 @@ static void copy_link(const char *guild, const char *channel, const char *messag
     copy_text(link);
 }
 
+/* Pinning needs Manage Messages or Pin Messages, except in DMs. */
+static int can_pin(void)
+{
+    return g_ui.channel >= 0 &&
+           (model_permissions(g_ui.model, (unsigned)g_ui.channel) & (PERM_MANAGE_MESSAGES | PERM_PIN_MESSAGES)) != 0;
+}
+
+/* Message i and those after it become unread: the NEW line goes above it and the read mark just before. */
+static void mark_unread(int i)
+{
+    channel_t *c;
+    char before[24];
+
+    if (g_ui.channel < 0)
+        return;
+    c = &g_ui.model->channels[g_ui.channel];
+    if (i > 0) {
+        lstrcpynA(before, g_ui.msgs[i - 1].id, sizeof before);
+    } else {
+        /* The id one below: nothing older is loaded, and any smaller snowflake does. */
+        unsigned long long id = 0;
+        for (const char *p = g_ui.msgs[i].id; *p >= '0' && *p <= '9'; p++)
+            id = id * 10 + (unsigned long long)(*p - '0');
+        wsprintfA(before, "%I64u", id ? id - 1 : 0);
+    }
+    lstrcpynA(c->read, before, sizeof c->read);
+    for (int k = 0; k < g_ui.nmsgs; k++)
+        g_ui.msgs[k].first_new = k == i;
+    app_ack_manual(c->id, before);
+    update_title();
+}
+
 static void message_menu(int i)
 {
     HMENU menu = CreatePopupMenu();
@@ -8876,7 +8908,10 @@ static void message_menu(int i)
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (m->content.len)
         AppendMenuW(menu, MF_STRING, CM_COPY_TEXT, L"Copy Text");
+    if (can_pin())
+        AppendMenuW(menu, MF_STRING, CM_PIN, m->pinned ? L"Unpin Message" : L"Pin Message");
     AppendMenuW(menu, MF_STRING, CM_FORWARD, L"Forward");
+    AppendMenuW(menu, MF_STRING, CM_MARK_UNREAD, L"Mark Unread");
     AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Message Link");
     if (developer_mode())
         AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
@@ -8906,6 +8941,13 @@ static void message_menu(int i)
         break;
     case CM_COPY_LINK:
         copy_link(open_guild_id(), g_ui.msgs_channel, m->id);
+        break;
+    case CM_PIN:
+        m->pinned = !m->pinned;
+        app_pin(g_ui.msgs_channel, m->id, m->pinned);
+        break;
+    case CM_MARK_UNREAD:
+        mark_unread(i);
         break;
     case CM_FORWARD:
         forward_open(m->id);

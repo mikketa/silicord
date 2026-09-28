@@ -894,10 +894,13 @@ static DWORD WINAPI ack_main(LPVOID arg)
     rest_job_t *j = arg;
     http_resp_t resp = {0};
     char path[128];
-    static const char body[] = "{\"token\":null}";
+    static const char body[] = "{\"token\":null}", manual[] = "{\"manual\":true,\"mention_count\":0}";
 
     wsprintfA(path, "/channels/%s/messages/%s/ack", j->channel, j->before);
-    http_request("POST", path, j->token.data, body, sizeof body - 1, &resp);
+    if (j->flag)
+        http_request("POST", path, j->token.data, manual, sizeof manual - 1, &resp);
+    else
+        http_request("POST", path, j->token.data, body, sizeof body - 1, &resp);
     http_resp_free(&resp);
     free_job(j);
     return 0;
@@ -1370,6 +1373,23 @@ void app_ack(const char *channel_id, const char *message_id)
 
     lstrcpynA(j->before, message_id, sizeof j->before);
     CloseHandle(CreateThread(NULL, 0, ack_main, j, 0, NULL));
+}
+
+void app_ack_manual(const char *channel_id, const char *message_id)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->before, message_id, sizeof j->before);
+    j->flag = 1;
+    CloseHandle(CreateThread(NULL, 0, ack_main, j, 0, NULL));
+}
+
+void app_pin(const char *channel_id, const char *message_id, int pin)
+{
+    char path[128];
+
+    wsprintfA(path, "/channels/%s/messages/pins/%s", channel_id, message_id);
+    rest(pin ? "PUT" : "DELETE", path, NULL);
 }
 
 void app_open_channel(const char *channel_id)
