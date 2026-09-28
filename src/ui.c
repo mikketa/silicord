@@ -3480,18 +3480,18 @@ static HICON load_icon(int metric, UINT dpi)
 /* Sharp icons for the window's monitor: the title bar, the taskbar and the tray. */
 static void set_icons(UINT dpi)
 {
-    HICON big = load_icon(SM_CXICON, dpi), small = load_icon(SM_CXSMICON, dpi);
+    HICON big = load_icon(SM_CXICON, dpi), sm = load_icon(SM_CXSMICON, dpi);
 
-    if (!big || !small) {
+    if (!big || !sm) {
         if (big)
             DestroyIcon(big);
-        if (small)
-            DestroyIcon(small);
+        if (sm)
+            DestroyIcon(sm);
         return;
     }
     SendMessageW(g_ui.wnd, WM_SETICON, ICON_BIG, (LPARAM)big);
-    SendMessageW(g_ui.wnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
-    g_ui.tray.hIcon = small;
+    SendMessageW(g_ui.wnd, WM_SETICON, ICON_SMALL, (LPARAM)sm);
+    g_ui.tray.hIcon = sm;
     g_ui.tray.hBalloonIcon = big;
     if (g_ui.tray.hWnd) {
         g_ui.tray.uFlags = NIF_ICON; /* not NIF_INFO: that would show the last notification again */
@@ -3502,7 +3502,7 @@ static void set_icons(UINT dpi)
     if (g_ui.icon_small)
         DestroyIcon(g_ui.icon_small);
     g_ui.icon_big = big;
-    g_ui.icon_small = small;
+    g_ui.icon_small = sm;
 }
 
 /* ---- Read markers and notifications ---- */
