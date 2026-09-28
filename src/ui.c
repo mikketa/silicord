@@ -10,6 +10,7 @@
 #include <commdlg.h>
 #include <objbase.h>
 #include <psapi.h>
+#include <mmsystem.h>
 #include "ui.h"
 #include "render.h"
 #include "img.h"
@@ -229,6 +230,13 @@ typedef struct {
     char voice_name[100];      /* its channel name */
     unsigned voice_speaking;   /* who spoke at the last check, one bit per member of our call */
     int voice_muted, voice_deafened;
+    struct {
+        char channel[24];
+        int ringing;           /* we are being rung */
+    } calls[16];               /* calls going on in our direct messages */
+    int ncalls, ring_sound;
+    RECT call_join, call_decline, call_leave, card_join, card_decline;
+    char card_channel[24];     /* the call the incoming call card is about */
     voice_prefs_t vprefs;      /* this computer's voice settings */
     wchar_t dev_in[16][AUDIO_NAME], dev_out[16][AUDIO_NAME];
     int ndev_in, ndev_out;
@@ -1024,8 +1032,14 @@ static void voice_store(const char *guild, json_t s)
         json_raw(v, user, sizeof user);
     if (json_get(s, "channel_id", &v) && json_type(v) == JSON_STRING)
         json_raw(v, channel, sizeof channel);
-    if (!user[0] || !guild[0])
+    if (!user[0])
         return;
+    if (channel[0])
+        for (int i = g_ui.nvoices; i-- > 0;)
+            if (lstrcmpA(g_ui.voices[i].user, user) == 0 && lstrcmpA(g_ui.voices[i].guild, guild) != 0) {
+                sb_free(&g_ui.voices[i].name);
+                g_ui.voices[i] = g_ui.voices[--g_ui.nvoices];
+            }
     e = voice_find(guild, user);
     if (!channel[0]) {
         if (e) {
@@ -1085,6 +1099,302 @@ static void voice_request_names(void)
     }
     if (n)
         app_request_members(guild, ids, n);
+}
+
+/* ---- Calls in direct messages ---- */
+
+#define CALL_H 200
+#define CALL_RED 0xFFE5484Du
+
+static void clamp_scroll(void);
+static void redraw(void);
+static int main_right(void);
+static void go_to_channel(int i);
+
+static int call_find(const char *channel)
+{
+    for (int i = 0; i < g_ui.ncalls; i++)
+        if (lstrcmpA(g_ui.calls[i].channel, channel) == 0)
+            return i;
+    return -1;
+}
+
+static int in_call(const char *channel)
+{
+    return g_ui.voice_state != VOICE_OFF && lstrcmpA(g_ui.voice_channel, channel) == 0;
+}
+
+/* The ringtone plays while a call rings us and we are not in it. */
+static void update_ringing(void)
+{
+    int ring = 0;
+
+    for (int i = 0; i < g_ui.ncalls; i++)
+        ring |= g_ui.calls[i].ringing && !in_call(g_ui.calls[i].channel);
+    if (ring != g_ui.ring_sound) {
+        g_ui.ring_sound = ring;
+        if (ring) {
+            FLASHWINFO fw = {sizeof fw, g_ui.wnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0};
+            PlaySoundW(L"Notification.Looping.Call", NULL, SND_ALIAS | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+            FlashWindowEx(&fw);
+        } else {
+            PlaySoundW(NULL, NULL, 0);
+        }
+    }
+}
+
+/* CALL_CREATE and CALL_UPDATE: who is rung, and (on create) who is in it. */
+static void call_store(json_t d, int create)
+{
+    json_t v, list, item;
+    json_iter_t it;
+    char channel[24] = "", me[24];
+    int i;
+
+    if (json_get(d, "channel_id", &v))
+        json_raw(v, channel, sizeof channel);
+    if (!channel[0] || !g_ui.model)
+        return;
+    if ((i = call_find(channel)) < 0) {
+        if (g_ui.ncalls == (int)ARRAYSIZE(g_ui.calls))
+            return;
+        i = g_ui.ncalls++;
+        lstrcpynA(g_ui.calls[i].channel, channel, sizeof g_ui.calls[i].channel);
+    }
+    g_ui.calls[i].ringing = 0;
+    lstrcpynA(me, g_ui.model->user_id, sizeof me);
+    if (json_get(d, "ringing", &list)) {
+        json_iter(list, &it);
+        while (json_next(&it, NULL, &item)) {
+            char id[24] = "";
+            json_raw(item, id, sizeof id);
+            g_ui.calls[i].ringing |= lstrcmpA(id, me) == 0;
+        }
+    }
+    if (create && json_get(d, "voice_states", &list)) {
+        json_iter(list, &it);
+        while (json_next(&it, NULL, &item))
+            voice_store("", item);
+    }
+    update_ringing();
+}
+
+static void call_delete(const char *channel)
+{
+    int i = call_find(channel);
+
+    if (i >= 0)
+        g_ui.calls[i] = g_ui.calls[--g_ui.ncalls];
+    for (int k = g_ui.nvoices; k-- > 0;)
+        if (!g_ui.voices[k].guild[0] && lstrcmpA(g_ui.voices[k].channel, channel) == 0) {
+            sb_free(&g_ui.voices[k].name);
+            g_ui.voices[k] = g_ui.voices[--g_ui.nvoices];
+        }
+    update_ringing();
+}
+
+/* Joins a voice channel (guild_id empty for a call in a direct message). */
+static void voice_join(const char *guild_id, const char *channel_id, const char *name)
+{
+    lstrcpynA(g_ui.voice_channel, channel_id, sizeof g_ui.voice_channel);
+    lstrcpynA(g_ui.voice_name, name, sizeof g_ui.voice_name);
+    g_ui.voice_state = VOICE_CONNECTING;
+    sb_clear(&g_ui.voice_status);
+    sb_add(&g_ui.voice_status, "Connecting\xE2\x80\xA6");
+    app_voice_join(guild_id, channel_id);
+    update_ringing();
+    clamp_scroll();
+    redraw();
+}
+
+static void voice_leave(void)
+{
+    KillTimer(g_ui.wnd, TIMER_VOICE);
+    app_voice_leave();
+    g_ui.voice_state = VOICE_OFF;
+    g_ui.voice_channel[0] = 0;
+    update_ringing();
+    clamp_scroll();
+    redraw();
+}
+
+/* Starts the call of direct message `i`, or joins the one going on. */
+static void call_start(int i)
+{
+    const channel_t *c = chan(i);
+    int ongoing = call_find(c->id) >= 0;
+
+    if (in_call(c->id))
+        return;
+    voice_join("", c->id, model_str(g_ui.model, c->name));
+    if (!ongoing)
+        app_call_ring(c->id, NULL);
+}
+
+/* Declines: stops the ringing, for us only. */
+static void call_decline(const char *channel)
+{
+    int i = call_find(channel);
+
+    if (i >= 0)
+        g_ui.calls[i].ringing = 0;
+    if (g_ui.model)
+        app_call_ring(channel, g_ui.model->user_id);
+    update_ringing();
+    redraw();
+}
+
+/* A name and avatar for someone in a call: us, a friend, or the other side of the direct message. */
+static const char *call_user(const char *user, const char *channel, const char **avatar)
+{
+    relation_t *r;
+    int c;
+
+    *avatar = "";
+    if (g_ui.model && lstrcmpA(user, g_ui.model->user_id) == 0) {
+        *avatar = g_ui.model->user_avatar;
+        return g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name) : "";
+    }
+    if ((r = rel_find(user)) != NULL) {
+        *avatar = r->avatar;
+        return str_or_empty(&r->name);
+    }
+    c = g_ui.model ? model_find_channel(g_ui.model, channel) : -1;
+    if (c >= 0 && lstrcmpA(chan(c)->user_id, user) == 0) {
+        *avatar = chan(c)->avatar;
+        return model_str(g_ui.model, chan(c)->name);
+    }
+    return "\xE2\x80\xA6";
+}
+
+/* The open direct message's call, above its messages: who is in it, and the buttons. */
+static int call_h(void)
+{
+    return g_ui.model && g_ui.channel >= 0 && is_dm_type(chan(g_ui.channel)->type) &&
+                   (call_find(chan(g_ui.channel)->id) >= 0 || in_call(chan(g_ui.channel)->id))
+               ? S(CALL_H)
+               : 0;
+}
+
+static RECT call_button(int x, int y, int w, const char *label, unsigned color)
+{
+    r_round(x, y, w, S(40), S(20), color);
+    text(g_ui.f_h, C_INK, rect(x, y, w, S(40)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return rect(x, y, w, S(40));
+}
+
+static void paint_call(int x0, int w)
+{
+    const channel_t *c;
+    int h = call_h(), n = 0, k, x, y = S(HEADER_H), ring;
+
+    SetRectEmpty(&g_ui.call_join);
+    SetRectEmpty(&g_ui.call_decline);
+    SetRectEmpty(&g_ui.call_leave);
+    if (!h)
+        return;
+    c = chan(g_ui.channel);
+    k = call_find(c->id);
+    ring = k >= 0 && g_ui.calls[k].ringing && !in_call(c->id);
+    fill(x0, y, w, h, C_RAIL);
+    for (int i = 0; i < g_ui.nvoices; i++)
+        n += !g_ui.voices[i].guild[0] && lstrcmpA(g_ui.voices[i].channel, c->id) == 0;
+    x = x0 + (w - (n ? n * S(88) - S(16) : 0)) / 2;
+    for (int i = 0; i < g_ui.nvoices; i++) {
+        voice_t *v = &g_ui.voices[i];
+        const char *avatar, *name;
+        r_image_t *img;
+        if (v->guild[0] || lstrcmpA(v->channel, c->id) != 0)
+            continue;
+        name = call_user(v->user, c->id, &avatar);
+        img = avatar[0] ? user_avatar(v->user, avatar) : NULL;
+        if (img)
+            r_image(img, x, y + S(28), S(72), S(72), S(36));
+        else
+            r_circle(x, y + S(28), S(72), ARGB(C_ITEM));
+        if (in_call(c->id) && g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user))
+            r_round_outline(x - S(4), y + S(24), S(80), S(80), S(40), S(3), ARGB(C_GREEN));
+        if (v->flags & (VOICE_MUTE | VOICE_DEAF)) {
+            r_circle(x + S(50), y + S(78), S(24), CALL_RED);
+            text_w(g_ui.f_icon, C_INK, rect(x + S(50), y + S(78), S(24), S(24)), v->flags & VOICE_DEAF ? L"\xE74F" : L"\xEC54", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        text(g_ui.f_small, C_MUTED, rect(x - S(8), y + S(106), S(88), S(20)), name, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        x += S(88);
+    }
+    if (!n)
+        text(g_ui.f_body, C_MUTED, rect(x0, y + S(40), w, S(60)), ring ? "Incoming call" : "Calling\xE2\x80\xA6",
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    y += h - S(56);
+    if (in_call(c->id)) {
+        g_ui.call_leave = call_button(x0 + (w - S(140)) / 2, y, S(140), "Leave", CALL_RED);
+    } else if (ring) {
+        g_ui.call_join = call_button(x0 + w / 2 - S(148), y, S(140), "Join Call", ARGB(C_GREEN));
+        g_ui.call_decline = call_button(x0 + w / 2 + S(8), y, S(140), "Decline", CALL_RED);
+    } else {
+        g_ui.call_join = call_button(x0 + (w - S(140)) / 2, y, S(140), "Join Call", ARGB(C_GREEN));
+    }
+}
+
+/* A call ringing us in another conversation: a card at the top of the window. */
+static void paint_call_card(void)
+{
+    int x, y = S(HEADER_H) + S(12), w = S(360), h = S(120);
+    const char *name;
+
+    SetRectEmpty(&g_ui.card_join);
+    SetRectEmpty(&g_ui.card_decline);
+    g_ui.card_channel[0] = 0;
+    for (int i = 0; i < g_ui.ncalls; i++) {
+        int c = g_ui.model ? model_find_channel(g_ui.model, g_ui.calls[i].channel) : -1;
+        if (!g_ui.calls[i].ringing || in_call(g_ui.calls[i].channel) || c < 0 || c == g_ui.channel)
+            continue;
+        lstrcpynA(g_ui.card_channel, g_ui.calls[i].channel, sizeof g_ui.card_channel);
+        name = model_str(g_ui.model, chan(c)->name);
+        x = S(RAIL_W + SIDE_W) + (main_right() - S(RAIL_W + SIDE_W) - w) / 2;
+        r_round(x, y, w, h, S(8), 0xFF222222);
+        r_round_outline(x, y, w, h, S(8), 1, 0xFF3A3A3A);
+        text(g_ui.f_h, C_INK, rect(x + S(16), y + S(14), w - S(32), S(22)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_small, C_MUTED, rect(x + S(16), y + S(38), w - S(32), S(20)), "Incoming call", DT_LEFT | DT_SINGLELINE);
+        g_ui.card_join = call_button(x + S(16), y + h - S(54), (w - S(44)) / 2, "Join Call", ARGB(C_GREEN));
+        g_ui.card_decline = call_button(x + w / 2 + S(6), y + h - S(54), (w - S(44)) / 2, "Decline", CALL_RED);
+        return;
+    }
+}
+
+/* Clicks on the call panel or card; returns whether one was used. */
+static int click_call(int x, int y)
+{
+    POINT pt = {x, y};
+
+    if (PtInRect(&g_ui.card_join, pt) || PtInRect(&g_ui.card_decline, pt)) {
+        char channel[24];
+        int c;
+        lstrcpynA(channel, g_ui.card_channel, sizeof channel);
+        c = g_ui.model ? model_find_channel(g_ui.model, channel) : -1;
+        if (PtInRect(&g_ui.card_decline, pt)) {
+            call_decline(channel);
+        } else if (c >= 0) {
+            go_to_channel(c);
+            call_start(c);
+        }
+        return 1;
+    }
+    if (g_ui.channel < 0)
+        return 0;
+    if (PtInRect(&g_ui.call_join, pt)) {
+        call_start(g_ui.channel);
+        return 1;
+    }
+    if (PtInRect(&g_ui.call_decline, pt)) {
+        call_decline(chan(g_ui.channel)->id);
+        return 1;
+    }
+    if (PtInRect(&g_ui.call_leave, pt)) {
+        voice_leave();
+        return 1;
+    }
+    return 0;
 }
 
 /* The people in voice channel i, under its row. */
@@ -1756,6 +2066,7 @@ static void prompt_submit(void);
 static void redraw(void);
 static void qs_place(void);
 static int pins_button_x(void);
+static int call_button_x(void);
 static void paint_settings(RECT rc);
 static void settings_open(void);
 static void settings_close(void);
@@ -1875,6 +2186,8 @@ static void format_time(const char *id, wchar_t *out, int n)
     lstrcpynW(out + len, clock, n - len);
 }
 
+static int call_h(void);
+
 static RECT message_area(void)
 {
     RECT rc, r;
@@ -1882,7 +2195,7 @@ static RECT message_area(void)
     GetClientRect(g_ui.wnd, &rc);
     r.left = S(RAIL_W + SIDE_W);
     r.right = main_right();
-    r.top = S(HEADER_H);
+    r.top = S(HEADER_H) + call_h();
     r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
     return r;
 }
@@ -3429,6 +3742,9 @@ static void paint_main(RECT rc)
                 text(g_ui.f_small, C_MUTED, rect(tx + S(8), 0, right - tx - S(8), S(HEADER_H)), model_str(g_ui.model, c->topic),
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
+            if (is_dm_type(c->type))
+                text_w(g_ui.f_icon, in_call(c->id) ? C_GREEN : C_MUTED, rect(call_button_x(), 0, S(32), S(HEADER_H)), L"\xE717",
+                       -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             if (!voice) {
                 text_w(g_ui.f_icon, g_ui.pins_open && !g_ui.pins_inbox ? C_INK : C_MUTED,
                        rect(pins_button_x(), 0, S(32), S(HEADER_H)), L"\xE718", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -3446,6 +3762,7 @@ static void paint_main(RECT rc)
             return;
         }
         paint_messages(rc, name);
+        paint_call(x0, w);
         paint_toolbar();
         paint_autocomplete();
         paint_pins();
@@ -3655,6 +3972,7 @@ static void paint_tooltip(void)
 static void paint_app(RECT rc)
 {
     paint_main(rc);
+    paint_call_card();
     if (members_shown())
         paint_members(rc);
     paint_side(rc);
@@ -4146,13 +4464,7 @@ static void on_click(int kind, int index)
         if (is_voice_type(chan(index)->type) && g_ui.guild >= 0 &&
             (g_ui.voice_state == VOICE_OFF || g_ui.voice_state == VOICE_FAILED ||
              lstrcmpA(g_ui.voice_channel, chan(index)->id) != 0)) {
-            lstrcpynA(g_ui.voice_channel, chan(index)->id, sizeof g_ui.voice_channel);
-            lstrcpynA(g_ui.voice_name, model_str(g_ui.model, chan(index)->name), sizeof g_ui.voice_name);
-            g_ui.voice_state = VOICE_CONNECTING;
-            sb_clear(&g_ui.voice_status);
-            sb_add(&g_ui.voice_status, "Connecting\xE2\x80\xA6");
-            app_voice_join(g_ui.model->guilds[g_ui.guild].id, chan(index)->id);
-            clamp_scroll();
+            voice_join(g_ui.model->guilds[g_ui.guild].id, chan(index)->id, model_str(g_ui.model, chan(index)->name));
         }
         if (chan(index)->type == CH_CATEGORY) {
             g_ui.collapsed[index] ^= 1;
@@ -4188,12 +4500,7 @@ static void on_click(int kind, int index)
         redraw();
         break;
     case HIT_VOICE_LEAVE:
-        KillTimer(g_ui.wnd, TIMER_VOICE);
-        app_voice_leave();
-        g_ui.voice_state = VOICE_OFF;
-        g_ui.voice_channel[0] = 0;
-        clamp_scroll();
-        redraw();
+        voice_leave();
         break;
     case HIT_FOLDER:
         if (index >= 0 && index < (int)sizeof g_ui.folder_open)
@@ -4353,6 +4660,22 @@ static void on_event(sb_t *p)
             replace_model(m);
         if ((c = model_find_channel(g_ui.model, id)) >= 0)
             go_to_channel(c);
+        return;
+    }
+    if (lstrcmpA(name, "CALL_CREATE") == 0 || lstrcmpA(name, "CALL_UPDATE") == 0) {
+        call_store(d, name[5] == 'C');
+        clamp_scroll();
+        redraw();
+        return;
+    }
+    if (lstrcmpA(name, "CALL_DELETE") == 0) {
+        json_t v;
+        char channel[24] = "";
+        if (json_get(d, "channel_id", &v))
+            json_raw(v, channel, sizeof channel);
+        call_delete(channel);
+        clamp_scroll();
+        redraw();
         return;
     }
     if (lstrcmpA(name, "VOICE_STATES") == 0 || lstrcmpA(name, "VOICE_STATE_UPDATE") == 0) {
@@ -4610,7 +4933,9 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         break;
     case UI_READY:
         g_ui.reconnecting = 0;
-        voices_clear(); /* READY brings them again */
+        voices_clear(); /* READY brings them again, and the calls come as CALL_CREATE */
+        g_ui.ncalls = 0;
+        update_ringing();
         if (g_ui.model)
             replace_model((model_t *)lp); /* reconnected with a fresh session */
         else
@@ -8277,6 +8602,11 @@ static int inbox_button_x(void)
     return pins_button_x() - S(40);
 }
 
+static int call_button_x(void)
+{
+    return inbox_button_x() - S(40);
+}
+
 static void pins_close(void)
 {
     msg_batch_free(g_ui.pins);
@@ -10950,6 +11280,13 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                if (click_call(x, y))
+                    return 0;
+                if (open_is_text() && is_dm_type(chan(g_ui.channel)->type) && y < S(HEADER_H) && x >= call_button_x() &&
+                    x < call_button_x() + S(32)) {
+                    call_start(g_ui.channel);
+                    return 0;
+                }
                 if (open_is_text() && y < S(HEADER_H) && x >= pins_button_x() && x < pins_button_x() + S(32)) {
                     pins_toggle(0);
                     redraw();

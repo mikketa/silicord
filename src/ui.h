@@ -141,6 +141,8 @@ void app_add_friend(const char *username);
 /* Joins a server's voice channel (leaving any other); the connection reports back with UI_VOICE. */
 void app_voice_join(const char *guild_id, const char *channel_id);
 void app_voice_leave(void);
+/* A call in a direct message: rings its other members, or (with `stop_for`, a user id) stops ringing that user. */
+void app_call_ring(const char *channel_id, const char *stop_for);
 /* Whether a member of our voice call is talking right now (any thread). */
 int app_voice_speaking(const char *user_id);
 void app_voice_deafen(int deafened);

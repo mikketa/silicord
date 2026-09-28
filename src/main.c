@@ -297,6 +297,7 @@ static int is_structure_event(json_t t)
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
         "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE", "GUILD_STICKERS_UPDATE",
         "USER_GUILD_SETTINGS_UPDATE", "USER_SETTINGS_UPDATE", "VOICE_STATE_UPDATE",
+        "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE",
         "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
         "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE", "THREAD_MEMBER_UPDATE", "THREAD_MEMBERS_UPDATE",
     };
@@ -579,9 +580,14 @@ static void send_voice_state(const char *guild, const char *channel)
 {
     sb_t m = {0};
 
-    sb_add(&m, "{\"op\":4,\"d\":{\"guild_id\":\"");
-    sb_add(&m, guild);
-    sb_add(&m, "\",\"channel_id\":");
+    /* A call in a direct message has no server. */
+    if (guild && guild[0]) {
+        sb_add(&m, "{\"op\":4,\"d\":{\"guild_id\":\"");
+        sb_add(&m, guild);
+        sb_add(&m, "\",\"channel_id\":");
+    } else {
+        sb_add(&m, "{\"op\":4,\"d\":{\"guild_id\":null,\"channel_id\":");
+    }
     if (channel) {
         sb_add(&m, "\"");
         sb_add(&m, channel);
@@ -612,9 +618,11 @@ static void voice_try_start(void)
 void app_voice_join(const char *guild_id, const char *channel_id)
 {
     char old[24];
+    int was;
 
     EnterCriticalSection(&g_voice_lock);
-    lstrcpynA(old, g_vc.active ? g_vc.guild : "", sizeof old);
+    was = g_vc.active;
+    lstrcpynA(old, g_vc.guild, sizeof old);
     g_vc.active = 1;
     g_vc.have_state = g_vc.have_server = 0;
     lstrcpynA(g_vc.guild, guild_id, sizeof g_vc.guild);
@@ -622,7 +630,7 @@ void app_voice_join(const char *guild_id, const char *channel_id)
     LeaveCriticalSection(&g_voice_lock);
     voice_stop();
     app_voice_mic_test(0);
-    if (old[0] && lstrcmpA(old, guild_id) != 0)
+    if (was && lstrcmpA(old, guild_id) != 0)
         send_voice_state(old, NULL);
     send_voice_state(guild_id, channel_id);
 }
@@ -638,7 +646,7 @@ static void voice_state_update(void)
         lstrcpynA(channel, g_vc.channel, sizeof channel);
     }
     LeaveCriticalSection(&g_voice_lock);
-    if (guild[0])
+    if (channel[0])
         send_voice_state(guild, channel);
 }
 
@@ -652,9 +660,11 @@ void app_voice_set(int muted, int deafened)
 void app_voice_leave(void)
 {
     char guild[24];
+    int was;
 
     EnterCriticalSection(&g_voice_lock);
-    lstrcpynA(guild, g_vc.active ? g_vc.guild : "", sizeof guild);
+    was = g_vc.active;
+    lstrcpynA(guild, g_vc.guild, sizeof guild);
     g_vc.active = 0;
     LeaveCriticalSection(&g_voice_lock);
     voice_stop();
@@ -663,7 +673,7 @@ void app_voice_leave(void)
     mixer_free(&g_mixer);
     mixer_init(&g_mixer);
     LeaveCriticalSection(&g_mix_lock);
-    if (guild[0])
+    if (was)
         send_voice_state(guild, NULL);
 }
 
@@ -673,7 +683,7 @@ static void voice_dispatch(session_t *s, json_t t, json_t d)
     json_t v;
     char user[24] = "", channel[24] = "", guild[24] = "";
 
-    if (json_get(d, "guild_id", &v))
+    if (json_get(d, "guild_id", &v) && json_type(v) == JSON_STRING)
         json_raw(v, guild, sizeof guild);
     EnterCriticalSection(&g_voice_lock);
     if (g_vc.active && lstrcmpA(guild, g_vc.guild) == 0) {
@@ -685,7 +695,8 @@ static void voice_dispatch(session_t *s, json_t t, json_t d)
             if (lstrcmpA(user, s->me) == 0 && lstrcmpA(channel, g_vc.channel) == 0 && json_get(d, "session_id", &v)) {
                 json_raw(v, g_vc.p.session_id, sizeof g_vc.p.session_id);
                 g_vc.p.user_id = parse_u64(s->me);
-                g_vc.p.server_id = parse_u64(g_vc.guild);
+                /* in a direct message, the call's server is the channel */
+                g_vc.p.server_id = parse_u64(g_vc.guild[0] ? g_vc.guild : g_vc.channel);
                 g_vc.p.channel_id = parse_u64(g_vc.channel);
                 g_vc.have_state = 1;
                 voice_try_start();
@@ -1601,6 +1612,26 @@ void app_set_status(const char *status, const char *custom)
     sb_add(&msg, "],\"afk\":false}}");
     gw_send(&msg);
     sb_free(&msg);
+}
+
+void app_call_ring(const char *channel_id, const char *stop_for)
+{
+    sb_t path = {0}, body = {0};
+
+    sb_add(&path, "/channels/");
+    sb_add(&path, channel_id);
+    if (stop_for) {
+        sb_add(&path, "/call/stop-ringing");
+        sb_add(&body, "{\"recipients\":[\"");
+        sb_add(&body, stop_for);
+        sb_add(&body, "\"]}");
+    } else {
+        sb_add(&path, "/call/ring");
+        sb_add(&body, "{\"recipients\":null}");
+    }
+    rest("POST", path.data, &body);
+    sb_free(&path);
+    sb_free(&body);
 }
 
 void app_user_settings(const char *fields)
