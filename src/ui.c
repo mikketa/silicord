@@ -1743,7 +1743,7 @@ static void request_authors(void)
 #define FILE_W 432
 #define REACTION_H 28
 
-enum { PART_NONE, PART_FILE, PART_MEDIA, PART_EMBED_TITLE, PART_REACTION, PART_SPOILER };
+enum { PART_NONE, PART_FILE, PART_MEDIA, PART_EMBED_TITLE, PART_REACTION, PART_SPOILER, PART_POLL };
 
 typedef struct {
     int kind, index;
@@ -1996,6 +1996,69 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                 }
             }
             y = ey;
+        }
+    }
+
+    /* Poll: question, answers with their share, votes and time left. */
+    if (m->poll) {
+        msg_poll_t *pl = m->poll;
+        int pw = w < S(440) ? w : S(440), top = y + gap, py = top + S(16), total = 0, voted = 0;
+        long long now, left;
+        FILETIME ft;
+        ULARGE_INTEGER t;
+        GetSystemTimeAsFileTime(&ft);
+        t.LowPart = ft.dwLowDateTime;
+        t.HighPart = ft.dwHighDateTime;
+        now = (long long)(t.QuadPart / 10000 - 11644473600000ull);
+        left = pl->expiry_ms ? pl->expiry_ms - now : 0;
+        for (int k = 0; k < pl->nanswers; k++) {
+            total += pl->answers[k].count;
+            voted |= pl->answers[k].me;
+        }
+        {
+            int show = voted || pl->final || (pl->expiry_ms && left <= 0);
+            int qh = S(24), rows = pl->nanswers * S(48), h = S(16) + qh + S(22) + rows + S(40);
+            if (draw && r_visible(top, h)) {
+                char sub[64], foot[96];
+                r_round(x, top, pw, h, S(8), 0xFF1B1B1B);
+                text(g_ui.f_title, C_INK, rect(x + S(16), py, pw - S(32), qh), pl->question.data ? pl->question.data : "",
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                lstrcpyA(sub, pl->multi ? "Select one or more answers" : "Select one answer");
+                text(g_ui.f_small, C_MUTED, rect(x + S(16), py + qh, pw - S(32), S(20)), sub, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                for (int k = 0; k < pl->nanswers; k++) {
+                    msg_answer_t *an = &pl->answers[k];
+                    int ay = py + qh + S(26) + k * S(48), aw = pw - S(32), pct = total ? an->count * 100 / total : 0;
+                    char right[16];
+                    r_round(x + S(16), ay, aw, S(40), S(8), 0xFF242424);
+                    if (show && pct)
+                        r_round(x + S(16), ay, aw * pct / 100 > S(8) ? aw * pct / 100 : S(8), S(40), S(8),
+                                an->me ? 0x66FFB000u : 0x33FFFFFFu);
+                    if (an->me)
+                        r_round_outline(x + S(16), ay, aw, S(40), S(8), S(2) > 1 ? S(2) : 1, ARGB(C_AMBER));
+                    text(g_ui.f_body, C_INK, rect(x + S(28), ay, aw - S(90), S(40)), an->text.data ? an->text.data : "",
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    if (show) {
+                        wsprintfA(right, "%d%%", pct);
+                        text(g_ui.f_h, C_INK, rect(x + S(16) + aw - S(70), ay, S(58), S(40)), right,
+                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                    }
+                }
+                if (pl->final || (pl->expiry_ms && left <= 0))
+                    wsprintfA(foot, "%d vote%s \xE2\x80\xA2 Poll closed", total, total == 1 ? "" : "s");
+                else if (left > 3600000ll)
+                    wsprintfA(foot, "%d vote%s \xE2\x80\xA2 %dh left", total, total == 1 ? "" : "s", (int)(left / 3600000ll));
+                else
+                    wsprintfA(foot, "%d vote%s \xE2\x80\xA2 %dm left", total, total == 1 ? "" : "s", (int)(left / 60000ll) + 1);
+                text(g_ui.f_small, C_MUTED, rect(x + S(16), top + h - S(34), pw - S(32), S(24)), foot,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            if (hit_part)
+                for (int k = 0; k < pl->nanswers; k++) {
+                    int ay = py + qh + S(26) + k * S(48);
+                    if (hit(hx, hy, x + S(16), ay, pw - S(32), S(40)))
+                        *hit_part = (part_t){PART_POLL, k};
+                }
+            y = top + h;
         }
     }
 
@@ -2404,6 +2467,11 @@ static void on_batch(msg_batch_t *b)
                 n->reactions = NULL;
                 n->nreactions = 0;
             }
+            if (n->poll) {
+                msg_poll_free(g_ui.msgs[i].poll);
+                g_ui.msgs[i].poll = n->poll;
+                n->poll = NULL;
+            }
             if (n->sticker_id[0]) {
                 lstrcpynA(g_ui.msgs[i].sticker_id, n->sticker_id, sizeof n->sticker_id);
                 g_ui.msgs[i].sticker_format = n->sticker_format;
@@ -2411,6 +2479,17 @@ static void on_batch(msg_batch_t *b)
                 n->sticker_name = (sb_t){0};
             }
         }
+        break;
+    }
+    case BATCH_POLL_VOTE: {
+        int i = find_msg(b->msgs[0].id);
+        msg_poll_t *pl = i >= 0 ? g_ui.msgs[i].poll : NULL;
+        for (int k = 0; pl && k < pl->nanswers; k++)
+            if (pl->answers[k].id == b->total && !(b->mine && pl->answers[k].me == (b->delta > 0))) {
+                pl->answers[k].count += b->delta; /* ours were counted when clicked */
+                if (b->mine)
+                    pl->answers[k].me = b->delta > 0;
+            }
         break;
     }
     case BATCH_REACTION: {
@@ -3754,6 +3833,25 @@ static int click_part(int x, int y)
     case PART_EMBED_TITLE: {
         msg_embed_t *e = &m->embeds[p.index];
         open_url(e->url.len ? e->url.data : e->image.data ? e->image.data : "");
+        break;
+    }
+    case PART_POLL: {
+        msg_poll_t *pl = m->poll;
+        int ids[16], n = 0;
+        if (!pl || pl->final)
+            break;
+        /* Single choice: this answer (or none when clicking our vote again); multi: toggle it. */
+        for (int k = 0; k < pl->nanswers && n < 16; k++) {
+            int on = k == p.index ? !pl->answers[k].me : pl->multi && pl->answers[k].me;
+            if (pl->answers[k].me && !on)
+                pl->answers[k].count--;
+            if (!pl->answers[k].me && on)
+                pl->answers[k].count++;
+            pl->answers[k].me = on;
+            if (on)
+                ids[n++] = pl->answers[k].id;
+        }
+        app_vote(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, ids, n);
         break;
     }
     case PART_REACTION: {
