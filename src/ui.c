@@ -7318,18 +7318,26 @@ static void paint_autocomplete(void)
 /* Replaces the word being typed with suggestion i and remembers what a mention stands for. */
 static void ac_accept(int i)
 {
-    const ac_item_t *it = &g_ui.ac[i];
-    wchar_t *w = utf8_to_wide(it->insert, lstrlenA(it->insert));
-    int command = g_ui.ac_kind == AC_COMMAND || g_ui.ac_kind == AC_OPTION;
+    /*
+     * Replacing the text sends EN_CHANGE right away, and the suggestions are
+     * updated from it (the caret now follows a space: none): copy what we
+     * need from the item and the state first.
+     */
+    int kind = g_ui.ac_kind, command = kind == AC_COMMAND || kind == AC_OPTION;
+    char insert[sizeof g_ui.ac[0].insert], id[sizeof g_ui.ac[0].id];
+    wchar_t *w;
 
+    lstrcpynA(insert, g_ui.ac[i].insert, sizeof insert);
+    lstrcpynA(id, g_ui.ac[i].id, sizeof id);
+    w = utf8_to_wide(insert, lstrlenA(insert));
     SendMessageW(g_ui.composer, EM_SETSEL, (WPARAM)g_ui.ac_start, (LPARAM)g_ui.ac_end);
     SendMessageW(g_ui.composer, EM_REPLACESEL, TRUE, (LPARAM)w);
     mem_free(w);
-    if ((g_ui.ac_kind == AC_USER || g_ui.ac_kind == AC_CHANNEL) && g_ui.nmention < (int)ARRAYSIZE(g_ui.mention)) {
+    if ((kind == AC_USER || kind == AC_CHANNEL) && insert[0] && g_ui.nmention < (int)ARRAYSIZE(g_ui.mention)) {
         mention_t *mn = &g_ui.mention[g_ui.nmention++];
-        lstrcpynA(mn->text, it->insert, sizeof mn->text);
+        lstrcpynA(mn->text, insert, sizeof mn->text);
         mn->text[lstrlenA(mn->text) - 1] = 0; /* without the space */
-        wsprintfA(mn->markup, g_ui.ac_kind == AC_USER ? "<@%s>" : "<#%s>", it->id);
+        wsprintfA(mn->markup, kind == AC_USER ? "<@%s>" : "<#%s>", id);
     }
     g_ui.ac_kind = AC_NONE;
     g_ui.ac_n = 0;
