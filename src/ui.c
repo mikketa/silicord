@@ -117,6 +117,14 @@ typedef struct {
     r_image_t *thumb;
 } upload_t;
 
+typedef struct {
+    char guild[24], channel[24], user[24];
+    int flags;          /* VOICE_* */
+    sb_t name;
+    char avatar[40];
+    int asked;          /* its name was asked for */
+} voice_t;
+
 #define AC_MAX 10
 #define AC_ROW 40
 
@@ -209,6 +217,8 @@ typedef struct {
     } set_hits[32];            /* what the settings screen drew, for clicks */
     int nset_hits;
     int pref_notify, pref_title; /* this computer's settings */
+    voice_t *voices;           /* who is in the servers' voice channels */
+    int nvoices, cap_voices;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
     int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
@@ -859,9 +869,164 @@ static int hidden(unsigned first, unsigned i)
 
 #define DM_ROW_H 44
 
+/* ---- Voice channels: who is in them ---- */
+
+static const char *open_guild_id(void);
+static int is_voice_type(int type);
+
+#define VOICE_ROW 30
+enum { VOICE_MUTE = 1, VOICE_DEAF = 2, VOICE_STREAM = 4, VOICE_VIDEO = 8 };
+
+static voice_t *voice_find(const char *guild, const char *user)
+{
+    for (int i = 0; i < g_ui.nvoices; i++)
+        if (lstrcmpA(g_ui.voices[i].user, user) == 0 && lstrcmpA(g_ui.voices[i].guild, guild) == 0)
+            return &g_ui.voices[i];
+    return NULL;
+}
+
+/* A member object's display name and avatar, for the voice list. */
+static void voice_name(voice_t *v, json_t member)
+{
+    json_t user, x;
+
+    if (!json_get(member, "user", &user))
+        return;
+    sb_clear(&v->name);
+    if (!(json_get(member, "nick", &x) && json_type(x) == JSON_STRING && json_str(x, &v->name)) &&
+        !(json_get(user, "global_name", &x) && json_type(x) == JSON_STRING && json_str(x, &v->name)) &&
+        json_get(user, "username", &x))
+        json_str(x, &v->name);
+    if (json_get(user, "avatar", &x) && json_type(x) == JSON_STRING)
+        json_raw(x, v->avatar, sizeof v->avatar);
+}
+
+static int is_true_json(json_t obj, const char *key)
+{
+    json_t v;
+
+    return json_get(obj, key, &v) && json_type(v) == JSON_TRUE;
+}
+
+/* One voice state: in a channel, or gone (channel_id null). */
+static void voice_store(const char *guild, json_t s)
+{
+    json_t v, member;
+    char user[24] = "", channel[24] = "";
+    voice_t *e;
+
+    if (json_get(s, "user_id", &v))
+        json_raw(v, user, sizeof user);
+    if (json_get(s, "channel_id", &v) && json_type(v) == JSON_STRING)
+        json_raw(v, channel, sizeof channel);
+    if (!user[0] || !guild[0])
+        return;
+    e = voice_find(guild, user);
+    if (!channel[0]) {
+        if (e) {
+            sb_free(&e->name);
+            *e = g_ui.voices[--g_ui.nvoices];
+        }
+        return;
+    }
+    if (!e) {
+        if (g_ui.nvoices == g_ui.cap_voices) {
+            g_ui.cap_voices = g_ui.cap_voices ? g_ui.cap_voices * 2 : 16;
+            g_ui.voices = mem_realloc(g_ui.voices, (size_t)g_ui.cap_voices * sizeof *g_ui.voices);
+        }
+        e = &g_ui.voices[g_ui.nvoices++];
+        *e = (voice_t){0};
+        lstrcpynA(e->guild, guild, sizeof e->guild);
+        lstrcpynA(e->user, user, sizeof e->user);
+    }
+    lstrcpynA(e->channel, channel, sizeof e->channel);
+    e->flags = (is_true_json(s, "self_mute") || is_true_json(s, "mute") ? VOICE_MUTE : 0) |
+               (is_true_json(s, "self_deaf") || is_true_json(s, "deaf") ? VOICE_DEAF : 0) |
+               (is_true_json(s, "self_stream") ? VOICE_STREAM : 0) | (is_true_json(s, "self_video") ? VOICE_VIDEO : 0);
+    if (json_get(s, "member", &member))
+        voice_name(e, member);
+}
+
+static void voices_clear(void)
+{
+    for (int i = 0; i < g_ui.nvoices; i++)
+        sb_free(&g_ui.voices[i].name);
+    g_ui.nvoices = 0;
+}
+
+static int voice_count(const char *channel)
+{
+    int n = 0;
+
+    for (int i = 0; i < g_ui.nvoices; i++)
+        n += lstrcmpA(g_ui.voices[i].channel, channel) == 0;
+    return n;
+}
+
+/* READY gives no names: ask the gateway for the open server's voice members once. */
+static void voice_request_names(void)
+{
+    const char *guild = open_guild_id(), *ids[100];
+    int n = 0;
+
+    if (!guild)
+        return;
+    for (int i = 0; i < g_ui.nvoices && n < 100; i++) {
+        voice_t *v = &g_ui.voices[i];
+        if (v->name.len || v->asked || lstrcmpA(v->guild, guild) != 0)
+            continue;
+        v->asked = 1;
+        ids[n++] = v->user;
+    }
+    if (n)
+        app_request_members(guild, ids, n);
+}
+
+/* The people in voice channel i, under its row. */
+static void paint_voice_users(unsigned i, int y)
+{
+    const char *channel = chan((int)i)->id;
+    int x = S(RAIL_W) + S(8) + S(36), right = S(RAIL_W) + S(SIDE_W) - S(16);
+
+    for (int k = 0; k < g_ui.nvoices; k++) {
+        voice_t *v = &g_ui.voices[k];
+        r_image_t *img;
+        int ix = right;
+        if (lstrcmpA(v->channel, channel) != 0)
+            continue;
+        img = user_avatar(v->user, v->avatar);
+        if (img)
+            r_image(img, x, y + S(4), S(22), S(22), S(11));
+        else
+            r_circle(x, y + S(4), S(22), ARGB(C_ITEM));
+        if (v->flags & VOICE_DEAF) {
+            ix -= S(18);
+            text_w(g_ui.f_icon, C_MUTED, rect(ix, y, S(18), S(VOICE_ROW)), L"\xE74F", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        if (v->flags & VOICE_MUTE) {
+            ix -= S(18);
+            text_w(g_ui.f_icon, C_MUTED, rect(ix, y, S(18), S(VOICE_ROW)), L"\xEC54", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        if (v->flags & VOICE_VIDEO) {
+            ix -= S(20);
+            text_w(g_ui.f_icon, C_MUTED, rect(ix, y, S(20), S(VOICE_ROW)), L"\xE714", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        if (v->flags & VOICE_STREAM) {
+            ix -= S(38);
+            r_round(ix, y + S(7), S(34), S(16), S(8), 0xFFE5484Du);
+            text(g_ui.f_cat, C_INK, rect(ix, y + S(7), S(34), S(16)), "LIVE", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        text(g_ui.f_body, C_MUTED, rect(x + S(30), y, ix - x - S(34), S(VOICE_ROW)), v->name.len ? v->name.data : "\xE2\x80\xA6",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        y += S(VOICE_ROW);
+    }
+}
+
 static int row_height(unsigned i)
 {
     int type = chan((int)i)->type;
+    if (is_voice_type(type))
+        return S(ROW_H) + voice_count(chan((int)i)->id) * S(VOICE_ROW);
     return type == CH_CATEGORY ? S(CAT_H) : is_dm_type(type) ? S(DM_ROW_H) : S(ROW_H);
 }
 
@@ -1345,11 +1510,15 @@ static void paint_side(RECT rc)
                                             : "Direct Messages";
 
         r_clip(x0, S(HEADER_H), S(SIDE_W), view);
+        voice_request_names();
         for (unsigned i = first; i < first + count; i++) {
             if (empty_category(first, count, i) || (chan((int)i)->type != CH_CATEGORY && hidden(first, i)))
                 continue;
-            if (y + row_height(i) > S(HEADER_H) && y < S(HEADER_H) + view)
+            if (y + row_height(i) > S(HEADER_H) && y < S(HEADER_H) + view) {
                 paint_channel_row(i, y);
+                if (is_voice_type(chan((int)i)->type))
+                    paint_voice_users(i, y + S(ROW_H));
+            }
             y += row_height(i);
         }
         paint_scrollbar(x0 + S(SIDE_W) - S(6), S(HEADER_H) + S(4), view - S(8), side_content(), g_ui.side_scroll);
@@ -3746,6 +3915,23 @@ static void on_event(sb_t *p)
         on_member_list(d);
         return;
     }
+    if (lstrcmpA(name, "VOICE_STATES") == 0 || lstrcmpA(name, "VOICE_STATE_UPDATE") == 0) {
+        json_t v, list, item;
+        json_iter_t it;
+        char guild[24] = "";
+        if (json_get(d, "guild_id", &v) && json_type(v) == JSON_STRING)
+            json_raw(v, guild, sizeof guild);
+        if (json_get(d, "voice_states", &list)) {
+            json_iter(list, &it);
+            while (json_next(&it, NULL, &item))
+                voice_store(guild, item);
+        } else {
+            voice_store(guild, d);
+        }
+        clamp_scroll();
+        redraw();
+        return;
+    }
     if (lstrcmpA(name, "RELATIONSHIPS") == 0) {
         json_iter_t it;
         json_t item;
@@ -3799,8 +3985,17 @@ static void on_event(sb_t *p)
             json_raw(v, guild, sizeof guild);
         if (json_get(d, "members", &list)) {
             json_iter(list, &it);
-            while (json_next(&it, NULL, &item))
+            while (json_next(&it, NULL, &item)) {
+                json_t user, uid;
                 member_store(guild, item);
+                if (json_get(item, "user", &user) && json_get(user, "id", &uid)) { /* names for the voice list */
+                    char id[24];
+                    voice_t *vc;
+                    json_raw(uid, id, sizeof id);
+                    if ((vc = voice_find(guild, id)) != NULL)
+                        voice_name(vc, item);
+                }
+            }
         } else if (json_get(d, "user", &item) && json_get(item, "id", &v)) {
             char id[24];
             json_raw(v, id, sizeof id);
@@ -3954,6 +4149,7 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         break;
     case UI_READY:
         g_ui.reconnecting = 0;
+        voices_clear(); /* READY brings them again */
         if (g_ui.model)
             replace_model((model_t *)lp); /* reconnected with a fresh session */
         else
