@@ -85,6 +85,8 @@ void app_fetch_forum(const char *channel_id);
 void app_fetch_pins(const char *channel_id);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */
 void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention);
+/* Sends a sticker, as a reply when reply_id is not NULL. */
+void app_send_sticker(const char *channel_id, const char *sticker_id, const char *reply_id, int mention);
 void app_edit_message(const char *channel_id, const char *message_id, const char *text);
 /* Sends text with files (`paths`: n UTF-8 paths, each followed by a NUL); reply_id may be NULL. */
 void app_send_files(const char *channel_id, const char *text, const char *reply_id, int mention, const char *paths, int n);

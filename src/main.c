@@ -289,7 +289,7 @@ static int is_structure_event(json_t t)
         "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE",
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
-        "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE",
+        "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE", "GUILD_STICKERS_UPDATE",
         "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
         "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE",
     };
@@ -611,6 +611,7 @@ typedef struct {
     int flag;          /* reply: mention the author */
     sb_t files;        /* files to upload: UTF-8 paths, each followed by a NUL */
     int nfiles;
+    char sticker[24];  /* sticker sent with the message */
 } rest_job_t;
 
 static rest_job_t *new_job(const char *channel_id)
@@ -743,6 +744,11 @@ static DWORD WINAPI send_main(LPVOID arg)
     sb_add(&body, ",\"nonce\":\"");
     sb_u64(&body, nonce);
     sb_add(&body, "\",\"tts\":false");
+    if (j->sticker[0]) {
+        sb_add(&body, ",\"sticker_ids\":[\"");
+        sb_add(&body, j->sticker);
+        sb_add(&body, "\"]");
+    }
     if (j->before[0]) {
         sb_add(&body, ",\"message_reference\":{\"message_id\":\"");
         sb_add(&body, j->before);
@@ -1482,6 +1488,16 @@ void app_send_files(const char *channel_id, const char *text, const char *reply_
     for (int i = 0; i < n; i++, p += lstrlenA(p) + 1)
         sb_addn(&j->files, p, (size_t)lstrlenA(p) + 1);
     j->nfiles = n;
+    CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
+}
+
+void app_send_sticker(const char *channel_id, const char *sticker_id, const char *reply_id, int mention)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->sticker, sticker_id, sizeof j->sticker);
+    lstrcpynA(j->before, reply_id ? reply_id : "", sizeof j->before);
+    j->flag = mention;
     CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
 }
 
