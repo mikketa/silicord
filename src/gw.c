@@ -3,6 +3,7 @@
 #include "inflate.h"
 #include "sb.h"
 #include "sc_asm.h"
+#include "stats.h"
 #include "ws.h"
 
 #define GW_HOST L"gateway.discord.gg"
@@ -276,6 +277,7 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
     sb_clear(&g->packed);
     while (!cancelled(g) && ws_recv(&g->ws, &msg)) {
         /* A message may come in several frames: inflate once the flush marker arrives. */
+        stats_add(STAT_GATEWAY, msg.len);
         sb_addn(&g->packed, msg.data ? msg.data : "", msg.len);
         if (!inflate_complete((const unsigned char *)g->packed.data, g->packed.len))
             continue;
@@ -286,6 +288,7 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
             break;
         }
         sb_clear(&g->packed);
+        stats_add(STAT_GATEWAY_JSON, g->json.len);
         result = handle(g, &g->json);
         if (g->json.cap > KEEP_BUFFER)
             sb_free(&g->json);

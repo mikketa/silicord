@@ -17,6 +17,7 @@
 #include "memberlist.h"
 #include "command.h"
 #include "search.h"
+#include "stats.h"
 #include "emoji.h"
 #include "mem.h"
 #include "qr.h"
@@ -551,6 +552,34 @@ static int frame_ms(void)
     return (int)((now.QuadPart - g_ui.frame_start.QuadPart) * 1000 / g_ui.qpf.QuadPart);
 }
 
+/* How long the process has run and the CPU time it used, in ms. */
+static void process_times(unsigned long long *uptime_ms, unsigned long long *cpu_ms)
+{
+    FILETIME created, ended, kernel, user, now;
+    ULARGE_INTEGER a, b, k, u;
+
+    *uptime_ms = *cpu_ms = 0;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user))
+        return;
+    GetSystemTimeAsFileTime(&now);
+    a.LowPart = created.dwLowDateTime, a.HighPart = created.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime, b.HighPart = now.dwHighDateTime;
+    k.LowPart = kernel.dwLowDateTime, k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime, u.HighPart = user.dwHighDateTime;
+    *uptime_ms = b.QuadPart > a.QuadPart ? (b.QuadPart - a.QuadPart) / 10000 : 0;
+    *cpu_ms = (k.QuadPart + u.QuadPart) / 10000;
+}
+
+/* "Received: ..." and "CPU: ..." lines, for --debug and the About screen. */
+static void usage_lines(sb_t *net, sb_t *cpu)
+{
+    unsigned long long uptime, cpu_ms;
+
+    process_times(&uptime, &cpu_ms);
+    stats_format(net, uptime);
+    stats_format_cpu(cpu, cpu_ms, uptime);
+}
+
 /* --debug: where the memory goes, ours against the whole process. */
 static void log_memory(const char *when)
 {
@@ -565,6 +594,19 @@ static void log_memory(const char *when)
               when, (unsigned)(mem_used() >> 10), (unsigned)(mem_peak() >> 10), (unsigned)(images >> 10), g_ui.nimages,
               (unsigned)(pmc.PrivateUsage >> 10), (unsigned)(pmc.WorkingSetSize >> 10));
     app_log(line);
+    {
+        sb_t out = {0};
+        unsigned long long uptime, cpu_ms;
+        process_times(&uptime, &cpu_ms);
+        sb_add(&out, "[net] ");
+        stats_format(&out, uptime);
+        app_log(out.data);
+        sb_clear(&out);
+        sb_add(&out, "[cpu] ");
+        stats_format_cpu(&out, cpu_ms, uptime);
+        app_log(out.data);
+        sb_free(&out);
+    }
 }
 
 /*
@@ -8543,6 +8585,19 @@ static void paint_settings(RECT rc)
         wsprintfA(line, "Memory: %u KB used by Silicord, %u KB for the whole process.", (unsigned)(mem_used() >> 10),
                   (unsigned)(pmc.PrivateUsage >> 10));
         text(g_ui.f_body, C_MUTED, rect(x, y, w, S(24)), line, DT_LEFT | DT_SINGLELINE);
+        y += S(26);
+        {
+            sb_t net = {0}, cpu = {0};
+            usage_lines(&net, &cpu);
+            sb_add(&net, ".");
+            sb_add(&cpu, ".");
+            net.data[0] = (char)(net.data[0] >= 'a' && net.data[0] <= 'z' ? net.data[0] - 32 : net.data[0]);
+            text(g_ui.f_body, C_MUTED, rect(x, y, w, S(48)), net.data, DT_LEFT | DT_WORDBREAK);
+            y += S(48);
+            text(g_ui.f_body, C_MUTED, rect(x, y, w, S(24)), cpu.data, DT_LEFT | DT_SINGLELINE);
+            sb_free(&net);
+            sb_free(&cpu);
+        }
         y += S(44);
         paint_button(x, y, S(160), "Source Code", SH_SOURCE, 0);
         break;

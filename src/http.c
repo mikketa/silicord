@@ -1,4 +1,5 @@
 #include "http.h"
+#include "stats.h"
 #include "mem.h"
 #include "utf.h"
 #include "sc_asm.h"
@@ -85,6 +86,7 @@ static int do_request(HINTERNET conn, const char *method, const sb_t *url, const
                             WINHTTP_NO_HEADER_INDEX))
         ok = read_body(req, &resp->body);
     err = GetLastError();
+    stats_add(conn == g_api ? STAT_API : STAT_CDN, resp->body.len);
 
     if (req)
         WinHttpCloseHandle(req);
