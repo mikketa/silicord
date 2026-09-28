@@ -558,10 +558,10 @@ static DWORD WINAPI session_main(LPVOID arg)
     if (!current(s))
         goto end;
 
-    /* Check the token; while offline, keep trying instead of giving up. */
+    /* Check the token; while offline or rate limited, keep trying instead of giving up. */
     for (;;) {
         status = check_token(s->token.data, &name);
-        if (status && status < 500)
+        if (status && status < 500 && status != 429)
             break;
         post_reconnecting(s, backoff(attempt));
         if (gw_wait(backoff(attempt++)))
