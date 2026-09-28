@@ -82,6 +82,9 @@ void app_search(const char *guild_id, const char *dm_channel_id, const char *que
 void app_fetch_gifs(const char *query);
 /* The slash commands usable in a server (guild_id) or a DM (channel_id); answered with UI_COMMANDS. */
 void app_fetch_commands(const char *guild_id, const char *channel_id);
+/* Clicks a bot's button, or picks `value` in its select menu. Failures come as UI_SEND_FAILED. */
+void app_press_component(const char *guild_id, const char *channel_id, const char *message_id, const char *application_id,
+                         int message_flags, int component_type, const char *custom_id, const char *value);
 /* Runs a slash command: `data` is the interaction data built by cmd_build(). Failures come as UI_SEND_FAILED. */
 void app_run_command(const char *guild_id, const char *channel_id, const char *application_id, const char *data);
 /* Loads a forum's recent posts; they come back as UI_FORUM. */

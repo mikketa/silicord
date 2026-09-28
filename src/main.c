@@ -613,6 +613,8 @@ typedef struct {
     int nfiles;
     char sticker[24];  /* sticker sent with the message */
     char guild[24];
+    char message[24];  /* components: the message they belong to */
+    int message_flags;
 } rest_job_t;
 
 static rest_job_t *new_job(const char *channel_id)
@@ -1493,7 +1495,15 @@ static DWORD WINAPI command_main(LPVOID arg)
     now.HighPart = ft.dwHighDateTime;
     wsprintfA(nonce, "%I64u", (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22);
     gw_session_id(session, sizeof session);
-    sb_add(&body, "{\"type\":2,\"application_id\":\"");
+    sb_add(&body, "{\"type\":");
+    sb_i64(&body, j->flag ? j->flag : 2);
+    if (j->message[0]) {
+        sb_add(&body, ",\"message_id\":\"");
+        sb_add(&body, j->message);
+        sb_add(&body, "\",\"message_flags\":");
+        sb_i64(&body, j->message_flags);
+    }
+    sb_add(&body, ",\"application_id\":\"");
     sb_add(&body, j->before);
     if (j->guild[0]) {
         sb_add(&body, "\",\"guild_id\":\"");
@@ -1513,13 +1523,36 @@ static DWORD WINAPI command_main(LPVOID arg)
         ui_post(UI_SEND_FAILED, ui_text("Could not reach discord.com"));
     } else if (resp.status != 204 && resp.status != 200) {
         char text[64];
-        wsprintfA(text, "The command failed (HTTP %u)", resp.status);
+        wsprintfA(text, j->flag == 3 ? "The interaction failed (HTTP %u)" : "The command failed (HTTP %u)", resp.status);
         ui_post(UI_SEND_FAILED, ui_text(text));
     }
     sb_free(&body);
     http_resp_free(&resp);
     free_job(j);
     return 0;
+}
+
+void app_press_component(const char *guild_id, const char *channel_id, const char *message_id, const char *application_id,
+                         int message_flags, int component_type, const char *custom_id, const char *value)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->guild, guild_id ? guild_id : "", sizeof j->guild);
+    lstrcpynA(j->before, application_id, sizeof j->before);
+    lstrcpynA(j->message, message_id, sizeof j->message);
+    j->flag = 3;
+    j->message_flags = message_flags;
+    sb_add(&j->text, "{\"component_type\":");
+    sb_i64(&j->text, component_type);
+    sb_add(&j->text, ",\"custom_id\":");
+    sb_json_str(&j->text, custom_id, (size_t)lstrlenA(custom_id));
+    if (value) {
+        sb_add(&j->text, ",\"values\":[");
+        sb_json_str(&j->text, value, (size_t)lstrlenA(value));
+        sb_add(&j->text, "]");
+    }
+    sb_add(&j->text, "}");
+    CloseHandle(CreateThread(NULL, 0, command_main, j, 0, NULL));
 }
 
 void app_run_command(const char *guild_id, const char *channel_id, const char *application_id, const char *data)
