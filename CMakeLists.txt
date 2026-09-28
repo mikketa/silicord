@@ -44,6 +44,7 @@ add_library(silicord_core STATIC
   src/rt.c
   src/sb.c
   src/search.c
+  src/sha2.c
   src/stats.c
   src/utf.c
   asm/str.asm
@@ -106,6 +107,9 @@ add_test(NAME profile COMMAND profile_test)
 
 silicord_test(command_test)
 add_test(NAME command COMMAND command_test)
+
+silicord_test(sha2_test)
+add_test(NAME sha2 COMMAND sha2_test)
 
 silicord_test(search_test)
 add_test(NAME search COMMAND search_test)
