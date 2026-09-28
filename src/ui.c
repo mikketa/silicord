@@ -6053,7 +6053,7 @@ static void send_picked(const char *text, const char *sticker)
 
 static void picker_rebuild(void)
 {
-    char q[64] = "";
+    char q[256] = ""; /* 63 UTF-16 units take up to 189 bytes of UTF-8 */
     int n = 0, cap = 64;
     model_emoji_t e;
     unsigned cursor = 0;
@@ -7951,7 +7951,7 @@ enum { QS_CHANNEL, QS_DM, QS_GUILD };
 
 static void qs_rebuild(void)
 {
-    char q[64] = "";
+    char q[256] = ""; /* 63 UTF-16 units take up to 189 bytes of UTF-8 */
     wchar_t w[64];
     const model_t *m = g_ui.model;
 
