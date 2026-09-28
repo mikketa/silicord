@@ -74,4 +74,20 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Settings screen: status, custom status, developer mode, notifications, about
 - [x] Notification settings per server, category and channel, timed mutes
 - [ ] Themes
-- [ ] Voice (Opus + encryption), the biggest piece
+
+## 6. Voice 🚧
+
+Everything is written here, from the cryptography to the codec: no third-party code.
+
+- [x] Crypto: SHA-256, HMAC, HKDF, AES-128/256-GCM, P-256 ECDH and ECDSA, HPKE (RFC 9180), checked against their official vectors
+- [x] MLS (RFC 9420): ratchet trees, TreeKEM, messages, key schedule, groups with Welcome and commits, checked against the IETF vectors
+- [x] DAVE end-to-end encryption: the voice gateway opcodes, sender key ratchets, frame encryption, the privacy code
+- [x] Voice gateway v8 and UDP transport (`aead_aes256_gcm_rtpsize`)
+- [x] Opus decoder: SILK, CELT and hybrid, passing the twelve RFC 8251 test vectors (bit-exact parsing, 99 to 119 dB)
+- [x] Opus encoder (CELT, 64 kbit/s mono)
+- [x] Joining and leaving voice channels, playback with a jitter buffer, the microphone with a level gate, mute and deafen, speaking rings
+- [ ] Tested against Discord's voice servers
+- [ ] Better loss concealment in CELT
+- [ ] Input and output device choice, push to talk, per-user volume in the UI
+- [ ] Calls in direct messages
+- [ ] Video and screen sharing
