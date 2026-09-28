@@ -289,7 +289,7 @@ static int is_structure_event(json_t t)
         "GUILD_CREATE", "GUILD_UPDATE", "GUILD_DELETE", "GUILD_MEMBER_UPDATE",
         "GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE", "GUILD_ROLE_DELETE", "GUILD_MEMBERS_CHUNK",
         "GUILD_MEMBER_LIST_UPDATE", "PRESENCE_UPDATE", "GUILD_EMOJIS_UPDATE", "GUILD_STICKERS_UPDATE",
-        "USER_GUILD_SETTINGS_UPDATE", "USER_SETTINGS_UPDATE",
+        "USER_GUILD_SETTINGS_UPDATE", "USER_SETTINGS_UPDATE", "VOICE_STATE_UPDATE",
         "RELATIONSHIP_ADD", "RELATIONSHIP_REMOVE", "RELATIONSHIP_UPDATE",
         "THREAD_CREATE", "THREAD_UPDATE", "THREAD_DELETE",
     };
@@ -461,6 +461,26 @@ static void on_ready(void *ctx, json_t d)
             }
             sb_add(p, "]");
             ui_post(UI_EVENT, p);
+        }
+        /* Who sits in which voice channel, per server. */
+        {
+            json_t guilds, g, id, states;
+            json_iter_t git;
+            if (json_get(d, "guilds", &guilds)) {
+                json_iter(guilds, &git);
+                while (json_next(&git, NULL, &g))
+                    if (json_get(g, "id", &id) && json_get(g, "voice_states", &states) && json_count(states)) {
+                        sb_t *p = mem_alloc(sizeof *p);
+                        sb_add(p, "VOICE_STATES");
+                        sb_addn(p, "", 1);
+                        sb_add(p, "{\"guild_id\":");
+                        sb_addn(p, id.p, (size_t)(id.end - id.p));
+                        sb_add(p, ",\"voice_states\":");
+                        sb_addn(p, states.p, (size_t)(states.end - states.p));
+                        sb_add(p, "}");
+                        ui_post(UI_EVENT, p);
+                    }
+            }
         }
         /* Friends' statuses, applied once the model is in place. */
         if (json_get(d, "presences", &presences)) {
