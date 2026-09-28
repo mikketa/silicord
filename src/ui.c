@@ -6807,7 +6807,8 @@ static void paste_dir(wchar_t *out, unsigned n)
 {
     DWORD len = GetTempPathW(MAX_PATH, out);
 
-    if (!len || len >= MAX_PATH)
+    /* Leave room for "Silicord-paste\<number>\image.png" within MAX_PATH, as callers assume. */
+    if (!len || len >= MAX_PATH - 40)
         out[0] = 0;
     lstrcatW(out, L"Silicord-paste");
     if (n)
