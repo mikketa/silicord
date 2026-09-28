@@ -49,8 +49,7 @@ unsigned mls_sibling(unsigned x)
     return x < p ? mls_right(p) : mls_left(p);
 }
 
-/* Whether node `x` lies in the subtree under `top`. */
-static int in_subtree(unsigned x, unsigned top)
+int mls_in_subtree(unsigned x, unsigned top)
 {
     unsigned half = (1u << mls_level(top)) - 1;
 
@@ -68,7 +67,7 @@ void mls_node_clear(mls_node_t *node)
     secure_wipe(node, sizeof *node);
 }
 
-static void node_copy(mls_node_t *dst, const mls_node_t *src)
+void mls_node_copy(mls_node_t *dst, const mls_node_t *src)
 {
     *dst = *src;
     memset(&dst->parent_hash, 0, sizeof dst->parent_hash);
@@ -126,6 +125,7 @@ static int leaf_read(mls_node_t *node, tls_reader_t *r)
     sb_addn(&node->identity, (const char *)id, n);
     for (int i = 0; i < 5; i++) /* versions, cipher_suites, extensions, proposals, credentials */
         skip_u16s(r);
+    node->source_off = (size_t)(r->p - start);
     node->source = (int)tls_read_u8(r);
     if (node->source == 1) {
         tls_read_u64(r); /* lifetime */
@@ -138,6 +138,7 @@ static int leaf_read(mls_node_t *node, tls_reader_t *r)
     } else if (node->source != 2) {
         return 0;
     }
+    node->ext_off = (size_t)(r->p - start);
     ext = tls_read_nested(r);
     while (!ext.bad && ext.p < ext.end) {
         tls_read_u16(&ext);
@@ -215,7 +216,7 @@ int mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src)
     dst->nleaves = src->nleaves;
     dst->nodes = n ? mem_alloc(sizeof *dst->nodes * n) : NULL;
     for (unsigned i = 0; i < n; i++)
-        node_copy(&dst->nodes[i], &src->nodes[i]);
+        mls_node_copy(&dst->nodes[i], &src->nodes[i]);
     return 1;
 }
 
@@ -236,9 +237,10 @@ void mls_tree_truncate(mls_tree_t *t)
 {
     while (t->nleaves > 1) {
         unsigned half = t->nleaves / 2, i;
-        for (i = half; i < t->nleaves && !t->nodes[2 * i].present; i++)
+        /* The root is node nleaves - 1; its right subtree follows it. */
+        for (i = t->nleaves; i < mls_nodes(t->nleaves) && !t->nodes[i].present; i++)
             ;
-        if (i < t->nleaves)
+        if (i < mls_nodes(t->nleaves))
             break;
         for (i = mls_nodes(half); i < mls_nodes(t->nleaves); i++)
             mls_node_clear(&t->nodes[i]);
@@ -290,7 +292,7 @@ int mls_tree_parse(mls_tree_t *t, const unsigned char *data, size_t n)
     /* Unmerged leaves must be leaves under their parent. */
     for (unsigned i = 1; i < mls_nodes(t->nleaves); i += 2)
         for (int k = 0; k < t->nodes[i].nunmerged; k++)
-            if (!in_subtree(2 * t->nodes[i].unmerged[k], i) || 2 * t->nodes[i].unmerged[k] >= mls_nodes(t->nleaves)) {
+            if (!mls_in_subtree(2 * t->nodes[i].unmerged[k], i) || 2 * t->nodes[i].unmerged[k] >= mls_nodes(t->nleaves)) {
                 mls_tree_free(t);
                 return 0;
             }
@@ -406,30 +408,49 @@ int mls_resolution(const mls_tree_t *t, unsigned x, unsigned *out)
     return n + mls_resolution(t, mls_right(x), out + n);
 }
 
+int mls_leaf_verify(const mls_node_t *node, const void *group_id, size_t gn, unsigned leaf_index)
+{
+    sb_t tbs = {0};
+    tls_reader_t r;
+    const unsigned char *sig;
+    size_t sn;
+    int ok;
+
+    sb_addn(&tbs, node->leaf.data, node->tbs_n);
+    if (node->source != 1) {
+        tls_vec(&tbs, group_id, gn);
+        tls_u32(&tbs, leaf_index);
+    }
+    tls_reader(&r, node->leaf.data + node->tbs_n, node->leaf.len - node->tbs_n);
+    sig = tls_read_vec(&r, &sn);
+    ok = tls_done(&r) && mls_verify_with_label(node->sig_key, "LeafNodeTBS", tbs.data, tbs.len, sig, sn);
+    sb_free(&tbs);
+    return ok;
+}
+
 int mls_tree_verify_leaves(const mls_tree_t *t, const void *group_id, size_t gn)
 {
-    for (unsigned i = 0; i < t->nleaves; i++) {
-        const mls_node_t *node = &t->nodes[2 * i];
-        sb_t tbs = {0};
-        tls_reader_t r;
-        const unsigned char *sig;
-        size_t sn;
-        int ok;
-        if (!node->present)
-            continue;
-        sb_addn(&tbs, node->leaf.data, node->tbs_n);
-        if (node->source != 1) {
-            tls_vec(&tbs, group_id, gn);
-            tls_u32(&tbs, i);
-        }
-        tls_reader(&r, node->leaf.data + node->tbs_n, node->leaf.len - node->tbs_n);
-        sig = tls_read_vec(&r, &sn);
-        ok = tls_done(&r) && mls_verify_with_label(node->sig_key, "LeafNodeTBS", tbs.data, tbs.len, sig, sn);
-        sb_free(&tbs);
-        if (!ok)
+    for (unsigned i = 0; i < t->nleaves; i++)
+        if (t->nodes[2 * i].present && !mls_leaf_verify(&t->nodes[2 * i], group_id, gn, i))
             return 0;
-    }
     return 1;
+}
+
+int mls_filtered_path(const mls_tree_t *t, unsigned leaf, unsigned *path, unsigned *copath)
+{
+    unsigned x = 2 * leaf, root = mls_root(t->nleaves), *res = mem_alloc(sizeof *res * mls_nodes(t->nleaves));
+    int n = 0;
+
+    while (x != root) {
+        unsigned p = mls_parent(x), s = mls_sibling(x);
+        if (mls_resolution(t, s, res)) {
+            path[n] = p;
+            copath[n++] = s;
+        }
+        x = p;
+    }
+    mem_free(res);
+    return n;
 }
 
 void mls_parent_hash(const mls_tree_t *t, unsigned p, unsigned s, const void *above, size_t an, unsigned char out[32])
@@ -459,7 +480,7 @@ static int valid_for(const mls_tree_t *t, unsigned p, unsigned c, unsigned d, co
     for (int k = 0; k < pn->nunmerged; k++) {
         unsigned leaf = 2 * pn->unmerged[k];
         int found = 0;
-        if (!in_subtree(leaf, c))
+        if (!mls_in_subtree(leaf, c))
             continue;
         under++;
         for (int j = 0; j < nres; j++)
