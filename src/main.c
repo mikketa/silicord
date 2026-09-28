@@ -629,10 +629,12 @@ static DWORD WINAPI fetch_main(LPVOID arg)
     msg_batch_t *b = NULL;
     json_t root;
     char path[128];
-    int kind = j->flag ? BATCH_PINS : j->before[0] ? BATCH_OLDER : BATCH_HISTORY;
+    int kind = j->flag == 1 ? BATCH_PINS : j->before[0] && j->flag != 2 ? BATCH_OLDER : BATCH_HISTORY;
 
-    if (j->flag)
+    if (j->flag == 1)
         wsprintfA(path, "/channels/%s/pins", j->channel);
+    else if (j->flag == 2)
+        wsprintfA(path, "/channels/%s/messages?limit=50&around=%s", j->channel, j->before);
     else if (j->before[0])
         wsprintfA(path, "/channels/%s/messages?limit=50&before=%s", j->channel, j->before);
     else
@@ -646,7 +648,12 @@ static DWORD WINAPI fetch_main(LPVOID arg)
         lstrcpynA(b->channel_id, j->channel, sizeof b->channel_id);
         b->status = resp.status ? (int)resp.status : -1;
     }
-    lstrcpynA(b->before, j->before, sizeof b->before);
+    if (j->flag == 2) {
+        lstrcpynA(b->around, j->before, sizeof b->around);
+        b->has_more = 1;
+    } else {
+        lstrcpynA(b->before, j->before, sizeof b->before);
+    }
     ui_post_batch(b);
     http_resp_free(&resp);
     free_job(j);
@@ -1236,6 +1243,68 @@ void app_fetch_messages(const char *channel_id, const char *before)
     if (before)
         lstrcpynA(j->before, before, sizeof j->before);
     CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
+}
+
+void app_fetch_around(const char *channel_id, const char *message_id)
+{
+    rest_job_t *j = new_job(channel_id);
+
+    lstrcpynA(j->before, message_id, sizeof j->before);
+    j->flag = 2;
+    CloseHandle(CreateThread(NULL, 0, fetch_main, j, 0, NULL));
+}
+
+static DWORD WINAPI search_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    msg_batch_t *b = NULL;
+    json_t root;
+    sb_t path = {0};
+
+    /* j->channel: server id, or the DM channel when j->flag; j->text: the query. */
+    sb_add(&path, j->flag ? "/channels/" : "/guilds/");
+    sb_add(&path, j->channel);
+    sb_add(&path, "/messages/search?content=");
+    for (size_t i = 0; i < j->text.len; i++) {
+        unsigned char c = (unsigned char)j->text.data[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+            sb_addn(&path, (const char *)&c, 1);
+        } else {
+            char e[4];
+            wsprintfA(e, "%%%02X", c);
+            sb_add(&path, e);
+        }
+    }
+    /* Discord answers 202 while it indexes: give it a moment, like the client does. */
+    for (int tries = 0; tries < 3; tries++) {
+        http_resp_free(&resp);
+        if (!http_request("GET", path.data, j->token.data, NULL, 0, &resp) || resp.status != 202)
+            break;
+        Sleep(1500);
+    }
+    if (resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root))
+        b = msg_batch_search(root);
+    if (!b) {
+        b = mem_alloc(sizeof *b);
+        b->kind = BATCH_SEARCH;
+        b->status = resp.status ? (int)resp.status : -1;
+    }
+    lstrcpynA(b->channel_id, j->channel, sizeof b->channel_id);
+    ui_post_batch(b);
+    http_resp_free(&resp);
+    sb_free(&path);
+    free_job(j);
+    return 0;
+}
+
+void app_search(const char *guild_id, const char *dm_channel_id, const char *query)
+{
+    rest_job_t *j = new_job(guild_id ? guild_id : dm_channel_id);
+
+    j->flag = guild_id == NULL;
+    sb_add(&j->text, query);
+    CloseHandle(CreateThread(NULL, 0, search_main, j, 0, NULL));
 }
 
 void app_fetch_pins(const char *channel_id)

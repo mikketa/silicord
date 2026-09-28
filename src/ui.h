@@ -71,6 +71,10 @@ void app_open_channel(const char *channel_id);
 /* Loads the latest 50 messages, or the 50 before `before` if it is not NULL. */
 void app_fetch_messages(const char *channel_id, const char *before);
 void app_send_message(const char *channel_id, const char *text);
+/* Loads 50 messages around one (BATCH_HISTORY with `around` set), to jump to it. */
+void app_fetch_around(const char *channel_id, const char *message_id);
+/* Searches a server's messages (or a DM's); results come back as a BATCH_SEARCH batch. */
+void app_search(const char *guild_id, const char *dm_channel_id, const char *query);
 /* Loads the channel's pinned messages; they come back as a BATCH_PINS batch. */
 void app_fetch_pins(const char *channel_id);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */
