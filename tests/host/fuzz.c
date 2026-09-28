@@ -476,7 +476,7 @@ static void fuzz_inflate(void)
     deflateInit2(&s, (int)rn(10), Z_DEFLATED, 15, 8, (int)rn(4));
     inflate_init(&z);
     for (unsigned m = 0, msgs = 1 + rn(6); m < msgs; m++) {
-        size_t n = rn(3) == 0 ? rn(100000) : rn(3000), got;
+        size_t n = 1 + (rn(3) == 0 ? rn(100000) : rn(3000)), got; /* Discord sends no empty messages: zlib flushes nothing for them */
         sb_t out = {0};
         for (size_t i = 0; i < n; i++)
             src[i] = rn(4) ? (unsigned char)"abcdefgh {}\":,"[rn(14)] : (unsigned char)rnd();
