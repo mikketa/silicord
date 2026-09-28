@@ -9436,9 +9436,10 @@ static void paint_forum(RECT rc, int x0, int w)
         char count[16];
         wchar_t *prev;
         r_image_t *img;
+        if (i < 64)
+            g_ui.post_y[i] = y; /* for clicks, even when scrolled out of sight */
         if (!r_visible(y, S(POST_H)))
             continue;
-        g_ui.post_y[i < 64 ? i : 63] = y;
         r_round(cx, y, cw, S(POST_H), S(8), g_ui.post_hover == i ? 0xFF222222 : 0xFF1A1A1A);
         text(g_ui.f_title, C_INK, rect(cx + S(16), y + S(12), cw - S(100), S(26)), pt->name.data ? pt->name.data : "",
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
