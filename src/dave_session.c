@@ -335,7 +335,8 @@ static void on_proposals(dave_session_t *s, tls_reader_t *r)
     sb_addn(&s->outbound_commit, commit.data, commit.len);
     tls_u8(&m, 28);
     sb_addn(&m, commit.data, commit.len);
-    sb_addn(&m, welcome.data, welcome.len);
+    if (welcome.len)
+        sb_addn(&m, welcome.data, welcome.len);
     s->send(s->ctx, 1, m.data, m.len);
 out:
     sb_free(&commit);
