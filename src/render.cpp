@@ -1245,6 +1245,7 @@ extern "C" void r_text_styled(r_font_t *f, const unsigned *colors, int ncolors, 
 struct rich_block {
     IDWriteTextLayout *layout;
     int kind;
+    int quoted;       /* drawn with the quote bar */
     int start, len;   /* range in the doc */
     int x, y, h;      /* text origin relative to the rich origin, block height */
 };
@@ -1387,7 +1388,9 @@ extern "C" r_rich_t *r_rich_build(const md_doc_t *d, const r_rich_style_t *st, i
         const md_block_t *b = &d->blocks[i];
         rich_block *out = &r->blocks[r->nblocks];
         r_font_t *f = block_font(st, b->kind);
-        int inset = b->kind == MD_QUOTE ? st->quote_indent : b->kind == MD_CODEBLOCK ? st->code_pad : 0;
+        /* Quoted blocks of any kind sit right of the quote bar; code blocks also inside their box. */
+        int quote = b->kind == MD_QUOTE || b->quoted ? st->quote_indent : 0;
+        int inset = quote + (b->kind == MD_CODEBLOCK ? st->code_pad : 0);
         int w = r->width - inset - (b->kind == MD_CODEBLOCK ? st->code_pad : 0);
         DWRITE_TEXT_METRICS m;
 
@@ -1413,6 +1416,7 @@ extern "C" r_rich_t *r_rich_build(const md_doc_t *d, const r_rich_style_t *st, i
         if (i && (b->kind == MD_H1 || b->kind == MD_H2 || b->kind == MD_H3))
             y += st->block_gap * 2;
         out->kind = b->kind;
+        out->quoted = b->kind == MD_QUOTE || b->quoted;
         out->start = b->start;
         out->len = b->len;
         out->x = inset;
@@ -1462,10 +1466,17 @@ extern "C" void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers)
 
         if (!r_visible(by - pad, b->h + 2 * pad))
             continue;
-        if (b->kind == MD_QUOTE) {
-            r_round(x, by, st->quote_indent / 4, b->h, st->quote_indent / 8, st->quote_bar);
-        } else if (b->kind == MD_CODEBLOCK) {
-            r_round(x, by - st->code_pad, r->width, b->h, st->radius, st->code_bg);
+        if (b->quoted) {
+            /* Down to the next quoted block, so a quote's blocks share one bar. */
+            int bar_h = b->h;
+            int top = b->kind == MD_CODEBLOCK ? by - st->code_pad : by;
+            if (i + 1 < r->nblocks && r->blocks[i + 1].quoted)
+                bar_h = r->blocks[i + 1].y - (r->blocks[i + 1].kind == MD_CODEBLOCK ? st->code_pad : 0) - (top - y);
+            r_round(x, top, st->quote_indent / 4, bar_h, st->quote_indent / 8, st->quote_bar);
+        }
+        if (b->kind == MD_CODEBLOCK) {
+            int left = b->quoted ? st->quote_indent : 0;
+            r_round(x + left, by - st->code_pad, r->width - left, b->h, st->radius, st->code_bg);
         }
         if (b->kind != MD_CODEBLOCK) {
             /* Code spans get the code background, mentions a tinted chip. */
