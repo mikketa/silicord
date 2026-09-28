@@ -63,6 +63,41 @@ static void state(voice_t *v, int s, const char *text)
         v->ev.state(v->ev.ctx, s, text);
 }
 
+/* The --debug trace: a label and up to two numbers. */
+static void vlog(voice_t *v, const char *what, long long a, long long b)
+{
+    sb_t m = {0};
+
+    if (!v->ev.log)
+        return;
+    sb_add(&m, "voice: ");
+    sb_add(&m, what);
+    if (a != -1) {
+        sb_add(&m, " ");
+        sb_i64(&m, a);
+    }
+    if (b != -1) {
+        sb_add(&m, " ");
+        sb_i64(&m, b);
+    }
+    v->ev.log(v->ev.ctx, m.data);
+    sb_free(&m);
+}
+
+/* Logs the DAVE session's state when it changes. */
+static void dave_trace(voice_t *v)
+{
+    static int last = -1;
+    int now = v->dave.has_group | v->dave.established << 1 | v->dave.has_pending << 2 | (v->dave.version & 15) << 3 |
+              (v->dave.protocol & 15) << 7;
+
+    if (now != last) {
+        vlog(v, "dave group/established/pending", v->dave.has_group, v->dave.established * 10 + v->dave.has_pending);
+        vlog(v, "dave protocol/media version", v->dave.protocol, v->dave.version);
+        last = now;
+    }
+}
+
 static unsigned long long now_ms(void)
 {
     return GetTickCount64();
@@ -90,6 +125,12 @@ static long long json_num(json_t obj, const char *key)
     return json_get(obj, key, &j) ? (long long)json_u64(j) : -1;
 }
 
+/* A missing or odd version means no DAVE. */
+static int clamp_version(long long version)
+{
+    return version > 0 && version < 16 ? (int)version : 0;
+}
+
 static void send_text(voice_t *v, sb_t *msg)
 {
     ws_send(&v->ws, msg);
@@ -101,6 +142,7 @@ static void dave_send(void *ctx, int binary, const void *data, size_t n)
 {
     voice_t *v = ctx;
 
+    vlog(v, binary ? "sent binary op" : "sent json", binary && n ? ((const unsigned char *)data)[0] : -1, (long long)n);
     if (binary) {
         ws_send_binary(&v->ws, data, n);
     } else {
@@ -211,6 +253,7 @@ static DWORD WINAPI udp_main(LPVOID arg)
     unsigned char pkt[2048];
     unsigned long long keepalive = now_ms();
     unsigned long counter = 0;
+    unsigned seen[32] = {0};
     DWORD timeout = 250;
     sb_t media = {0}, opus = {0};
 
@@ -238,6 +281,14 @@ static DWORD WINAPI udp_main(LPVOID arg)
             ok = user && dave_session_decrypt(&v->dave, user, (const unsigned char *)media.data, media.len, &opus,
                                               now_ms());
             LeaveCriticalSection(&v->lock);
+            if (ok && opus.len) {
+                /* Which Opus modes Discord sends: config (mode, bandwidth, duration) and stereo, once each. */
+                unsigned toc = (unsigned char)opus.data[0], config = toc >> 3, stereo = toc >> 2 & 1;
+                if (!(seen[config] & 1u << stereo)) {
+                    seen[config] |= 1u << stereo;
+                    vlog(v, "opus config/stereo", config, stereo);
+                }
+            }
             if (ok && v->ev.frame)
                 v->ev.frame(v->ev.ctx, user, (const unsigned char *)opus.data, opus.len);
         }
@@ -256,6 +307,7 @@ static int handle(voice_t *v, const sb_t *msg)
     if (!json_parse(msg->data, msg->len, &root) || !json_get(root, "op", &j))
         return 1;
     op = (long long)json_u64(j);
+    vlog(v, "got op", op, (long long)msg->len);
     seq = json_num(root, "seq");
     if (seq >= 0)
         InterlockedExchange(&v->seq_ack, (LONG)seq);
@@ -299,7 +351,9 @@ static int handle(voice_t *v, const sb_t *msg)
         while (k < 32 && json_next(&it, NULL, &j))
             v->key[k++] = (unsigned char)json_u64(j);
         v->have_key = k == 32;
-        dave_on_select_protocol_ack(&v->dave, (int)json_num(d, "dave_protocol_version"));
+        vlog(v, "dave_protocol_version", json_num(d, "dave_protocol_version"), -1);
+        dave_on_select_protocol_ack(&v->dave, clamp_version(json_num(d, "dave_protocol_version")));
+        dave_trace(v);
         LeaveCriticalSection(&v->lock);
         if (!v->have_key)
             return 0;
@@ -340,18 +394,22 @@ static int handle(voice_t *v, const sb_t *msg)
         break;
     case OP_PREPARE_TRANSITION:
         EnterCriticalSection(&v->lock);
-        dave_on_prepare_transition(&v->dave, (int)json_num(d, "transition_id"), (int)json_num(d, "protocol_version"),
-                                   now_ms());
+        dave_on_prepare_transition(&v->dave, (int)json_num(d, "transition_id"),
+                                   clamp_version(json_num(d, "protocol_version")), now_ms());
+        dave_trace(v);
         LeaveCriticalSection(&v->lock);
         break;
     case OP_EXECUTE_TRANSITION:
         EnterCriticalSection(&v->lock);
         dave_on_execute_transition(&v->dave, (int)json_num(d, "transition_id"), now_ms());
+        dave_trace(v);
         LeaveCriticalSection(&v->lock);
         break;
     case OP_PREPARE_EPOCH:
         EnterCriticalSection(&v->lock);
-        dave_on_prepare_epoch(&v->dave, (unsigned long long)json_num(d, "epoch"), (int)json_num(d, "protocol_version"));
+        dave_on_prepare_epoch(&v->dave, (unsigned long long)json_num(d, "epoch"),
+                              clamp_version(json_num(d, "protocol_version")));
+        dave_trace(v);
         LeaveCriticalSection(&v->lock);
         break;
     default:
@@ -381,8 +439,10 @@ static DWORD WINAPI voice_main(LPVOID arg)
         if (binary) {
             if (msg.len >= 2)
                 InterlockedExchange(&v->seq_ack, (LONG)((unsigned char)msg.data[0] << 8 | (unsigned char)msg.data[1]));
+            vlog(v, "got binary op", msg.len >= 3 ? (unsigned char)msg.data[2] : -1, (long long)msg.len);
             EnterCriticalSection(&v->lock);
             dave_on_binary(&v->dave, msg.data, msg.len, now_ms());
+            dave_trace(v);
             LeaveCriticalSection(&v->lock);
         } else if (!handle(v, &msg)) {
             break;

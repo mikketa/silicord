@@ -23,6 +23,8 @@ typedef struct {
     /* One decrypted Opus frame from `user`. */
     void (*frame)(void *ctx, unsigned long long user, const unsigned char *opus, size_t n);
     void (*speaking)(void *ctx, unsigned long long user, int on);
+    /* A line for the --debug trace (opcodes, DAVE states, the Opus modes heard). */
+    void (*log)(void *ctx, const char *text);
 } voice_events_t;
 
 int voice_start(const voice_params_t *p, const voice_events_t *ev);

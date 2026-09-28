@@ -6,6 +6,9 @@
 
 static const char k_media_label[] = "Discord Secure Frames v0";
 
+/* Opcode 26 carries the KeyPackage as libdave sends it, bare; the protocol text shows it in an MLSMessage. */
+#define KEY_PACKAGE_IN_MLSMESSAGE 0
+
 /* ---- Keys ---- */
 
 static void keyring_free(dave_keyring_t *k)
@@ -132,6 +135,10 @@ static void send_key_package(dave_session_t *s)
     if (!s->has_member)
         return;
     tls_u8(&m, 26);
+    if (KEY_PACKAGE_IN_MLSMESSAGE) {
+        tls_u16(&m, 1);
+        tls_u16(&m, MLS_WIRE_KEY_PACKAGE);
+    }
     sb_addn(&m, s->member.key_package.data, s->member.key_package.len);
     s->send(s->ctx, 1, m.data, m.len);
     sb_free(&m);

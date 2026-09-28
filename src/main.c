@@ -341,6 +341,12 @@ static void voice_state_changed(void *ctx, int state, const char *text)
     ui_post(UI_VOICE, p);
 }
 
+static void voice_log(void *ctx, const char *text)
+{
+    (void)ctx;
+    log_line("", text);
+}
+
 static unsigned long long parse_u64(const char *s)
 {
     unsigned long long u = 0;
@@ -376,6 +382,7 @@ static void voice_try_start(void)
     voice_events_t ev = {0};
 
     ev.state = voice_state_changed;
+    ev.log = voice_log;
     if (g_vc.active && g_vc.have_state && g_vc.have_server) {
         g_vc.have_server = 0;
         voice_start(&g_vc.p, &ev);
