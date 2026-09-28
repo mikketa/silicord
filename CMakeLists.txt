@@ -25,6 +25,7 @@ endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
 add_library(silicord_core STATIC
+  src/aes.c
   src/apng.c
   src/b64.c
   src/command.c
@@ -107,6 +108,9 @@ add_test(NAME profile COMMAND profile_test)
 
 silicord_test(command_test)
 add_test(NAME command COMMAND command_test)
+
+silicord_test(aes_test)
+add_test(NAME aes COMMAND aes_test)
 
 silicord_test(sha2_test)
 add_test(NAME sha2 COMMAND sha2_test)
