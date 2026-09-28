@@ -66,3 +66,11 @@ jobs:
 
       - name: Opus conformance
         run: sh tools/opus_vectors.sh build-host/opus_vectors opus_newvectors
+
+      - uses: actions/cache@v4
+        with:
+          path: vp8_vectors
+          key: vp8-testvectors-comprehensive
+
+      - name: VP8 conformance
+        run: sh tools/vp8_vectors.sh build-host/vp8_vectors vp8_vectors

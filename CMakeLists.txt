@@ -54,6 +54,8 @@ add_library(silicord_core STATIC
   src/opus_rc.c
   src/opus_silk.c
   src/opus_silk_tables.c
+  src/vp8.c
+  src/vp8_tables.c
   src/model.c
   src/p256.c
   src/msg.c

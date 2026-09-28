@@ -90,4 +90,5 @@ Everything is written here, from the cryptography to the codec: no third-party c
 - [x] Loss concealment in CELT: pitch repetition through the LPC excitation, then shaped noise
 - [x] Voice settings: input and output devices, volumes, a mic test, voice activity sensitivity or push to talk; per-user volume and mute
 - [x] Calls in direct messages: starting and joining them, the call above the conversation, incoming calls with a ringtone, declining
+- [x] VP8 decoder, bit-exact on the eighteen comprehensive test vectors of libvpx
 - [ ] Video and screen sharing
