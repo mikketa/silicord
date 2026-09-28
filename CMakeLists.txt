@@ -24,6 +24,7 @@ endfunction()
 
 # Platform-independent pieces, shared by the client and the tests.
 add_library(silicord_core STATIC
+  src/apng.c
   src/b64.c
   src/command.c
   src/crypto.c
@@ -91,6 +92,9 @@ add_test(NAME profile COMMAND profile_test)
 
 silicord_test(command_test)
 add_test(NAME command COMMAND command_test)
+
+silicord_test(apng_test)
+add_test(NAME apng COMMAND apng_test)
 
 silicord_test(inflate_test)
 add_test(NAME inflate COMMAND inflate_test)
