@@ -1673,6 +1673,25 @@ void app_send_files(const char *channel_id, const char *text, const char *reply_
     CloseHandle(CreateThread(NULL, 0, send_main, j, 0, NULL));
 }
 
+void app_forward(const char *to_channel, const char *channel_id, const char *guild_id, const char *message_id)
+{
+    sb_t body = {0};
+    char path[96];
+
+    wsprintfA(path, "/channels/%s/messages", to_channel);
+    sb_add(&body, "{\"content\":\"\",\"message_reference\":{\"type\":1,\"message_id\":\"");
+    sb_add(&body, message_id);
+    sb_add(&body, "\",\"channel_id\":\"");
+    sb_add(&body, channel_id);
+    if (guild_id) {
+        sb_add(&body, "\",\"guild_id\":\"");
+        sb_add(&body, guild_id);
+    }
+    sb_add(&body, "\"}}");
+    rest("POST", path, &body);
+    sb_free(&body);
+}
+
 void app_send_sticker(const char *channel_id, const char *sticker_id, const char *reply_id, int mention)
 {
     rest_job_t *j = new_job(channel_id);

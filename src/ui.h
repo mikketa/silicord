@@ -97,6 +97,8 @@ void app_fetch_pins(const char *channel_id);
 void app_fetch_mentions(void);
 /* Sends `text` as a reply to reply_id; `mention` pings its author. */
 void app_send_reply(const char *channel_id, const char *text, const char *reply_id, int mention);
+/* Forwards message_id (from channel_id, in guild_id or NULL for DMs) to `to_channel`. */
+void app_forward(const char *to_channel, const char *channel_id, const char *guild_id, const char *message_id);
 /* Sends a sticker, as a reply when reply_id is not NULL. */
 void app_send_sticker(const char *channel_id, const char *sticker_id, const char *reply_id, int mention);
 void app_edit_message(const char *channel_id, const char *message_id, const char *text);
