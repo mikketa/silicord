@@ -33,6 +33,7 @@ add_library(silicord_core STATIC
   src/emoji.c
   src/emoji_data.c
   src/emoji_alias.c
+  src/hpke.c
   src/inflate.c
   src/json.c
   src/md.c
@@ -112,6 +113,9 @@ add_test(NAME command COMMAND command_test)
 
 silicord_test(aes_test)
 add_test(NAME aes COMMAND aes_test)
+
+silicord_test(hpke_test)
+add_test(NAME hpke COMMAND hpke_test)
 
 silicord_test(p256_test)
 add_test(NAME p256 COMMAND p256_test)
