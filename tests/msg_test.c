@@ -157,6 +157,37 @@ static void test_interaction(void)
     msg_free(&m);
 }
 
+static void test_components(void)
+{
+    msg_t m;
+
+    check(parse("{\"id\":\"1\",\"author\":{\"id\":\"77\",\"username\":\"bot\"},\"content\":\"\",\"flags\":64,"
+                "\"components\":[{\"type\":1,\"components\":["
+                "{\"type\":2,\"style\":1,\"label\":\"Claim\",\"custom_id\":\"c1\",\"emoji\":{\"name\":\"\xE2\x9D\xA4\"}},"
+                "{\"type\":2,\"style\":5,\"label\":\"Site\",\"url\":\"https://example.com\",\"disabled\":true}]},"
+                "{\"type\":1,\"components\":[{\"type\":3,\"custom_id\":\"s\",\"placeholder\":\"Pick\","
+                "\"options\":[{\"label\":\"One\",\"value\":\"1\"},{\"label\":\"Two\",\"value\":\"2\"}]}]}]}", &m) &&
+              !m.system && m.ncomponents == 3,
+          "buttons and selects parse");
+    check(m.ncomponents == 3 && str_eq(&m.components[0].label, "Claim") && m.components[0].style == BUTTON_PRIMARY &&
+              str_eq(&m.components[0].custom_id, "c1") && str_eq(&m.components[0].emoji, "\xE2\x9D\xA4") &&
+              m.components[1].row == m.components[0].row && m.components[1].disabled &&
+              str_eq(&m.components[1].url, "https://example.com"),
+          "a row of buttons");
+    check(m.ncomponents == 3 && m.components[2].row != m.components[0].row && m.components[2].type == COMP_STRING_SELECT &&
+              str_eq(&m.components[2].label, "Pick") && str_eq(&m.components[2].options, "One\t1\nTwo\t2\n"),
+          "a select on its own row");
+    check(lstrcmpA(m.app_id, "77") == 0 && m.flags == 64, "the bot's application and the flags");
+    msg_free(&m);
+
+    check(parse("{\"id\":\"2\",\"content\":\"\",\"flags\":32768,\"components\":[{\"type\":17,\"components\":["
+                "{\"type\":10,\"content\":\"Hello **there**\"},{\"type\":9,\"components\":[{\"type\":10,\"content\":\"more\"}],"
+                "\"accessory\":{\"type\":2,\"style\":2,\"label\":\"Go\",\"custom_id\":\"g\"}}]}]}", &m) &&
+              str_eq(&m.text, "Hello **there**\nmore") && m.ncomponents == 1 && str_eq(&m.components[0].label, "Go"),
+          "components v2: text displays and section buttons");
+    msg_free(&m);
+}
+
 static void test_poll(void)
 {
     msg_t m;
@@ -219,6 +250,7 @@ void entry(void)
     test_parts();
     test_reaction_event();
     test_interaction();
+    test_components();
     test_poll();
     test_search();
     test_batch();

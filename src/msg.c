@@ -409,6 +409,100 @@ void msg_poll_free(msg_poll_t *p)
     mem_free(p);
 }
 
+#define MAX_COMPONENTS 40
+
+static void add_component(json_t c, int type, int row, msg_t *out)
+{
+    msg_component_t *mc;
+    json_t v, e, opts, o;
+    json_iter_t it;
+
+    if (out->ncomponents == MAX_COMPONENTS)
+        return;
+    if (!out->components)
+        out->components = mem_alloc(MAX_COMPONENTS * sizeof *out->components);
+    mc = &out->components[out->ncomponents++];
+    mc->type = type;
+    mc->row = row;
+    mc->style = get_num(c, "style");
+    mc->disabled = json_get(c, "disabled", &v) && json_type(v) == JSON_TRUE;
+    if (!get_sb(c, "label", &mc->label))
+        get_sb(c, "placeholder", &mc->label);
+    get_sb(c, "custom_id", &mc->custom_id);
+    get_sb(c, "url", &mc->url);
+    if (json_get(c, "emoji", &e) && json_type(e) == JSON_OBJECT) {
+        get_sb(e, "name", &mc->emoji);
+        if (json_get(e, "id", &v) && json_type(v) == JSON_STRING)
+            json_raw(v, mc->emoji_id, sizeof mc->emoji_id);
+    }
+    if (json_get(c, "options", &opts)) {
+        json_iter(opts, &it);
+        while (json_next(&it, NULL, &o)) {
+            sb_t label = {0}, value = {0};
+            get_sb(o, "label", &label);
+            get_sb(o, "value", &value);
+            sb_addn(&mc->options, label.data ? label.data : "", label.len);
+            sb_add(&mc->options, "\t");
+            sb_addn(&mc->options, value.data ? value.data : "", value.len);
+            sb_add(&mc->options, "\n");
+            sb_free(&label);
+            sb_free(&value);
+        }
+    }
+}
+
+/*
+ * Walks components: action rows of buttons and selects, and the layout
+ * components of "components v2" (containers, sections), whose text displays
+ * are gathered in `text`.
+ */
+static void parse_components(json_t list, msg_t *out, int *row, sb_t *text)
+{
+    json_iter_t it;
+    json_t c, v, children;
+
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &c)) {
+        int type = get_num(c, "type");
+        if (type == 1) { /* action row */
+            (*row)++;
+            if (json_get(c, "components", &children))
+                parse_components(children, out, row, text);
+            (*row)++;
+        } else if (type == COMP_BUTTON || type == COMP_STRING_SELECT || (type >= COMP_USER_SELECT && type <= COMP_CHANNEL_SELECT)) {
+            add_component(c, type, *row, out);
+        } else if (type == 10) { /* text display */
+            if (text->len)
+                sb_add(text, "\n");
+            get_sb(c, "content", text);
+        } else {
+            /* containers (17), sections (9) and their accessory */
+            if (json_get(c, "components", &children))
+                parse_components(children, out, row, text);
+            if (json_get(c, "accessory", &v) && get_num(v, "type") == COMP_BUTTON) {
+                (*row)++;
+                add_component(v, COMP_BUTTON, *row, out);
+                (*row)++;
+            }
+        }
+    }
+}
+
+void msg_components_free(msg_t *m)
+{
+    for (int i = 0; i < m->ncomponents; i++) {
+        msg_component_t *c = &m->components[i];
+        sb_free(&c->label);
+        sb_free(&c->emoji);
+        sb_free(&c->custom_id);
+        sb_free(&c->url);
+        sb_free(&c->options);
+    }
+    mem_free(m->components);
+    m->components = NULL;
+    m->ncomponents = 0;
+}
+
 static void parse_reactions(json_t list, msg_t *out)
 {
     json_iter_t it;
@@ -491,6 +585,19 @@ int msg_parse(json_t obj, msg_t *out)
         parse_reactions(list, out);
     if (json_get(obj, "poll", &list) && json_type(list) == JSON_OBJECT)
         parse_poll(list, out);
+    if (json_get(obj, "components", &list) && json_type(list) == JSON_ARRAY) {
+        sb_t v2 = {0};
+        int row = 0;
+        parse_components(list, out, &row, &v2);
+        if (v2.len && !out->text.len) /* components v2 carry the text themselves */
+            format_content(v2.data, v2.len, mentions, &out->text);
+        sb_free(&v2);
+    }
+    if (json_get(obj, "application_id", &v))
+        json_raw(v, out->app_id, sizeof out->app_id);
+    else if (out->ncomponents && json_get(obj, "author", &author) && json_get(author, "id", &v))
+        json_raw(v, out->app_id, sizeof out->app_id); /* a bot's own messages: its user id is its application's */
+    out->flags = get_num(obj, "flags");
     if (json_get(obj, "sticker_items", &list)) {
         json_iter(list, &it);
         if (json_next(&it, NULL, &item) && json_get(item, "id", &v)) {
@@ -518,7 +625,7 @@ int msg_parse(json_t obj, msg_t *out)
         sb_add(&out->text, "pinned a message.");
     } else if (type != TYPE_DEFAULT && type != TYPE_REPLY && type != TYPE_SLASH_COMMAND &&
                type != TYPE_CONTEXT_COMMAND && !out->text.len && !out->nfiles && !out->nembeds &&
-               !out->sticker_id[0] && !out->poll) {
+               !out->sticker_id[0] && !out->poll && !out->ncomponents) {
         out->system = 1;
         sb_add(&out->text, "sent a system message.");
     }
@@ -563,6 +670,7 @@ void msg_free_extras(msg_t *m)
     sb_free(&m->sticker_name);
     msg_poll_free(m->poll);
     m->poll = NULL;
+    msg_components_free(m);
     m->files = NULL;
     m->embeds = NULL;
     m->reactions = NULL;

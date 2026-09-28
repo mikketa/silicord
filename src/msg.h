@@ -48,6 +48,24 @@ typedef struct {
     long long expiry_ms; /* Unix ms, 0 if none */
 } msg_poll_t;
 
+/* A bot's button or select menu. */
+enum { COMP_BUTTON = 2, COMP_STRING_SELECT = 3, COMP_USER_SELECT = 5, COMP_ROLE_SELECT = 6,
+       COMP_MENTIONABLE_SELECT = 7, COMP_CHANNEL_SELECT = 8 };
+enum { BUTTON_PRIMARY = 1, BUTTON_SECONDARY, BUTTON_SUCCESS, BUTTON_DANGER, BUTTON_LINK, BUTTON_PREMIUM };
+
+typedef struct {
+    int type;            /* COMP_* */
+    int style;           /* buttons: BUTTON_* */
+    int row;             /* components of one row sit side by side */
+    int disabled;
+    sb_t label;          /* a button's label, or a select's placeholder */
+    sb_t emoji;          /* unicode emoji, or a custom emoji's name */
+    char emoji_id[24];
+    sb_t custom_id;
+    sb_t url;            /* link buttons */
+    sb_t options;        /* string selects: "label\tvalue\n" per option */
+} msg_component_t;
+
 typedef struct {
     char emoji_id[24];   /* custom emoji, empty for a unicode one */
     sb_t emoji;          /* the unicode emoji, or the custom emoji's name */
@@ -76,6 +94,10 @@ typedef struct {
     msg_reaction_t *reactions;
     int nreactions;
     msg_poll_t *poll;    /* NULL if the message has none */
+    msg_component_t *components;
+    int ncomponents;
+    char app_id[24];     /* the bot's application, for component interactions */
+    int flags;           /* message flags (64: only we see it) */
     char sticker_id[24];
     int sticker_format;  /* 1 png, 2 apng, 3 lottie, 4 gif */
     sb_t sticker_name;
@@ -117,6 +139,7 @@ void msg_free(msg_t *m);
 void msg_free_extras(msg_t *m);
 void msg_embed_free(msg_embed_t *e);
 void msg_poll_free(msg_poll_t *p);
+void msg_components_free(msg_t *m);
 
 /* The REST API returns newest first; the batch is reversed to oldest first. */
 msg_batch_t *msg_batch_from_array(json_t arr, int kind, const char *channel_id, int limit);
