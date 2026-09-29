@@ -132,7 +132,7 @@ static DWORD WINAPI loopback_main(LPVOID arg)
     IAudioClient *client;
     IAudioCaptureClient *cap = NULL;
     HANDLE ready = CreateEventW(NULL, FALSE, FALSE, NULL), events[2];
-    float pcm[BLOCK];
+    static float pcm[BLOCK]; /* not on the stack: no __chkstk without the CRT; one loopback thread at a time */
     int n = 0;
     unsigned long long last;
 
