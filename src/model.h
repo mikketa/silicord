@@ -72,8 +72,7 @@ typedef struct {
     char user_id[24];
     char avatar[40];
     int members;        /* group DMs: its recipients and us */
-    unsigned faces;     /* group DMs: "id avatar
-" for up to two recipients, their stacked avatars; 0 if none */
+    unsigned recipients; /* group DMs: "id\tavatar\tname\n" for each recipient, 0 if none */
     /* Read state: unread when last_message > read, mentions counts pings (and DMs). */
     char last_message[24];
     char read[24];

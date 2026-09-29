@@ -1063,8 +1063,7 @@ static int make_dm(model_t *m, const users_t *users, json_t ch, channel_t *out)
     if (out->type == CH_GROUP_DM && json_get(ch, "icon", &v))
         json_raw(v, out->avatar, sizeof out->avatar);
     if (out->type == CH_GROUP_DM) {
-        /* "3 members" under its name, and two of them as its picture, as Discord shows a group. */
-        int faces = 0;
+        /* "3 members" under its name, its members for the list beside it, two of them as its picture. */
         if (json_get(ch, "recipients", &list)) {
             json_iter(list, &it);
         } else if (json_get(ch, "recipient_ids", &list)) {
@@ -1076,21 +1075,23 @@ static int make_dm(model_t *m, const users_t *users, json_t ch, channel_t *out)
         out->members = 1;
         while (it.p && next_recipient(users, &it, by_id, &user)) {
             json_t id, av;
+            char buf[24], hash[40] = "";
             out->members++;
-            if (faces < 2 && json_get(user, "id", &id)) {
-                char buf[24], hash[40] = "";
-                if (!faces++)
-                    out->faces = (unsigned)m->strings.len;
-                json_raw(id, buf, sizeof buf);
-                if (json_get(user, "avatar", &av) && json_type(av) == JSON_STRING)
-                    json_raw(av, hash, sizeof hash);
-                sb_add(&m->strings, buf);
-                sb_add(&m->strings, " ");
-                sb_add(&m->strings, hash);
-                sb_add(&m->strings, "\n");
-            }
+            if (!json_get(user, "id", &id))
+                continue;
+            if (!out->recipients)
+                out->recipients = (unsigned)m->strings.len;
+            json_raw(id, buf, sizeof buf);
+            if (json_get(user, "avatar", &av) && json_type(av) == JSON_STRING)
+                json_raw(av, hash, sizeof hash);
+            sb_add(&m->strings, buf);
+            sb_add(&m->strings, "\t");
+            sb_add(&m->strings, hash);
+            sb_add(&m->strings, "\t");
+            add_user_name(m, user);
+            sb_add(&m->strings, "\n");
         }
-        if (faces)
+        if (out->recipients)
             sb_addn(&m->strings, "", 1);
         by_id = 0;
     }
