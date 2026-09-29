@@ -1582,6 +1582,28 @@ static void on_ready(void *ctx, json_t d)
             log_line("ready: ", line);
             post_event("PRESENCES", presences.p, (size_t)(presences.end - presences.p));
         }
+        {
+            /*
+             * A friend who shares a server with us is not in that list: their
+             * status comes in the server's own presences, READY sends it once.
+             */
+            json_t guilds, g, list;
+            json_iter_t git;
+            int total = 0;
+            if (json_get(d, "guilds", &guilds)) {
+                json_iter(guilds, &git);
+                while (json_next(&git, NULL, &g))
+                    if (json_get(g, "presences", &list) && json_count(list)) {
+                        total += (int)json_count(list);
+                        post_event("PRESENCES", list.p, (size_t)(list.end - list.p));
+                    }
+            }
+            if (total) {
+                char line[64];
+                wsprintfA(line, "%d presences in servers", total);
+                log_line("ready: ", line);
+            }
+        }
     } else {
         model_free(model);
     }
