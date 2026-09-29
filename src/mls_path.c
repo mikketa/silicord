@@ -213,19 +213,21 @@ int mls_path_create(mls_tree_t *t, unsigned me, const unsigned char sig_priv[32]
     if (me >= t->nleaves || !old->present)
         return 0;
     ps->n = mls_filtered_path(t, me, ps->path, copath);
-    if (!rng_bytes(secret, 32) || !rng_bytes(seed, 32) || !hpke_derive_keypair(seed, 32, leaf_priv, leaf_pub))
-        return 0;
-    reset_path(t, me, ps->path, ps->n);
-    for (int k = 0; k < ps->n; k++) {
+    ok = rng_bytes(secret, 32) && rng_bytes(seed, 32) && hpke_derive_keypair(seed, 32, leaf_priv, leaf_pub);
+    if (ok)
+        reset_path(t, me, ps->path, ps->n);
+    for (int k = 0; ok && k < ps->n; k++) {
         mls_node_t *node = &t->nodes[ps->path[k]];
         unsigned char ns[32];
         memcpy(ps->secret[k], secret, 32);
-        if (!mls_derive_secret(secret, "node", ns) || !hpke_derive_keypair(ns, 32, node->priv, node->key) ||
-            !mls_path_next_secret(secret))
-            return 0;
-        node->has_priv = 1;
+        ok = mls_derive_secret(secret, "node", ns) && hpke_derive_keypair(ns, 32, node->priv, node->key) &&
+             mls_path_next_secret(secret);
+        if (ok)
+            node->has_priv = 1;
         secure_wipe(ns, sizeof ns);
     }
+    if (!ok)
+        goto out;
     memcpy(commit_secret, secret, 32);
     set_parent_hashes(t, ps->path, copath, ps->n, ph);
 
@@ -247,6 +249,7 @@ int mls_path_create(mls_tree_t *t, unsigned me, const unsigned char sig_priv[32]
         mls_node_clear(&t->nodes[2 * me]);
         t->nodes[2 * me] = fresh;
     }
+out:
     secure_wipe(secret, sizeof secret);
     secure_wipe(seed, sizeof seed);
     secure_wipe(leaf_priv, sizeof leaf_priv);

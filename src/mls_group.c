@@ -358,6 +358,7 @@ int mls_group_join(mls_group_t *g, const mls_member_t *m, const void *welcome, s
     ok = 1;
 out:
     secure_wipe(secret, sizeof secret);
+    secure_wipe(psk, sizeof psk);
     secure_wipe(key, sizeof key);
     mls_welcome_free(&w);
     mls_key_package_free(&kp);
@@ -650,6 +651,7 @@ static int process_commit(mls_group_t *g, const mls_content_t *m)
     ok = MLS_HANDLED_COMMIT;
 out:
     secure_wipe(commit_secret, sizeof commit_secret);
+    secure_wipe(psk, sizeof psk);
     secure_wipe(&keys, sizeof keys);
     applied_free(&a);
     mls_tree_free(&t);
@@ -898,6 +900,7 @@ int mls_group_commit(const mls_group_t *g, sb_t *commit, sb_t *welcome, mls_grou
     ok = !a.nadded || make_welcome(next, &a, &ps, psk, tag, welcome);
 out:
     secure_wipe(commit_secret, sizeof commit_secret);
+    secure_wipe(psk, sizeof psk);
     secure_wipe(&ps, sizeof ps);
     applied_free(&a);
     if (!ok)
