@@ -3855,23 +3855,27 @@ static const char *find_str_ci(const char *hay, const char *needle)
     return find_in(hay, needle, NORM_IGNORECASE);
 }
 
-/* The red "NEW" line above the first unread message. */
-static void paint_new_line(int x0, int y, int w)
+/* The red "NEW" line above the first unread message; without `line`, only its label (a date divider draws the line). */
+static void paint_new_line(int x0, int y, int w, int line)
 {
-    fill(x0 + S(16), y, w - S(32), 1, C_NEW);
+    if (line)
+        fill(x0 + S(16), y, w - S(32), 1, C_NEW);
     r_round(x0 + w - S(16) - S(36), y - S(8), S(36), S(16), S(4), ARGB(C_NEW));
     text(g_ui.f_cat, C_INK, rect(x0 + w - S(16) - S(36), y - S(8), S(36), S(16)), "NEW", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
-static void paint_divider(int x0, int y, int w, const char *id)
+/* The date above the first message of a day, "September 29, 2026" as in Discord; red when the NEW line falls on it. */
+static void paint_divider(int x0, int y, int w, const char *id, int is_new)
 {
     SYSTEMTIME st = local_time(id);
     wchar_t date[64];
     int tw;
 
-    GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, &st, NULL, date, ARRAYSIZE(date), NULL);
+    /* English like the rest of the interface: the user's locale would mix in its month names. */
+    if (!GetDateFormatEx(L"en-US", 0, &st, L"MMMM d, yyyy", date, ARRAYSIZE(date), NULL))
+        GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, &st, NULL, date, ARRAYSIZE(date), NULL);
     tw = r_text_width(g_ui.f_cat, date, -1) + S(16);
-    fill(x0 + S(16), y + S(22), w - S(32), 1, C_LINE);
+    fill(x0 + S(16), y + S(22), w - S(32), 1, is_new ? C_NEW : C_LINE);
     fill(x0 + (w - tw) / 2, y + S(12), tw, S(20), C_MAIN);
     text_w(g_ui.f_cat, C_FAINT, rect(x0 + (w - tw) / 2, y + S(12), tw, S(20)), date, -1,
            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -3883,13 +3887,13 @@ static void paint_message(int i, int x0, int y, int w)
     int tx = text_x(), tw = w - (tx - x0) - S(24), h = msg_height(m);
 
     if (m->grouped == 2) {
-        paint_divider(x0, y, w, m->id);
+        paint_divider(x0, y, w, m->id, m->first_new);
         if (m->first_new)
-            paint_new_line(x0, y + S(22), w);
+            paint_new_line(x0, y + S(22), w, 0);
         y += S(44);
         h -= S(44);
     } else if (m->first_new) {
-        paint_new_line(x0, y + S(10), w);
+        paint_new_line(x0, y + S(10), w, 1);
         y += S(20);
         h -= S(20);
     }
