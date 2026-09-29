@@ -234,6 +234,118 @@ void entry(void)
     }
     check(ok, "random sizes: every pixel written, opaque");
 
+    /* BGRA to I420, against the formulas written out, at sizes with SIMD bodies and odd edges. */
+    {
+        static const int sizes[][2] = {{37, 23}, {64, 16}, {1, 1}, {9, 3}, {17, 2}, {8, 1}};
+        unsigned char *yp = mem_alloc(80 * 30), *up = mem_alloc(40 * 15), *vp = mem_alloc(40 * 15);
+        ok = 1;
+        for (int k = 0; k < 6; k++) {
+            int iw = sizes[k][0], ih = sizes[k][1], stride = iw + 3;
+            for (int i = 0; i < stride * ih; i++)
+                out[i] = (unsigned)rnd(256) | (unsigned)rnd(256) << 8 | (unsigned)rnd(256) << 16 | 0xFF000000u;
+            picture_bgra_to_i420(out, iw, ih, stride, yp, up, vp, 80, 40);
+            for (int y = 0; y < ih; y++)
+                for (int x = 0; x < iw; x++) {
+                    unsigned px = out[y * stride + x];
+                    int r = (int)(px >> 16 & 0xFF), g = (int)(px >> 8 & 0xFF), b = (int)(px & 0xFF);
+                    ok &= yp[y * 80 + x] == ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                }
+            for (int y = 0; y < (ih + 1) / 2; y++)
+                for (int x = 0; x < (iw + 1) / 2; x++) {
+                    int sum[3] = {2, 2, 2}, cu, cv;
+                    for (int dy = 0; dy < 2; dy++)
+                        for (int dx = 0; dx < 2; dx++) {
+                            int sx = 2 * x + dx < iw ? 2 * x + dx : iw - 1, sy = 2 * y + dy < ih ? 2 * y + dy : ih - 1;
+                            unsigned px = out[sy * stride + sx];
+                            for (int c = 0; c < 3; c++)
+                                sum[c] += (int)(px >> (8 * c) & 0xFF);
+                        }
+                    for (int c = 0; c < 3; c++)
+                        sum[c] >>= 2;
+                    cu = ((-38 * sum[2] - 74 * sum[1] + 112 * sum[0] + 128) >> 8) + 128;
+                    cv = ((112 * sum[2] - 94 * sum[1] - 18 * sum[0] + 128) >> 8) + 128;
+                    ok &= up[y * 40 + x] == cu && vp[y * 40 + x] == cv;
+                }
+        }
+        check(ok, "to I420: every sample as the formulas give it, odd edges doubled");
+
+        for (int i = 0; i < 16; i++)
+            out[i] = i < 8 ? 0xFFFFFFFFu : 0xFF000000u;
+        picture_bgra_to_i420(out, 16, 1, 16, yp, up, vp, 80, 40);
+        check(yp[0] == 235 && yp[15] == 16 && up[0] == 128 && vp[0] == 128 && up[7] == 128 && vp[7] == 128,
+              "to I420: white is 235, black 16, both without color");
+
+        /* There and back: colors RGB can hold, chroma flat over each 2 x 2 box, come back within a rounding or two. */
+        pic_make(&p, 40, 24, fill_random);
+        for (int y = 0; y < 24; y++)
+            for (int x = 0; x < 40; x++)
+                ((unsigned char *)p.img.y)[y * p.img.y_stride + x] = (unsigned char)(60 + (x * 7 + y * 3) % 120);
+        for (int y = 0; y < 12; y++)
+            for (int x = 0; x < 20; x++) {
+                ((unsigned char *)p.img.u)[y * p.img.uv_stride + x] = (unsigned char)(110 + (x + y) % 36);
+                ((unsigned char *)p.img.v)[y * p.img.uv_stride + x] = (unsigned char)(115 + (x * 2 + y) % 30);
+            }
+        picture_to_bgra(&p.img, 40, 24, out, &scratch);
+        picture_bgra_to_i420(out, 40, 24, 40, yp, up, vp, 80, 40);
+        ok = 1;
+        for (int y = 0; y < 24; y++)
+            for (int x = 0; x < 40; x++) {
+                int d = yp[y * 80 + x] - p.img.y[y * p.img.y_stride + x];
+                ok &= d >= -2 && d <= 2;
+            }
+        for (int y = 0; y < 12; y++)
+            for (int x = 0; x < 20; x++) {
+                int du = up[y * 40 + x] - p.img.u[y * p.img.uv_stride + x], dv = vp[y * 40 + x] - p.img.v[y * p.img.uv_stride + x];
+                ok &= du >= -3 && du <= 3 && dv >= -3 && dv <= 3;
+            }
+        check(ok, "YUV to BGRA and back: within a rounding or two");
+        mem_free(p.mem);
+        mem_free(yp);
+        mem_free(up);
+        mem_free(vp);
+    }
+
+    /* Scaling BGRA with rows apart: flat stays flat, its own size is a copy, and nothing past a row is read. */
+    {
+        unsigned *src = mem_alloc(100 * 60 * 4);
+        for (int i = 0; i < 100 * 60; i++)
+            src[i] = (i % 100) < 90 ? 0xFF336699u : 0x12345678u; /* the last 10 of each row are outside the picture */
+        ok = 1;
+        picture_scale_bgra(src, 90, 60, 100, 45, 30, out, &scratch);
+        for (int i = 0; i < 45 * 30; i++)
+            ok &= out[i] == 0xFF336699u;
+        picture_scale_bgra(src, 90, 60, 100, 131, 77, out, &scratch);
+        for (int i = 0; i < 131 * 77; i++)
+            ok &= out[i] == 0xFF336699u;
+        picture_scale_bgra(src, 90, 60, 100, 33, 59, out, &scratch);
+        for (int i = 0; i < 33 * 59; i++)
+            ok &= out[i] == 0xFF336699u;
+        picture_scale_bgra(src, 90, 60, 100, 90, 60, out, &scratch);
+        for (int i = 0; i < 90 * 60; i++)
+            ok &= out[i] == 0xFF336699u;
+        check(ok, "BGRA scaling: rows apart, flat colors exact, own size copied");
+        mem_free(src);
+    }
+
+    /* The mouse pointer, as the three kinds of shape Windows gives, clipped at the edges. */
+    {
+        static const unsigned char mono[4] = {0x3F, 0xFF, 0x80, 0x00}; /* 8 x 2, a byte a row: AND rows, then XOR rows */
+        static const unsigned color[4] = {0xFF0000FFu, 0x800000FFu, 0x00FFFFFFu, 0xFFFFFFFFu};
+        static const unsigned masked[2] = {0x00123456u, 0xFF00FF00u};
+        unsigned bg = 0xFF404040u, half_b = (0xFF * 0x80 + 0x40 * 0x7F + 127) / 255, half_gr = (0x40 * 0x7F + 127) / 255;
+        for (int i = 0; i < 16 * 4; i++)
+            out[i] = bg;
+        picture_draw_cursor(out, 16, 4, 16, 2, 0, PICTURE_CURSOR_MONOCHROME, mono, 8, 4, 1);
+        /* row 0: the AND mask clears the first two pixels, the XOR mask turns the first white; row 1 keeps the screen */
+        ok = out[2] == 0xFFFFFFFFu && out[3] == 0xFF000000u && out[4] == bg && out[16 + 2] == bg && out[16 + 9] == bg;
+        picture_draw_cursor(out, 16, 4, 16, 14, 2, PICTURE_CURSOR_COLOR, (const unsigned char *)color, 2, 2, 8);
+        ok &= out[2 * 16 + 14] == 0xFF0000FFu && out[3 * 16 + 14] == bg && out[3 * 16 + 15] == 0xFFFFFFFFu;
+        ok &= out[2 * 16 + 15] == (0xFF000000u | half_gr << 16 | half_gr << 8 | half_b);
+        picture_draw_cursor(out, 16, 4, 16, -1, 3, PICTURE_CURSOR_MASKED, (const unsigned char *)masked, 2, 1, 8);
+        ok &= out[3 * 16] == (bg ^ 0x00FF00u); /* alpha set: inverts; the other pixel is off the picture */
+        check(ok, "pointer: monochrome, color (blended by alpha) and masked shapes, clipped");
+    }
+
     picture_scratch_free(&scratch);
     mem_free(out);
     finish();

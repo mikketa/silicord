@@ -233,19 +233,26 @@ static void axis_weights(int n, int m, int taps, int *first, __m128i *k, short *
 /*
  * One source row across: m pixels of four 16-bit channels, each value
  * times 128 (up to 32,640). Two source pixels a madd, their channels paired
- * (B B G G R R A A): with an odd number of taps the last pair reads one
- * pixel more, weighted 0, which the picture's slack holds.
+ * (B B G G R R A A); an odd last tap alone, read as four bytes so nothing
+ * past the row is touched.
  */
-static void pass_across(const unsigned char *src, int m, const int *first, const __m128i *k, int pairs, short *mid)
+static void pass_across(const unsigned char *src, int m, const int *first, const __m128i *k, int taps, short *mid)
 {
     const __m128i zero = _mm_setzero_si128(), round = _mm_set1_epi32(64);
+    int full = taps / 2, pairs = (taps + 1) / 2;
 
-    for (int o = 0; o < m; o++) {
+    for (int o = 0; o < m; o++, k += pairs) {
         const unsigned char *p = src + (size_t)first[o] * 4;
         __m128i acc = round;
-        for (int j = 0; j < pairs; j++, k++) {
+        for (int j = 0; j < full; j++) {
             __m128i v = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(p + j * 8)), zero);
-            acc = _mm_add_epi32(acc, _mm_madd_epi16(_mm_unpacklo_epi16(v, _mm_srli_si128(v, 8)), *k));
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(_mm_unpacklo_epi16(v, _mm_srli_si128(v, 8)), k[j]));
+        }
+        if (taps & 1) {
+            int last;
+            memcpy(&last, p + full * 8, 4);
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(_mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128(last), zero), zero),
+                                                    k[full]));
         }
         acc = _mm_srai_epi32(acc, 7);
         _mm_storel_epi64((__m128i *)(mid + o * 4), _mm_packs_epi32(acc, acc));
@@ -291,10 +298,7 @@ static size_t align16(size_t n)
     return (n + 15) & ~(size_t)15;
 }
 
-/*
- * Where picture_to_bgra() keeps the shrunk picture (with 8 bytes of slack
- * after it) and resample() its tables and rows, in one block of scratch.
- */
+/* Where resample() keeps its tables and rows, in one block of scratch. */
 typedef struct {
     size_t first_x, first_y, k_x, k_y, w, tag, rows, mid, size;
 } layout_t;
@@ -304,7 +308,8 @@ static layout_t layout(int sw, int sh, int w, int h)
     int sx = axis_stride(axis_taps(sw, w)), sy = axis_stride(axis_taps(sh, h));
     layout_t l;
 
-    l.first_x = align16((size_t)sw * sh * 4 + 8);
+    (void)sh;
+    l.first_x = 0;
     l.first_y = l.first_x + align16((size_t)w * sizeof(int));
     l.k_x = l.first_y + align16((size_t)h * sizeof(int));
     l.k_y = l.k_x + (size_t)w * (sx / 2) * sizeof(__m128i);
@@ -317,14 +322,14 @@ static layout_t layout(int sw, int sh, int w, int h)
 }
 
 /*
- * Resamples the sw x sh BGRA picture at the start of mem into w x h at
- * out: across into 16-bit rows, then down. A destination row takes
- * consecutive source rows, later ones for later rows, so the rows across
- * are kept in as many slots as it takes, each made once.
+ * Resamples the sw x sh BGRA picture src (rows `stride` pixels apart) into
+ * w x h at out: across into 16-bit rows, then down. A destination row
+ * takes consecutive source rows, later ones for later rows, so the rows
+ * across are kept in as many slots as it takes, each made once.
  */
-static void resample(int sw, int sh, int w, int h, unsigned *out, unsigned char *mem)
+static void resample(const unsigned *src, int sw, int sh, int stride, int w, int h, unsigned *out, unsigned char *mem)
 {
-    int tx = axis_taps(sw, w), ty = axis_taps(sh, h), px = axis_stride(tx) / 2, py = axis_stride(ty) / 2;
+    int tx = axis_taps(sw, w), ty = axis_taps(sh, h), py = axis_stride(ty) / 2;
     layout_t l = layout(sw, sh, w, h);
     int *first_x = (int *)(mem + l.first_x), *first_y = (int *)(mem + l.first_y), *tag = (int *)(mem + l.tag);
     __m128i *k_x = (__m128i *)(mem + l.k_x), *k_y = (__m128i *)(mem + l.k_y);
@@ -340,7 +345,7 @@ static void resample(int sw, int sh, int w, int h, unsigned *out, unsigned char 
             int r = first_y[y] + t, slot = r % ty;
             short *row = mid + (size_t)slot * w * 4;
             if (tag[slot] != r) {
-                pass_across(mem + (size_t)r * sw * 4, w, first_x, k_x, px, row);
+                pass_across((const unsigned char *)(src + (size_t)r * stride), w, first_x, k_x, tx, row);
                 tag[slot] = r;
             }
             rows[t] = row;
@@ -351,10 +356,22 @@ static void resample(int sw, int sh, int w, int h, unsigned *out, unsigned char 
     }
 }
 
+/* At least n bytes of scratch. */
+static unsigned char *scratch_get(picture_scratch_t *scratch, size_t n)
+{
+    if (scratch->size < n) {
+        mem_free(scratch->mem);
+        scratch->mem = mem_alloc(n);
+        scratch->size = n;
+    }
+    return scratch->mem;
+}
+
 void picture_to_bgra(const vp8_image_t *img, int w, int h, unsigned *out, picture_scratch_t *scratch)
 {
     int s = 1, bw, bh;
-    size_t need;
+    size_t boxed;
+    unsigned char *mem;
 
     if (w <= 0 || h <= 0 || img->w <= 0 || img->h <= 0)
         return;
@@ -367,14 +384,169 @@ void picture_to_bgra(const vp8_image_t *img, int w, int h, unsigned *out, pictur
         convert(img, s, out);
         return;
     }
-    need = layout(bw, bh, w, h).size;
-    if (scratch->size < need) {
-        mem_free(scratch->mem);
-        scratch->mem = mem_alloc(need);
-        scratch->size = need;
+    boxed = align16((size_t)bw * bh * 4);
+    mem = scratch_get(scratch, boxed + layout(bw, bh, w, h).size);
+    convert(img, s, (unsigned *)mem);
+    resample((const unsigned *)mem, bw, bh, bw, w, h, out, mem + boxed);
+}
+
+void picture_scale_bgra(const unsigned *src, int sw, int sh, int stride, int w, int h, unsigned *out,
+                        picture_scratch_t *scratch)
+{
+    if (w <= 0 || h <= 0 || sw <= 0 || sh <= 0)
+        return;
+    if (sw == w && sh == h) {
+        for (int y = 0; y < h; y++)
+            memcpy(out + (size_t)y * w, src + (size_t)y * stride, (size_t)w * 4);
+        return;
     }
-    convert(img, s, (unsigned *)scratch->mem);
-    resample(bw, bh, w, h, out, scratch->mem);
+    resample(src, sw, sh, stride, w, h, out, scratch_get(scratch, layout(sw, sh, w, h).size));
+}
+
+/* ---- BGRA to YUV ---- */
+
+/* Two 32-bit sums from a madd of one pixel's channels, added: in lanes 0 and 2 for the two pixels of x. */
+static __m128i pair_sums(__m128i x)
+{
+    return _mm_add_epi32(x, _mm_shuffle_epi32(x, 0xB1));
+}
+
+/* Lanes 0 and 2 of a and of b, in that order. */
+static __m128i evens(__m128i a, __m128i b)
+{
+    return _mm_unpacklo_epi64(_mm_shuffle_epi32(a, 0x08), _mm_shuffle_epi32(b, 0x08));
+}
+
+/* ((k . pixel + 128) >> 8) + add for the four pixels of px (BGRA), k pairing B with G and R with A. */
+static __m128i dot4(__m128i px, __m128i k, int add)
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i lo = pair_sums(_mm_madd_epi16(_mm_unpacklo_epi8(px, zero), k));
+    __m128i hi = pair_sums(_mm_madd_epi16(_mm_unpackhi_epi8(px, zero), k));
+
+    return _mm_add_epi32(_mm_srai_epi32(_mm_add_epi32(evens(lo, hi), _mm_set1_epi32(128)), 8), _mm_set1_epi32(add));
+}
+
+/* The rounded average of the 2 x 2 boxes of four pixels in two rows, a and b: two pixels, B G R A in 16 bits. */
+static __m128i box2(__m128i a, __m128i b)
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i lo = _mm_add_epi16(_mm_unpacklo_epi8(a, zero), _mm_unpacklo_epi8(b, zero));
+    __m128i hi = _mm_add_epi16(_mm_unpackhi_epi8(a, zero), _mm_unpackhi_epi8(b, zero));
+    __m128i sum = _mm_unpacklo_epi64(_mm_add_epi16(lo, _mm_srli_si128(lo, 8)), _mm_add_epi16(hi, _mm_srli_si128(hi, 8)));
+
+    return _mm_srli_epi16(_mm_add_epi16(sum, _mm_set1_epi16(2)), 2);
+}
+
+/* ((k . pixel + 128) >> 8) + 128 for the two 16-bit pixels of x. */
+static __m128i chroma2(__m128i x, __m128i k)
+{
+    __m128i s = pair_sums(_mm_madd_epi16(x, k));
+
+    return _mm_add_epi32(_mm_srai_epi32(_mm_add_epi32(_mm_shuffle_epi32(s, 0x08), _mm_set1_epi32(128)), 8),
+                         _mm_set1_epi32(128));
+}
+
+static int luma1(unsigned p)
+{
+    return ((66 * (int)(p >> 16 & 0xFF) + 129 * (int)(p >> 8 & 0xFF) + 25 * (int)(p & 0xFF) + 128) >> 8) + 16;
+}
+
+/* U and V of the 2 x 2 box whose pixels are a, b (above) and c, d. */
+static void chroma1(unsigned a, unsigned b, unsigned c, unsigned d, unsigned char *u, unsigned char *v)
+{
+    int ch[3];
+
+    for (int i = 0; i < 3; i++)
+        ch[i] = ((int)(a >> (8 * i) & 0xFF) + (int)(b >> (8 * i) & 0xFF) + (int)(c >> (8 * i) & 0xFF) +
+                 (int)(d >> (8 * i) & 0xFF) + 2) >> 2;
+    *u = (unsigned char)(((-38 * ch[2] - 74 * ch[1] + 112 * ch[0] + 128) >> 8) + 128);
+    *v = (unsigned char)(((112 * ch[2] - 94 * ch[1] - 18 * ch[0] + 128) >> 8) + 128);
+}
+
+void picture_bgra_to_i420(const unsigned *bgra, int w, int h, int stride, unsigned char *y, unsigned char *u,
+                          unsigned char *v, int y_stride, int uv_stride)
+{
+    const __m128i ky = _mm_setr_epi16(25, 129, 66, 0, 25, 129, 66, 0);
+    const __m128i ku = _mm_setr_epi16(112, -74, -38, 0, 112, -74, -38, 0);
+    const __m128i kv = _mm_setr_epi16(-18, -94, 112, 0, -18, -94, 112, 0);
+
+    for (int r = 0; r < h; r += 2) {
+        const unsigned *p0 = bgra + (size_t)r * stride, *p1 = r + 1 < h ? p0 + stride : p0;
+        unsigned char *y0 = y + (size_t)r * y_stride, *y1 = r + 1 < h ? y0 + y_stride : NULL;
+        unsigned char *pu = u + (size_t)(r / 2) * uv_stride, *pv = v + (size_t)(r / 2) * uv_stride;
+        int x = 0;
+        for (; x + 8 <= w; x += 8) {
+            __m128i a0 = _mm_loadu_si128((const __m128i *)(p0 + x)), b0 = _mm_loadu_si128((const __m128i *)(p0 + x + 4));
+            __m128i a1 = _mm_loadu_si128((const __m128i *)(p1 + x)), b1 = _mm_loadu_si128((const __m128i *)(p1 + x + 4));
+            __m128i l0 = _mm_packs_epi32(dot4(a0, ky, 16), dot4(b0, ky, 16)), ca = box2(a0, a1), cb = box2(b0, b1);
+            __m128i cu = _mm_unpacklo_epi64(chroma2(ca, ku), chroma2(cb, ku));
+            __m128i cv = _mm_unpacklo_epi64(chroma2(ca, kv), chroma2(cb, kv));
+            int u4, v4;
+            _mm_storel_epi64((__m128i *)(y0 + x), _mm_packus_epi16(l0, l0));
+            if (y1) {
+                __m128i l1 = _mm_packs_epi32(dot4(a1, ky, 16), dot4(b1, ky, 16));
+                _mm_storel_epi64((__m128i *)(y1 + x), _mm_packus_epi16(l1, l1));
+            }
+            cu = _mm_packs_epi32(cu, cu);
+            cv = _mm_packs_epi32(cv, cv);
+            u4 = _mm_cvtsi128_si32(_mm_packus_epi16(cu, cu));
+            v4 = _mm_cvtsi128_si32(_mm_packus_epi16(cv, cv));
+            memcpy(pu + x / 2, &u4, 4);
+            memcpy(pv + x / 2, &v4, 4);
+        }
+        /* The rest pixel by pixel, the last column doubled when w is odd. */
+        for (; x < w; x += 2) {
+            int x1 = x + 1 < w ? x + 1 : x;
+            y0[x] = (unsigned char)luma1(p0[x]);
+            if (x1 != x)
+                y0[x1] = (unsigned char)luma1(p0[x1]);
+            if (y1) {
+                y1[x] = (unsigned char)luma1(p1[x]);
+                if (x1 != x)
+                    y1[x1] = (unsigned char)luma1(p1[x1]);
+            }
+            chroma1(p0[x], p0[x1], p1[x], p1[x1], pu + x / 2, pv + x / 2);
+        }
+    }
+}
+
+/* ---- Mouse pointer ---- */
+
+void picture_draw_cursor(unsigned *bgra, int w, int h, int stride, int x, int y, int type, const unsigned char *shape,
+                         int sw, int sh, int pitch)
+{
+    int rows = type == PICTURE_CURSOR_MONOCHROME ? sh / 2 : sh;
+
+    for (int r = 0; r < rows; r++) {
+        int py = y + r;
+        unsigned *row;
+        if (py < 0 || py >= h)
+            continue;
+        row = bgra + (size_t)py * stride;
+        for (int c = 0; c < sw; c++) {
+            int px = x + c;
+            unsigned d, sp;
+            if (px < 0 || px >= w)
+                continue;
+            d = row[px];
+            if (type == PICTURE_CURSOR_MONOCHROME) {
+                int bit = 7 - (c & 7);
+                unsigned and_bit = shape[r * pitch + c / 8] >> bit & 1, xor_bit = shape[(r + rows) * pitch + c / 8] >> bit & 1;
+                row[px] = ((and_bit ? d : 0u) ^ (xor_bit ? 0xFFFFFFu : 0u)) | 0xFF000000u;
+                continue;
+            }
+            memcpy(&sp, shape + r * pitch + c * 4, 4);
+            if (type == PICTURE_CURSOR_MASKED) {
+                row[px] = (sp >> 24 ? d ^ (sp & 0xFFFFFFu) : sp) | 0xFF000000u;
+            } else {
+                unsigned a = sp >> 24, out = 0xFF000000u;
+                for (int k = 0; k < 24; k += 8)
+                    out |= (((sp >> k & 0xFF) * a + (d >> k & 0xFF) * (255 - a) + 127) / 255) << k;
+                row[px] = out;
+            }
+        }
+    }
 }
 
 void picture_scratch_free(picture_scratch_t *scratch)
