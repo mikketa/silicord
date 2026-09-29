@@ -4,6 +4,7 @@
 #include "crypto.h"
 #include "http.h"
 #include "json.h"
+#include "sha2.h"
 #include "ws.h"
 
 #define RA_HOST L"remote-auth-gateway.discord.gg"
@@ -104,7 +105,7 @@ static int send_proof(ra_t *r, json_t root)
     int ok = 0;
 
     if (decrypt_field(r, root, "encrypted_nonce", &nonce)) {
-        sha256(nonce.data, nonce.len, hash);
+        sha256_once(nonce.data, nonce.len, hash);
         b64url_encode(hash, sizeof hash, &proof);
         ok = send_op(r, "nonce_proof", "proof", proof.data, proof.len);
     }

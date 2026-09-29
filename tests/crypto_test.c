@@ -1,4 +1,4 @@
-/* base64, SHA-256 and RSA-OAEP tests. The public key is re-imported by crypt32 as an independent check. */
+/* base64 and RSA-OAEP tests. The public key is re-imported by crypt32 as an independent check. */
 #include <windows.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
@@ -31,24 +31,6 @@ static void test_b64(void)
     sb_clear(&s);
     check(!b64_decode("ab$d", 4, &s), "reject invalid characters");
     sb_free(&s);
-}
-
-static int hash_is(const char *msg, const char *hex)
-{
-    static const char digits[] = "0123456789abcdef";
-    unsigned char h[32];
-
-    sha256(msg, sc_strlen(msg), h);
-    for (int i = 0; i < 32; i++)
-        if (hex[2 * i] != digits[h[i] >> 4] || hex[2 * i + 1] != digits[h[i] & 15])
-            return 0;
-    return 1;
-}
-
-static void test_sha256(void)
-{
-    check(hash_is("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "sha-256 of empty string");
-    check(hash_is("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha-256 of abc");
 }
 
 static void test_rsa(void)
@@ -101,7 +83,6 @@ static void test_rsa(void)
 void entry(void)
 {
     test_b64();
-    test_sha256();
     test_rsa();
     finish();
 }

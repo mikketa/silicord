@@ -6,8 +6,6 @@
 
 typedef struct rsa_key rsa_key_t;
 
-void sha256(const void *data, size_t n, unsigned char out[32]);
-
 /* Fresh RSA-2048 key pair, kept in memory only. */
 rsa_key_t *rsa_generate(void);
 void rsa_free(rsa_key_t *key);

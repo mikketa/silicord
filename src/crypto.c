@@ -8,11 +8,6 @@ struct rsa_key {
     BCRYPT_KEY_HANDLE key;
 };
 
-void sha256(const void *data, size_t n, unsigned char out[32])
-{
-    BCryptHash(BCRYPT_SHA256_ALG_HANDLE, NULL, 0, (PUCHAR)data, (ULONG)n, out, 32);
-}
-
 rsa_key_t *rsa_generate(void)
 {
     rsa_key_t *k = mem_alloc(sizeof *k);
