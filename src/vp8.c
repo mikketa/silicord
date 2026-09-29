@@ -943,6 +943,7 @@ int vp8_decode(vp8_decoder_t *d, const unsigned char *data, size_t n, vp8_image_
     }
     if (d->lf.level)
         loop_filter(d, f);
+    vp8i_extend_borders(f->y, f->u, f->v, d->stride, d->uv_stride, d->mb_cols * 16, d->mb_rows * 16);
     if (!d->refresh_entropy)
         d->ent = d->saved;
 

@@ -76,10 +76,18 @@ vp8_mv_t vp8i_chroma_mv(vp8_mv_t mv, int full_pixel);
 void vp8i_find_near_mvs(const int *sign_bias, const vp8_mb_t *m, const vp8_mb_t *above, const vp8_mb_t *left,
                         vp8_mv_t near_mvs[4], int cnt[4]);
 /*
- * A bw x bh block of plane `ref` (pw x ph, the macroblock-aligned size)
- * at (x, y) moved by mv, into dst. Pixels past the edges repeat the edge;
- * fractional positions go through the frame's six-tap or bilinear filters,
- * horizontally then vertically.
+ * A reference frame's borders: (stride - w) / 2 columns and rows around
+ * each w x h plane (the macroblock-aligned size), filled with copies of
+ * the edge pixels so that motion vectors pointing past the edges read
+ * them in place.
+ */
+void vp8i_extend_borders(unsigned char *y, unsigned char *u, unsigned char *v, int stride, int uv_stride, int w,
+                         int h);
+/*
+ * A bw x bh block of plane `ref` (pw x ph, the macroblock-aligned size,
+ * with its borders extended) at (x, y) moved by mv, into dst. Pixels past
+ * the edges repeat the edge; fractional positions go through the frame's
+ * six-tap or bilinear filters, horizontally then vertically.
  */
 void vp8i_predict_inter_block(vp8i_scratch_t *d, unsigned char *dst, int ds, const unsigned char *ref, int rs, int pw,
                               int ph, int x, int y, int bw, int bh, vp8_mv_t mv);

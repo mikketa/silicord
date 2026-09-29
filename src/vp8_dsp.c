@@ -397,23 +397,49 @@ static void filter_pass(unsigned char *dst, int ds, const unsigned char *src, in
         }
 }
 
+static void extend_plane(unsigned char *p, int stride, int w, int h)
+{
+    int b = (stride - w) / 2;
+
+    for (int r = 0; r < h; r++) {
+        unsigned char *row = p + r * stride;
+        memset(row - b, row[0], (size_t)b);
+        memset(row + w, row[w - 1], (size_t)b);
+    }
+    for (int r = 1; r <= b; r++) {
+        memcpy(p - r * stride - b, p - b, (size_t)stride);
+        memcpy(p + (h - 1 + r) * stride - b, p + (h - 1) * stride - b, (size_t)stride);
+    }
+}
+
+void vp8i_extend_borders(unsigned char *y, unsigned char *u, unsigned char *v, int stride, int uv_stride, int w,
+                         int h)
+{
+    extend_plane(y, stride, w, h);
+    extend_plane(u, uv_stride, w / 2, h / 2);
+    extend_plane(v, uv_stride, w / 2, h / 2);
+}
+
 /*
  * A bw x bh block of plane `ref` (pw x ph, the macroblock-aligned size)
- * at (x, y) moved by mv, into dst. Pixels past the edges repeat the edge;
- * fractional positions go through the frame's six-tap or bilinear filters,
- * horizontally then vertically. A whole-pixel component's filter is
- * {0, 0, 128, 0, 0, 0}, which returns its input: that pass is skipped.
+ * at (x, y) moved by mv, into dst. Pixels past the edges repeat the edge:
+ * the extended borders hold them, and a block reaching past the borders
+ * too is copied with its coordinates clamped. Fractional positions go
+ * through the frame's six-tap or bilinear filters, horizontally then
+ * vertically. A whole-pixel component's filter is {0, 0, 128, 0, 0, 0},
+ * which returns its input: that pass is skipped.
  */
 void vp8i_predict_inter_block(vp8i_scratch_t *d, unsigned char *dst, int ds, const unsigned char *ref, int rs, int pw,
                                 int ph, int x, int y, int bw, int bh, vp8_mv_t mv)
 {
-    int mx = mv.x & 7, my = mv.y & 7;
+    int mx = mv.x & 7, my = mv.y & 7, b = (rs - pw) / 2;
     const unsigned char *src;
     int ss;
 
     x += mv.x >> 3;
     y += mv.y >> 3;
-    if (x < 2 || y < 2 || x + bw + 3 > pw || y + bh + 3 > ph) {
+    /* In place if the taps and filter_pass's wide reads (up to 16 bytes from x - 2) stay within the borders. */
+    if (x - 2 < -b || y - 2 < -b || x + (bw < 8 ? 8 : bw) + 6 > pw + b || y + bh + 3 > ph + b) {
         for (int r = 0; r < bh + 5; r++) {
             int yy = y - 2 + r;
             const unsigned char *row = ref + (yy < 0 ? 0 : yy >= ph ? ph - 1 : yy) * rs;

@@ -390,8 +390,9 @@ static int inter_sad(vp8_encoder_t *e, int row, int col, vp8_mv_t mv)
     int aw = e->mb_cols * 16, ah = e->mb_rows * 16, x = col * 16, y = row * 16;
     int rx = x + (mv.x >> 3), ry = y + (mv.y >> 3);
 
-    /* Whole pixels inside the frame: compare in place. */
-    if (!(mv.x & 7) && !(mv.y & 7) && rx >= 0 && ry >= 0 && rx + 16 <= aw && ry + 16 <= ah)
+    /* Whole pixels inside the frame or its extended borders: compare in place. */
+    if (!(mv.x & 7) && !(mv.y & 7) && rx >= -BORDER && ry >= -BORDER && rx + 16 <= aw + BORDER &&
+        ry + 16 <= ah + BORDER)
         return sad(e->y[!e->cur] + ry * e->stride + rx, e->stride, e->sy + y * aw + x, aw, 16, 16);
     vp8i_predict_inter_block(&e->scratch, e->pred, 16, e->y[!e->cur], e->stride, aw, e->mb_rows * 16, x, y, 16, 16, mv);
     return sad(e->pred, 16, e->sy + y * aw + x, aw, 16, 16);
@@ -736,6 +737,8 @@ int vp8_encode(vp8_encoder_t *e, const vp8_image_t *img, int key, sb_t *out)
         }
     }
     be_flush(&e->tokens);
+    vp8i_extend_borders(e->y[e->cur], e->u[e->cur], e->v[e->cur], e->stride, e->uv_stride, e->mb_cols * 16,
+                        e->mb_rows * 16);
 
     /* The header and modes, now that the counts are known. */
     prob_skip = clamp_prob((total - e->skips) * 256 / total);
