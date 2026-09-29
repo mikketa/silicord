@@ -384,6 +384,7 @@ typedef struct {
 
 typedef struct presence {
     char user[24];
+    unsigned hash;      /* of user: lookups compare it first */
     int status;
     sb_t activity;
 } presence_t;
@@ -391,6 +392,7 @@ typedef struct presence {
 typedef struct member {
     char guild[24];
     char user[24];
+    unsigned hash;      /* of user: lookups compare it first */
     int known;          /* 0 asked, 1 answered */
     sb_t nick;
     sb_t roles;         /* comma-separated ids */
@@ -2339,10 +2341,13 @@ static void update_grouping(void)
 
 /* ---- Presence ---- */
 
+/* Linear, but a hash compare per entry: the friends list looks up every friend at each paint. */
 static presence_t *presence_find(const char *user)
 {
+    unsigned h = key_hash(user);
+
     for (int i = 0; i < g_ui.npresences; i++)
-        if (lstrcmpA(g_ui.presences[i].user, user) == 0)
+        if (g_ui.presences[i].hash == h && lstrcmpA(g_ui.presences[i].user, user) == 0)
             return &g_ui.presences[i];
     return NULL;
 }
@@ -2369,6 +2374,7 @@ static void presence_store(json_t obj)
         p = &g_ui.presences[g_ui.npresences++];
         *p = (presence_t){0};
         lstrcpynA(p->user, id, sizeof p->user);
+        p->hash = key_hash(p->user);
     }
     p->status = json_get(obj, "status", &v) ? ml_status(v) : ML_OFFLINE;
     sb_clear(&p->activity);
@@ -2395,10 +2401,14 @@ static int user_status(const char *user)
 
 /* ---- Server members ---- */
 
+/* Linear, but a hash compare per entry: each message drawn looks its author up. */
 static member_t *member_find(const char *guild, const char *user)
 {
+    unsigned h = key_hash(user);
+
     for (int i = 0; i < g_ui.nmembers; i++)
-        if (lstrcmpA(g_ui.members[i].user, user) == 0 && lstrcmpA(g_ui.members[i].guild, guild) == 0)
+        if (g_ui.members[i].hash == h && lstrcmpA(g_ui.members[i].user, user) == 0 &&
+            lstrcmpA(g_ui.members[i].guild, guild) == 0)
             return &g_ui.members[i];
     return NULL;
 }
@@ -2417,6 +2427,7 @@ static member_t *member_add(const char *guild, const char *user)
     *mb = (member_t){0};
     lstrcpynA(mb->guild, guild, sizeof mb->guild);
     lstrcpynA(mb->user, user, sizeof mb->user);
+    mb->hash = key_hash(mb->user);
     return mb;
 }
 
