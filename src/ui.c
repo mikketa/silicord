@@ -437,7 +437,10 @@ typedef struct presence {
     sb_t game, details, state, image, album; /* image: a full URL, empty if none we can show */
     long long start, end;                    /* ms since 1970 it began and ends, 0 if not told */
     int listening;                           /* Spotify: a song, by an artist, on an album */
+    int kind;                                /* its type: 0 playing, 1 streaming, 2 listening, 3 watching */
 } presence_t;
+
+static int activity_line(const presence_t *pr, r_font_t *font, int color, int x, int y, int w, int h);
 
 typedef struct member {
     char guild[24];
@@ -2554,13 +2557,16 @@ static void paint_channel_row(unsigned i, int y)
             presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
             if (c->type == CH_DM && c->user_id[0])
                 paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE, bg);
-            if ((pr && pr->activity.len && pr->status != ML_OFFLINE) || (c->type == CH_GROUP_DM && c->members)) {
+            if ((pr && (pr->activity.len || pr->game.len) && pr->status != ML_OFFLINE) || (c->type == CH_GROUP_DM && c->members)) {
                 char members[32];
                 wsprintfA(members, "%d Members", c->members);
                 text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
                      rect(x + S(52), y + S(3), w - S(58) - badge, S(21)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                text(g_ui.f_small, C_MUTED, rect(x + S(52), y + S(23), w - S(58) - badge, S(16)),
-                     c->type == CH_GROUP_DM ? members : pr->activity.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                if (c->type == CH_GROUP_DM)
+                    text(g_ui.f_small, C_MUTED, rect(x + S(52), y + S(23), w - S(58) - badge, S(16)), members,
+                         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                else
+                    activity_line(pr, g_ui.f_small, C_MUTED, x + S(52), y + S(23), w - S(58) - badge, S(16));
             } else
             text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
                  rect(x + S(52), y, w - S(58) - badge, S(DM_ROW_H)), name,
@@ -3107,6 +3113,35 @@ static presence_t *presence_find(const char *user)
     return NULL;
 }
 
+/*
+ * The line under a name, as Discord writes it: an activity after its green
+ * icon (the game's name, or for a song its artist), else the custom status.
+ * Draws it in (x, y, w, h); returns 0 if there is none.
+ */
+static int activity_line(const presence_t *pr, r_font_t *font, int color, int x, int y, int w, int h)
+{
+    const char *line;
+    const wchar_t *glyph = NULL;
+
+    if (!pr || pr->status == ML_OFFLINE || pr->status == ML_UNKNOWN)
+        return 0;
+    if (pr->game.len) {
+        glyph = pr->kind == 2 ? L"\xEC4F" : pr->kind == 1 ? L"\xE7F4" : L"\xE7FC"; /* note, screen, controller */
+        line = pr->kind == 2 && pr->state.len ? pr->state.data : pr->game.data;
+    } else if (pr->activity.len) {
+        line = pr->activity.data;
+    } else {
+        return 0;
+    }
+    if (glyph) {
+        r_text(g_ui.f_icon, 0xFF45A366u, x, y, S(16), h, glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+        x += S(20);
+        w -= S(20);
+    }
+    text(font, color, rect(x, y, w, h), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    return 1;
+}
+
 /* A string member into `out` (cleared first), if there is one. */
 static void json_str_of(json_t obj, const char *key, sb_t *out)
 {
@@ -3153,6 +3188,7 @@ static void presence_game(json_t obj, presence_t *p)
                 json_int(v, &p->end);
         }
         p->listening = type == 2;
+        p->kind = (int)type;
         if (json_get(a, "application_id", &v))
             json_raw(v, app, sizeof app);
         if (json_get(a, "assets", &assets)) {
@@ -11924,12 +11960,11 @@ static void paint_friends(RECT rc, int x0, int w)
             lstrcpyA(sub, "Outgoing Friend Request");
         else if (r->type == REL_BLOCKED)
             lstrcpyA(sub, "Blocked");
-        else if (pr && pr->activity.len && st != ML_OFFLINE)
-            lstrcpynA(sub, pr->activity.data, sizeof sub);
         else
             lstrcpyA(sub, st == ML_ONLINE ? "Online" : st == ML_IDLE ? "Idle" : st == ML_DND ? "Do Not Disturb" : "Offline");
-        text(g_ui.f_section, C_MUTED, rect(ax + S(44), y + S(32), lw - S(260), S(18)), sub,
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (r->type != REL_FRIEND || !activity_line(pr, g_ui.f_section, C_MUTED, ax + S(44), y + S(32), lw - S(260), S(18)))
+            text(g_ui.f_section, C_MUTED, rect(ax + S(44), y + S(32), lw - S(260), S(18)), sub,
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         na = row_actions(r, acts);
         for (int a = 0; a < na; a++) {
             /* message, accept, ignore, unblock, and "more" for a friend (its menu holds Remove Friend) */
