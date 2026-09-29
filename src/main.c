@@ -665,6 +665,15 @@ static void voice_video_state(void *ctx, unsigned long long user, int on)
     ui_post(UI_VIDEO, NULL);
 }
 
+/* Someone left the call: free their decoders now rather than when the call ends. */
+static void voice_left(void *ctx, unsigned long long user)
+{
+    EnterCriticalSection(&g_mix_lock);
+    mixer_remove(&g_mixer, user);
+    LeaveCriticalSection(&g_mix_lock);
+    voice_video_state(ctx, user, 0);
+}
+
 /* ---- Our camera: captured, encoded and sent, and shown to us ---- */
 
 #define CAMERA_W 640
@@ -799,6 +808,7 @@ static void voice_try_start(void)
     ev.log = voice_log;
     ev.frame = voice_frame;
     ev.video = voice_video;
+    ev.left = voice_left;
     ev.video_state = voice_video_state;
     ev.key_frame = voice_key_frame;
     if (g_vc.active && g_vc.have_state && g_vc.have_server) {

@@ -568,12 +568,16 @@ static int handle(voice_t *v, const sb_t *msg)
         LeaveCriticalSection(&v->lock);
         break;
     }
-    case OP_CLIENT_DISCONNECT:
+    case OP_CLIENT_DISCONNECT: {
+        unsigned long long user = (unsigned long long)json_num(d, "user_id");
         EnterCriticalSection(&v->lock);
-        dave_on_client_disconnect(&v->dave, (unsigned long long)json_num(d, "user_id"));
-        drop_videos(v, (unsigned long long)json_num(d, "user_id"));
+        dave_on_client_disconnect(&v->dave, user);
+        drop_videos(v, user);
         LeaveCriticalSection(&v->lock);
+        if (v->ev.left)
+            v->ev.left(v->ev.ctx, user);
         break;
+    }
     case OP_PREPARE_TRANSITION:
         EnterCriticalSection(&v->lock);
         dave_on_prepare_transition(&v->dave, (int)json_num(d, "transition_id"),
