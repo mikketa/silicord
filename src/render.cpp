@@ -689,12 +689,6 @@ extern "C" unsigned r_image_advance(r_image_t *img, unsigned now)
     return (int)(img->due - now) > 0 ? img->due - now : 1;
 }
 
-extern "C" int r_image_lost(const r_image_t *img)
-{
-    (void)img;
-    return 0; /* images are drawn from their own pixels */
-}
-
 extern "C" size_t r_image_bytes(const r_image_t *img)
 {
     return img ? sizeof *img + (size_t)img->w * img->h * 4 * (img->saved ? 2 : 1) + img->file_n +

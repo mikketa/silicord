@@ -32,8 +32,6 @@ void r_round(int x, int y, int w, int h, int radius, unsigned argb);
 void r_circle(int x, int y, int d, unsigned argb);
 /* Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle). */
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
-/* Whether the image must be decoded again before drawing (never, with this renderer). */
-int r_image_lost(const r_image_t *img);
 /*
  * Animated GIFs keep their compressed data and one composed frame; the first
  * frame shows until r_image_advance() moves on. It returns how many ms until

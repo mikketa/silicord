@@ -672,11 +672,6 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
 {
     image_t *im = image_find(key);
 
-    if (im && im->img && r_image_lost(im->img)) { /* render target was recreated */
-        r_image_free(im->img);
-        im->img = NULL;
-        img_request(key, path, max_px);
-    }
     if (im) {
         im->used = g_ui.frame;
         im->wnd = g_ui.paint_wnd;
