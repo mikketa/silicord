@@ -138,6 +138,7 @@ typedef struct {
 static float g_window[CELT_OVERLAP];
 static cpx_t g_roots[480];            /* e^(2 pi i k / 480) */
 static cpx_t g_rot[MAX_LM + 1][480];  /* e^(i 2 pi (k + 1/8) / N) per frame size */
+static cpx_t g_dft[4][5][5];          /* e^(2 pi i q r / p): the p-point DFTs (p = 2 to 5) of the FFT */
 static volatile int g_tables_ready;
 
 static void init_tables(void)
@@ -152,6 +153,10 @@ static void init_tables(void)
         g_roots[k].r = (float)om_cos(2 * OM_PI * k / 480);
         g_roots[k].i = (float)om_sin(2 * OM_PI * k / 480);
     }
+    for (int p = 2; p <= 5; p++)
+        for (int q = 0; q < p; q++)
+            for (int r = 0; r < p; r++)
+                g_dft[p - 2][q][r] = g_roots[q * r * (480 / p) % 480];
     for (int lm = 0; lm <= MAX_LM; lm++) {
         int n = 2 * (SHORT_MDCT << lm);
         for (int k = 0; k < n / 4; k++) {
@@ -164,32 +169,43 @@ static void init_tables(void)
 
 /* ---- Inverse MDCT through an N/4-point complex FFT ---- */
 
-/* Unscaled inverse DFT of n (60 to 480) points, in place, by recursive decimation in time. */
+/*
+ * Unscaled inverse DFT of n (60 to 480) points, in place, by recursive decimation in time.
+ * Products with the unit root e^0 = 1 are left out: each output starts from 0 + t[0] and adds
+ * t[r] as is in its first row, which rounds exactly as multiplying by (1, 0) would.
+ */
 static void ifft_rec(cpx_t *out, const cpx_t *in, int n, int stride)
 {
-    int p, m;
+    int p = n % 4 == 0 ? 4 : n % 2 == 0 ? 2 : n % 3 == 0 ? 3 : 5, m = n / p, step = 480 / n;
+    const cpx_t (*w)[5] = g_dft[p - 2];
 
-    if (n == 1) {
-        out[0] = in[0];
-        return;
+    if (m == 1) {
+        for (int r = 0; r < p; r++)
+            out[r] = in[r * stride];
+    } else {
+        for (int r = 0; r < p; r++)
+            ifft_rec(out + r * m, in + r * stride, m, stride * p);
     }
-    p = n % 4 == 0 ? 4 : n % 2 == 0 ? 2 : n % 3 == 0 ? 3 : 5;
-    m = n / p;
-    for (int r = 0; r < p; r++)
-        ifft_rec(out + r * m, in + r * stride, m, stride * p);
     for (int k = 0; k < m; k++) {
         cpx_t t[5], u[5];
-        for (int r = 0; r < p; r++) {
-            cpx_t a = out[r * m + k], w = g_roots[(r * k * (480 / n)) % 480];
-            t[r].r = a.r * w.r - a.i * w.i;
-            t[r].i = a.r * w.i + a.i * w.r;
+        t[0] = out[k];
+        for (int r = 1; r < p; r++) {
+            cpx_t a = out[r * m + k], tw = g_roots[r * k * step];
+            t[r].r = a.r * tw.r - a.i * tw.i;
+            t[r].i = a.r * tw.i + a.i * tw.r;
         }
-        for (int q = 0; q < p; q++) {
-            u[q].r = u[q].i = 0;
-            for (int r = 0; r < p; r++) {
-                cpx_t w = g_roots[(r * q * (480 / p)) % 480];
-                u[q].r += t[r].r * w.r - t[r].i * w.i;
-                u[q].i += t[r].r * w.i + t[r].i * w.r;
+        u[0].r = 0.f + t[0].r;
+        u[0].i = 0.f + t[0].i;
+        for (int r = 1; r < p; r++) {
+            u[0].r += t[r].r;
+            u[0].i += t[r].i;
+        }
+        for (int q = 1; q < p; q++) {
+            u[q].r = 0.f + t[0].r;
+            u[q].i = 0.f + t[0].i;
+            for (int r = 1; r < p; r++) {
+                u[q].r += t[r].r * w[q][r].r - t[r].i * w[q][r].i;
+                u[q].i += t[r].r * w[q][r].i + t[r].i * w[q][r].r;
             }
         }
         for (int q = 0; q < p; q++)
