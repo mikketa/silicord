@@ -77,6 +77,7 @@ enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SE
 
 typedef struct {
     char key[96];
+    unsigned hash;   /* of key: lookups compare it first */
     r_image_t *img;
     unsigned used;   /* paint that last drew it */
     HWND wnd;        /* window that drew it, for animations */
@@ -578,10 +579,22 @@ static void draw_mark(int x, int y, int unit, int c)
 
 /* ---- Images ---- */
 
+/* FNV-1a. */
+static unsigned key_hash(const char *key)
+{
+    unsigned h = 2166136261u;
+
+    while (*key)
+        h = (h ^ (unsigned char)*key++) * 16777619u;
+    return h;
+}
+
 static image_t *image_find(const char *key)
 {
+    unsigned h = key_hash(key);
+
     for (int i = 0; i < g_ui.nimages; i++)
-        if (lstrcmpA(g_ui.images[i].key, key) == 0)
+        if (g_ui.images[i].hash == h && lstrcmpA(g_ui.images[i].key, key) == 0)
             return &g_ui.images[i];
     return NULL;
 }
@@ -677,6 +690,7 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
     }
     im = &g_ui.images[g_ui.nimages++];
     lstrcpynA(im->key, key, sizeof im->key);
+    im->hash = key_hash(im->key);
     im->used = g_ui.frame;
     im->wnd = g_ui.paint_wnd;
     im->img = frame_ms() < SYNC_DECODE_MS ? img_cached(path, max_px) : NULL;
