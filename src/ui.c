@@ -344,7 +344,7 @@ typedef struct {
 
     /* Files to send with the next message. */
     upload_t uploads[10];
-    int nuploads, upload_hover, hover_attach;
+    int nuploads, upload_hover, hover_attach, hover_emoji, bar_hover;
 
     /* Emoji picker. */
     HWND picker, picker_edit;
@@ -655,7 +655,8 @@ static int frame_ms(void)
 #define TWEENS 64
 #define TW_FAST 120  /* hover backgrounds */
 #define TW_SHAPE 200 /* server icons and their pill */
-enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_MESSAGE, TW_MEMBER, TW_FRIEND };
+enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_MESSAGE, TW_MEMBER, TW_FRIEND, TW_ATTACH, TW_EMOJI, TW_MENTION,
+       TW_BAR_CLOSE };
 
 typedef struct {
     int kind, index;
@@ -4372,13 +4373,20 @@ static void paint_main(RECT rc)
             paint_bar(x0, w, cy);
             paint_detached(x0, w, cy);
             r_round(x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
-            /* Attach button, like Discord's "+" */
-            r_circle(x0 + S(28), cy + (S(COMPOSER_H) - S(24)) / 2, S(24), g_ui.hover_attach ? ARGB(C_INK) : ARGB(C_MUTED));
-            text(g_ui.f_h, C_PANEL, rect(x0 + S(28), cy + (S(COMPOSER_H) - S(24)) / 2 - S(1), S(24), S(24)), "+",
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            text_w(g_ui.f_icon_mid, g_ui.picker && g_ui.picker_mode == PICK_COMPOSER ? C_AMBER : C_MUTED,
-                   rect(x0 + w - S(16) - S(44), cy, S(40), S(COMPOSER_H)), L"\xE76E", -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            /* Attach button, like Discord's "+": a disc with a plus drawn as two bars, so it stays centered. */
+            {
+                int d = S(24), bx = x0 + S(28), by = cy + (S(COMPOSER_H) - d) / 2, len = S(12), th = S(2) > 2 ? S(2) : 2;
+                float t = tween_on(TW_ATTACH, 0, g_ui.hover_attach, TW_FAST, bx, by, d, d);
+                r_circle(bx, by, d, lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t));
+                r_round(bx + (d - len) / 2, by + (d - th) / 2, len, th, th / 2, ARGB(C_PANEL));
+                r_round(bx + (d - th) / 2, by + (d - len) / 2, th, len, th / 2, ARGB(C_PANEL));
+            }
+            {
+                int open = g_ui.picker && g_ui.picker_mode == PICK_COMPOSER;
+                float t = tween_on(TW_EMOJI, 0, open || g_ui.hover_emoji, TW_FAST, x0 + w - S(60), cy, S(40), S(COMPOSER_H));
+                r_text(g_ui.f_icon_mid, lerp_argb(ARGB(C_MUTED), ARGB(C_AMBER), t), x0 + w - S(60), cy, S(40), S(COMPOSER_H),
+                       L"\xE76E", -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
+            }
             if (g_ui.send_error.len)
                 text(g_ui.f_small, C_AMBER, rect(x0 + S(20), cy - S(20) - (g_ui.bar ? S(BAR_H) : 0), w - S(40), S(18)),
                      g_ui.send_error.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -7113,10 +7121,45 @@ static void paint_bar(int x0, int w, int cy)
     else
         lstrcpyA(line, "Editing message \xE2\x80\xA2 escape to cancel \xE2\x80\xA2 enter to save");
     text(g_ui.f_small, C_MUTED, rect(x0 + S(32), y, w - S(160), S(BAR_H)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (g_ui.bar == BAR_REPLY)
-        text(g_ui.f_cat, g_ui.bar_mention ? C_AMBER : C_FAINT, rect(x0 + w - S(128), y, S(64), S(BAR_H)),
-             g_ui.bar_mention ? "@ ON" : "@ OFF", DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    text_w(g_ui.f_icon, C_MUTED, rect(x0 + w - S(56), y, S(24), S(BAR_H)), L"\xE711", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (g_ui.bar == BAR_REPLY) {
+        /* Whether the reply pings its author: "@" and a switch whose knob slides across. */
+        int zx = x0 + w - S(128), tw = S(34), th = S(20), tx = zx + S(64) - tw - S(4), ty = y + (S(BAR_H) - th) / 2;
+        int hov = g_ui.bar_hover == 1, kd = th - S(6);
+        float t = tween_on(TW_MENTION, 0, g_ui.bar_mention, TW_SHAPE, zx, ty, S(64), th);
+        unsigned off = hov ? 0xFF4A4A4Au : 0xFF3A3A3Au, on = hov ? 0xFFFFC233u : ARGB(C_AMBER);
+        r_text(g_ui.f_h, lerp_argb(ARGB(hov ? C_MUTED : C_FAINT), ARGB(C_AMBER), t), zx, y, tx - zx - S(6), S(BAR_H), L"@", -1,
+               rflags(DT_RIGHT | DT_VCENTER | DT_SINGLELINE));
+        r_round(tx, ty, tw, th, th / 2, lerp_argb(off, on, t));
+        r_circle(lerp_i(tx + S(3), tx + tw - S(3) - kd, t), ty + S(3), kd, lerp_argb(0xFFB5AFA4u, 0xFF181818u, t));
+    }
+    {
+        int bx = x0 + w - S(56), by = y + (S(BAR_H) - S(24)) / 2;
+        float t = tween_on(TW_BAR_CLOSE, 0, g_ui.bar_hover == 2, TW_FAST, bx, by, S(24), S(24));
+        if (t > 0.f)
+            r_circle(bx, by, S(24), lerp_argb(0xFF181818u, 0xFF2A2A2Au, t));
+        r_text(g_ui.f_icon, lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t), bx, y, S(24), S(BAR_H), L"\xE711", -1,
+               rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
+    }
+}
+
+/* The part of the reply or edit bar at (x, y): 1 the mention switch, 2 the close button, 0 none. */
+static int bar_hit(int x, int y)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W), w, cy;
+
+    if (!g_ui.bar)
+        return 0;
+    GetClientRect(g_ui.wnd, &rc);
+    w = main_right() - x0;
+    cy = rc.bottom - S(24) - S(COMPOSER_H);
+    if (y < cy - S(BAR_H) || y >= cy)
+        return 0;
+    if (x >= x0 + w - S(56) && x < x0 + w - S(32))
+        return 2;
+    if (g_ui.bar == BAR_REPLY && x >= x0 + w - S(128) && x < x0 + w - S(64))
+        return 1;
+    return 0;
 }
 
 /* Clicks on the bar: 1 handled. */
@@ -7133,9 +7176,9 @@ static int click_bar(int x, int y)
     top = cy - S(BAR_H);
     if (y < top || y >= cy)
         return 0;
-    if (x >= x0 + w - S(56) && x < x0 + w - S(32))
+    if (bar_hit(x, y) == 2)
         bar_close();
-    else if (g_ui.bar == BAR_REPLY && x >= x0 + w - S(128) && x < x0 + w - S(64)) {
+    else if (bar_hit(x, y) == 1) {
         g_ui.bar_mention ^= 1;
         redraw();
     }
@@ -11733,16 +11776,20 @@ static void update_hover(int x, int y)
     }
     {
         RECT crc;
-        int th = tray_hit(x, y), cy, att;
+        int th = tray_hit(x, y), cy, att, emo, bh;
         GetClientRect(g_ui.wnd, &crc);
         cy = crc.bottom - S(24) - S(COMPOSER_H);
         att = open_is_text() && x >= S(RAIL_W + SIDE_W) + S(24) && x < S(RAIL_W + SIDE_W) + S(56) && y >= cy && y < cy + S(COMPOSER_H);
-        if (th != g_ui.upload_hover || att != g_ui.hover_attach) {
+        emo = open_is_text() && y >= cy && y < cy + S(COMPOSER_H) && x >= main_right() - S(60) && x < main_right() - S(16);
+        bh = bar_hit(x, y);
+        if (th != g_ui.upload_hover || att != g_ui.hover_attach || emo != g_ui.hover_emoji || bh != g_ui.bar_hover) {
             g_ui.upload_hover = th;
             g_ui.hover_attach = att;
+            g_ui.hover_emoji = emo;
+            g_ui.bar_hover = bh;
             redraw();
         }
-        link = link || th >= 0 || att;
+        link = link || th >= 0 || att || emo || bh;
     }
     {
         int ph = post_hit(x, y);
