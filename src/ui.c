@@ -2980,10 +2980,25 @@ static void ui_msg_free(msg_t *m)
     msg_free(m);
 }
 
+/* The pins and search panels lay out their messages' embeds with msg_extras, which gives them a view too. */
+static void batch_drop_views(msg_batch_t *b)
+{
+    for (int i = 0; b && i < b->n; i++)
+        drop_view(&b->msgs[i]);
+}
+
+static void panel_batch_free(msg_batch_t *b)
+{
+    batch_drop_views(b);
+    msg_batch_free(b);
+}
+
 static void invalidate_views(void)
 {
     for (int i = 0; i < g_ui.nmsgs; i++)
         drop_view(&g_ui.msgs[i]);
+    batch_drop_views(g_ui.pins);
+    batch_drop_views(g_ui.results);
 }
 
 /* Parsed and laid-out body of a message, rebuilt when the width changes. */
@@ -8648,7 +8663,7 @@ static int call_button_x(void)
 
 static void pins_close(void)
 {
-    msg_batch_free(g_ui.pins);
+    panel_batch_free(g_ui.pins);
     g_ui.pins = NULL;
     g_ui.pins_open = 0;
     g_ui.pins_inbox = 0;
@@ -10372,7 +10387,7 @@ static void place_search(void)
 
 static void search_close(void)
 {
-    msg_batch_free(g_ui.results);
+    panel_batch_free(g_ui.results);
     g_ui.results = NULL;
     g_ui.results_open = 0;
     g_ui.results_scroll = 0;
