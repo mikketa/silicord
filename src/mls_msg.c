@@ -52,16 +52,6 @@ int mls_extension_find(mls_bytes_t list, unsigned type, mls_bytes_t *data)
     return 0;
 }
 
-static int read_key(tls_reader_t *r, unsigned char out[65])
-{
-    mls_bytes_t k = read_vec(r);
-
-    if (r->bad || k.n != 65 || k.p[0] != 4)
-        return 0;
-    memcpy(out, k.p, 65);
-    return 1;
-}
-
 int mls_message_header(tls_reader_t *r, unsigned *wire_format)
 {
     unsigned version = tls_read_u16(r);
@@ -78,7 +68,7 @@ int mls_key_package_read(mls_key_package_t *kp, tls_reader_t *r)
     size_t used;
 
     memset(kp, 0, sizeof *kp);
-    if (tls_read_u16(r) != 1 || tls_read_u16(r) != 2 || !read_key(r, kp->init_key))
+    if (tls_read_u16(r) != 1 || tls_read_u16(r) != 2 || !mls_point_read(r, kp->init_key))
         return 0;
     if (!mls_leaf_parse(&kp->leaf, r->p, (size_t)(r->end - r->p), &used))
         return 0;

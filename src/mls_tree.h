@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include "sb.h"
+#include "tls.h"
 
 /*
  * MLS ratchet trees (RFC 9420, section 7) as arrays: leaves at even node
@@ -43,6 +44,8 @@ static __inline unsigned mls_nodes(unsigned nleaves)
     return nleaves ? 2 * nleaves - 1 : 0;
 }
 
+/* An uncompressed P-256 point as a vector (an HPKE or signature key). */
+int mls_point_read(tls_reader_t *r, unsigned char out[65]);
 /* A LeafNode from its encoding (`used` gets its size). */
 int mls_leaf_parse(mls_node_t *node, const unsigned char *data, size_t n, size_t *used);
 /* LeafNodeTBS's signature: group_id and leaf_index count for update and commit leaves. */
@@ -53,7 +56,7 @@ void mls_tree_serialize(const mls_tree_t *t, sb_t *out);
 void mls_tree_free(mls_tree_t *t);
 void mls_node_clear(mls_node_t *node);
 void mls_node_copy(mls_node_t *dst, const mls_node_t *src);
-int mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src);
+void mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src);
 /* Grows the tree to hold at least `nleaves` leaves (blank ones). */
 void mls_tree_extend(mls_tree_t *t, unsigned nleaves);
 /* Drops the right half while it is all blank. */

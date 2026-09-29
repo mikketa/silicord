@@ -86,8 +86,7 @@ void mls_node_copy(mls_node_t *dst, const mls_node_t *src)
     }
 }
 
-/* An uncompressed P-256 point as a vector. */
-static int read_point(tls_reader_t *r, unsigned char out[65])
+int mls_point_read(tls_reader_t *r, unsigned char out[65])
 {
     size_t n;
     const unsigned char *p = tls_read_vec(r, &n);
@@ -111,11 +110,11 @@ static void skip_u16s(tls_reader_t *r)
 
 static int leaf_read(mls_node_t *node, tls_reader_t *r)
 {
-    const unsigned char *start = r->p, *id, *sig;
+    const unsigned char *start = r->p, *id;
     size_t n, sn;
     tls_reader_t ext;
 
-    if (!read_point(r, node->key) || !read_point(r, node->sig_key))
+    if (!mls_point_read(r, node->key) || !mls_point_read(r, node->sig_key))
         return 0;
     if (tls_read_u16(r) != 1) /* only basic credentials */
         return 0;
@@ -147,10 +146,9 @@ static int leaf_read(mls_node_t *node, tls_reader_t *r)
     if (ext.bad)
         return 0;
     node->tbs_n = (size_t)(r->p - start);
-    sig = tls_read_vec(r, &sn);
+    tls_read_vec(r, &sn); /* signature */
     if (r->bad || !sn)
         return 0;
-    (void)sig;
     sb_addn(&node->leaf, (const char *)start, (size_t)(r->p - start));
     node->present = 1;
     return 1;
@@ -177,7 +175,7 @@ static int parent_read(mls_node_t *node, tls_reader_t *r)
     size_t n;
     tls_reader_t um;
 
-    if (!read_point(r, node->key))
+    if (!mls_point_read(r, node->key))
         return 0;
     ph = tls_read_vec(r, &n);
     if (r->bad)
@@ -209,7 +207,7 @@ void mls_tree_free(mls_tree_t *t)
     t->nleaves = 0;
 }
 
-int mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src)
+void mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src)
 {
     unsigned n = mls_nodes(src->nleaves);
 
@@ -217,7 +215,6 @@ int mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src)
     dst->nodes = n ? mem_alloc(sizeof *dst->nodes * n) : NULL;
     for (unsigned i = 0; i < n; i++)
         mls_node_copy(&dst->nodes[i], &src->nodes[i]);
-    return 1;
 }
 
 void mls_tree_extend(mls_tree_t *t, unsigned nleaves)
@@ -315,26 +312,27 @@ bad:
     return 0;
 }
 
+static int excluded(unsigned leaf, const unsigned *excl, int nexcl)
+{
+    for (int k = 0; k < nexcl; k++)
+        if (excl[k] == leaf)
+            return 1;
+    return 0;
+}
+
+/* A ParentNode, without the unmerged leaves in `excl`. */
 static void parent_encode(const mls_node_t *node, sb_t *out, const unsigned *excl, int nexcl)
 {
     int keep = 0;
 
     tls_vec(out, node->key, 65);
     tls_vec(out, node->parent_hash.data, node->parent_hash.len);
-    for (int i = 0; i < node->nunmerged; i++) {
-        int k = 0;
-        while (k < nexcl && excl[k] != node->unmerged[i])
-            k++;
-        keep += k == nexcl;
-    }
+    for (int i = 0; i < node->nunmerged; i++)
+        keep += !excluded(node->unmerged[i], excl, nexcl);
     tls_varint(out, 4 * (size_t)keep);
-    for (int i = 0; i < node->nunmerged; i++) {
-        int k = 0;
-        while (k < nexcl && excl[k] != node->unmerged[i])
-            k++;
-        if (k == nexcl)
+    for (int i = 0; i < node->nunmerged; i++)
+        if (!excluded(node->unmerged[i], excl, nexcl))
             tls_u32(out, node->unmerged[i]);
-    }
 }
 
 void mls_tree_serialize(const mls_tree_t *t, sb_t *out)
@@ -360,14 +358,6 @@ void mls_tree_serialize(const mls_tree_t *t, sb_t *out)
 }
 
 /* ---- Hashes and resolutions ---- */
-
-static int excluded(unsigned leaf, const unsigned *excl, int nexcl)
-{
-    for (int k = 0; k < nexcl; k++)
-        if (excl[k] == leaf)
-            return 1;
-    return 0;
-}
 
 /* The tree hash with the leaves in `excl` blanked and dropped from unmerged lists. */
 static void tree_hash_ex(const mls_tree_t *t, unsigned x, const unsigned *excl, int nexcl, unsigned char out[32])
