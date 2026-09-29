@@ -585,6 +585,21 @@ static int view_find(unsigned long long user)
     return -1;
 }
 
+/* The view of `user`, added if there is none yet and room for it; -1 otherwise (under g_video_lock). */
+static int view_get(unsigned long long user)
+{
+    int i = view_find(user);
+
+    if (i < 0 && g_nviews < MAX_VIEWS) {
+        i = g_nviews++;
+        g_views[i].user = user;
+        g_views[i].dec = NULL;
+        g_views[i].bgra = NULL;
+        g_views[i].w = g_views[i].h = 0;
+    }
+    return i;
+}
+
 static unsigned char clamp8(int v)
 {
     return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
@@ -626,14 +641,9 @@ static void voice_video(void *ctx, unsigned long long user, const unsigned char 
     (void)ctx;
     /* Decoding under the lock: a view may be removed from another thread meanwhile. */
     EnterCriticalSection(&g_video_lock);
-    i = view_find(user);
-    if (i < 0 && g_nviews < MAX_VIEWS) {
-        i = g_nviews++;
-        g_views[i].user = user;
+    i = view_get(user);
+    if (i >= 0 && !g_views[i].dec)
         g_views[i].dec = vp8_decoder_new();
-        g_views[i].bgra = NULL;
-        g_views[i].w = g_views[i].h = 0;
-    }
     if (i >= 0 && vp8_decode(g_views[i].dec, vp8, n, &img) == 1) {
         view_store(i, &img);
         shown = 1;
@@ -697,14 +707,7 @@ static void camera_frame(void *ctx, const vp8_image_t *img, unsigned long long m
         voice_video_send((const unsigned char *)g_vframe.data, g_vframe.len, (unsigned)(ms * 90));
     /* Our own tile shows what we send. */
     EnterCriticalSection(&g_video_lock);
-    i = view_find(g_vc.p.user_id);
-    if (i < 0 && g_nviews < MAX_VIEWS) {
-        i = g_nviews++;
-        g_views[i].user = g_vc.p.user_id;
-        g_views[i].dec = NULL;
-        g_views[i].bgra = NULL;
-        g_views[i].w = g_views[i].h = 0;
-    }
+    i = view_get(g_vc.p.user_id);
     if (i >= 0)
         view_store(i, img);
     LeaveCriticalSection(&g_video_lock);
