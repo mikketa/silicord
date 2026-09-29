@@ -213,6 +213,7 @@ typedef struct {
     int camera_on_connect; /* the video button started the call: the camera follows */
     int pop_docked;        /* the popout is the profile panel beside a DM */
     int home_page; /* HOME_*: what home shows when no conversation is open */
+    int shop_state; /* 0 not asked, 1 loading, 2 loaded, 3 failed */
     unsigned char folder_open[64];
     int hover_kind, hover_index;
     image_t *images;
@@ -677,7 +678,7 @@ static int frame_ms(void)
 #define TW_FAST 120  /* hover backgrounds */
 #define TW_SHAPE 200 /* server icons and their pill */
 enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_MESSAGE, TW_MEMBER, TW_FRIEND, TW_ATTACH, TW_EMOJI, TW_MENTION,
-       TW_BAR_CLOSE };
+       TW_BAR_CLOSE, TW_SHOP };
 
 typedef struct {
     int kind, index;
@@ -2814,6 +2815,10 @@ static void pins_close(void);
 static int divider_h(const msg_t *m);
 static const char *find_str(const char *hay, const char *needle);
 static void paint_friends(RECT rc, int x0, int w);
+static void paint_shop(RECT rc, int x0, int w);
+static int shop_view(void);
+static int shop_hit(int x, int y);
+static void shop_scroll_by(int delta);
 static void rels_clear(void);
 static void paint_autocomplete(void);
 static void ac_update(void);
@@ -4713,8 +4718,10 @@ static void paint_main(RECT rc)
     } else if (friends_view()) {
         fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
         paint_friends(rc, x0, w);
+    } else if (shop_view()) {
+        paint_shop(rc, x0, w);
     } else if (g_ui.model && g_ui.guild < 0 && g_ui.channel < 0) {
-        /* Nitro, Shop, Quests: their header, the page itself comes with its own step. */
+        /* Nitro, Quests: their header, the page itself comes with its own step. */
         static const wchar_t *const icons[NAVS] = {L"\xE716", L"\xE734", L"\xE719", L"\xE7C1"};
         static const char *const titles[NAVS] = {"Friends", "Nitro", "Shop", "Quests"};
         int k = g_ui.home_page >= 0 && g_ui.home_page < NAVS ? g_ui.home_page : 0;
@@ -5591,6 +5598,18 @@ static void select_guild(int i)
     redraw();
 }
 
+/* The Shop's answer: kept whole, parsed while painting. */
+static int shop_parse(const sb_t *json);
+
+static void on_shop(sb_t *p)
+{
+    int n = shop_parse(p);
+
+    sb_free(p);
+    g_ui.shop_state = n ? 2 : 3;
+    redraw();
+}
+
 static void on_click(int kind, int index)
 {
     switch (kind) {
@@ -5671,6 +5690,11 @@ static void on_click(int kind, int index)
         /* fall through */
     case HIT_NAV:
         g_ui.home_page = index;
+        InvalidateRect(g_ui.top, NULL, FALSE); /* the title bar names the page */
+        if (index == HOME_SHOP && (g_ui.shop_state == 0 || g_ui.shop_state == 3)) {
+            g_ui.shop_state = 1;
+            app_fetch_shop();
+        }
         g_ui.last_dm = -1;
         open_channel(-1);
         redraw();
@@ -5990,6 +6014,13 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == UI_STREAM) {
         stream_refresh();
+        return;
+    }
+    if (msg == UI_SHOP) {
+        if (p) {
+            on_shop(p);
+            mem_free(p);
+        }
         return;
     }
     if (msg == UI_GIFS) {
@@ -9554,6 +9585,505 @@ static int ac_hit(int x, int y)
     return -1;
 }
 
+/* ---- Shop ---- */
+
+/*
+ * Discord's Shop: its collections, each a banner with its logo, then a grid
+ * of cards (avatar decorations shown on our own avatar, profile effects,
+ * nameplates, bundles) with their price and their Nitro price. The answer
+ * (megabytes of JSON) is boiled down to these tables once; buying happens on
+ * discord.com, where a card leads.
+ */
+enum { SHOP_DECORATION = 0, SHOP_EFFECT = 1, SHOP_NAMEPLATE = 2, SHOP_BUNDLE = 1000, SHOP_VARIANTS = 2000, SHOP_CREDITS = 3000 };
+
+typedef struct {
+    unsigned name, banner, logo; /* offsets in g_shop.strings: text, URLs */
+    unsigned bg[2];
+    int first, count;            /* its products in g_shop.items */
+} shop_cat_t;
+
+typedef struct {
+    char sku[24];
+    unsigned name, art, art2;    /* art: decoration asset, effect or bundle URL, nameplate asset; art2: a bundle's foreground */
+    int type;                    /* SHOP_*: what it is, a group of variants taking its first variant's */
+    int price, nitro, exponent;  /* in the smallest unit; nitro 0 when there is no Nitro price */
+    char currency[8];
+    unsigned bg[2];
+    int nvariants;
+    unsigned variant[4];         /* the variants' colors, for their swatches */
+} shop_item_t;
+
+static struct {
+    sb_t strings;
+    shop_cat_t *cats;
+    shop_item_t *items;
+    int ncats, nitems, cap_items;
+    unsigned hero, hero_logo;
+    int scroll, height, hover;
+} g_shop = {.hover = -1};
+
+static unsigned shop_str(json_t v)
+{
+    unsigned at;
+
+    if (json_type(v) != JSON_STRING)
+        return 0;
+    at = (unsigned)g_shop.strings.len;
+    json_str(v, &g_shop.strings);
+    sb_addn(&g_shop.strings, "", 1);
+    return at;
+}
+
+static unsigned shop_get_str(json_t obj, const char *key)
+{
+    json_t v;
+
+    return json_get(obj, key, &v) ? shop_str(v) : 0;
+}
+
+static const char *shop_s(unsigned at)
+{
+    return at && g_shop.strings.data ? g_shop.strings.data + at : "";
+}
+
+/* The two background colors of a style block, as ARGB. */
+static void shop_colors(json_t obj, unsigned *out)
+{
+    json_t styles, list, c;
+    json_iter_t it;
+    int n = 0;
+
+    out[0] = out[1] = 0;
+    if (!json_get(obj, "styles", &styles) || !json_get(styles, "background_colors", &list))
+        return;
+    json_iter(list, &it);
+    while (n < 2 && json_next(&it, NULL, &c)) {
+        long long v = 0;
+        json_int(c, &v);
+        out[n++] = 0xFF000000u | ((unsigned)v & 0xFFFFFF);
+    }
+    if (n == 1)
+        out[1] = out[0];
+}
+
+/* prices[tier].country_prices.prices: the first real currency (not Orbs). */
+static int shop_price(json_t prices, const char *tier, int *amount, int *exponent, char *currency)
+{
+    json_t t, cp, list, pr, v;
+    json_iter_t it;
+
+    if (!json_get(prices, tier, &t) || !json_get(t, "country_prices", &cp) || !json_get(cp, "prices", &list))
+        return 0;
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &pr)) {
+        char cur[16] = "";
+        long long a = 0, e = 0;
+        if (json_get(pr, "currency", &v))
+            json_raw(v, cur, sizeof cur);
+        if (!lstrcmpA(cur, "discord_orb"))
+            continue;
+        if (json_get(pr, "amount", &v))
+            json_int(v, &a);
+        if (json_get(pr, "exponent", &v))
+            json_int(v, &e);
+        *amount = (int)a;
+        if (exponent)
+            *exponent = (int)e;
+        if (currency)
+            lstrcpynA(currency, cur, 8);
+        return 1;
+    }
+    return 0;
+}
+
+/* The picture of a product from one of its items. */
+static void shop_art(shop_item_t *it, json_t item)
+{
+    json_t v;
+    long long t = it->type;
+
+    if (json_get(item, "type", &v))
+        json_int(v, &t);
+    if (it->type != SHOP_BUNDLE)
+        it->type = (int)t;
+    if (t == SHOP_EFFECT)
+        it->art = shop_get_str(item, "thumbnailPreviewSrc");
+    else
+        it->art = shop_get_str(item, "asset");
+}
+
+static void shop_add(json_t pr, int cat)
+{
+    shop_item_t *it;
+    json_t v, items, first, prices, variants, var;
+    json_iter_t iter;
+    long long type = 0;
+
+    if (g_shop.nitems == g_shop.cap_items) {
+        g_shop.cap_items = g_shop.cap_items ? g_shop.cap_items * 2 : 256;
+        g_shop.items = mem_realloc(g_shop.items, (size_t)g_shop.cap_items * sizeof *g_shop.items);
+    }
+    it = &g_shop.items[g_shop.nitems++];
+    *it = (shop_item_t){0};
+    if (json_get(pr, "sku_id", &v))
+        json_raw(v, it->sku, sizeof it->sku);
+    it->name = shop_get_str(pr, "name");
+    if (json_get(pr, "type", &v))
+        json_int(v, &type);
+    it->type = (int)type;
+    shop_colors(pr, it->bg);
+    if (!it->bg[0]) {
+        it->bg[0] = g_shop.cats[cat].bg[0];
+        it->bg[1] = g_shop.cats[cat].bg[1];
+    }
+    /* A group of variants shows its first: its picture and price, and the others as swatches. */
+    if (type == SHOP_VARIANTS && json_get(pr, "variants", &variants)) {
+        json_iter(variants, &iter);
+        while (json_next(&iter, NULL, &var)) {
+            if (!it->nvariants) {
+                pr = var;
+                it->type = SHOP_DECORATION;
+            }
+            if (it->nvariants < 4 && json_get(var, "variant_value", &v)) {
+                char hex[16] = "";
+                unsigned c = 0;
+                json_raw(v, hex, sizeof hex);
+                for (const char *h = hex[0] == '#' ? hex + 1 : hex; *h; h++)
+                    c = c * 16 + (unsigned)(*h >= 'a' ? *h - 'a' + 10 : *h >= 'A' ? *h - 'A' + 10 : *h - '0');
+                it->variant[it->nvariants] = 0xFF000000u | c;
+            }
+            it->nvariants++;
+        }
+    }
+    if (type == SHOP_BUNDLE && json_get(pr, "preview_assets", &v) && json_type(v) == JSON_OBJECT) {
+        it->art = shop_get_str(v, "bg_static");
+        it->art2 = shop_get_str(v, "fg_static");
+    } else if (json_get(pr, "items", &items)) {
+        json_iter(items, &iter);
+        if (json_next(&iter, NULL, &first))
+            shop_art(it, first);
+    }
+    if (json_get(pr, "prices", &prices)) {
+        shop_price(prices, "0", &it->price, &it->exponent, it->currency);
+        shop_price(prices, "4", &it->nitro, NULL, NULL);
+    }
+}
+
+static void shop_free(void)
+{
+    sb_free(&g_shop.strings);
+    mem_free(g_shop.cats);
+    mem_free(g_shop.items);
+    g_shop.cats = NULL;
+    g_shop.items = NULL;
+    g_shop.ncats = g_shop.nitems = g_shop.cap_items = 0;
+    g_shop.hero = g_shop.hero_logo = 0;
+}
+
+/* Returns how many collections it found. */
+static int shop_parse(const sb_t *json)
+{
+    json_t root, cat, products, pr, v;
+    json_iter_t it, pit;
+    int n;
+
+    shop_free();
+    sb_addn(&g_shop.strings, "", 1); /* offset 0: none */
+    if (!json->len || !json_parse(json->data, json->len, &root) || json_type(root) != JSON_ARRAY)
+        return 0;
+    n = (int)json_count(root);
+    g_shop.cats = mem_alloc((size_t)(n ? n : 1) * sizeof *g_shop.cats);
+    json_iter(root, &it);
+    while (json_next(&it, NULL, &cat)) {
+        shop_cat_t *c = &g_shop.cats[g_shop.ncats];
+        *c = (shop_cat_t){0};
+        c->name = shop_get_str(cat, "name");
+        c->banner = shop_get_str(cat, "catalog_banner_url");
+        c->logo = shop_get_str(cat, "logo_url");
+        shop_colors(cat, c->bg);
+        if (!g_shop.hero) {
+            g_shop.hero = shop_get_str(cat, "hero_banner_url");
+            g_shop.hero_logo = shop_get_str(cat, "hero_logo_url");
+        }
+        c->first = g_shop.nitems;
+        if (json_get(cat, "products", &products)) {
+            json_iter(products, &pit);
+            while (json_next(&pit, NULL, &pr))
+            {
+                long long t = 0;
+                if (json_get(pr, "type", &v))
+                    json_int(v, &t);
+                if (t != SHOP_CREDITS) /* Nitro credits: not a thing to show on a card */
+                    shop_add(pr, g_shop.ncats);
+            }
+        }
+        c->count = g_shop.nitems - c->first;
+        if (c->count)
+            g_shop.ncats++;
+    }
+    return g_shop.ncats;
+}
+
+static int shop_view(void)
+{
+    return g_ui.view == VIEW_APP && g_ui.model && !g_ui.settings_open && g_ui.guild < 0 && g_ui.channel < 0 &&
+           g_ui.home_page == HOME_SHOP;
+}
+
+/* "€5.99", "$4.99": the price in the smallest unit with its exponent. */
+static void shop_money(int amount, int exponent, const char *currency, char *out)
+{
+    int div = 1, whole, frac;
+    const char *sym = !lstrcmpiA(currency, "eur") ? "\xE2\x82\xAC" : !lstrcmpiA(currency, "usd") ? "$" : !lstrcmpiA(currency, "gbp") ? "\xC2\xA3" : "";
+
+    for (int i = 0; i < exponent; i++)
+        div *= 10;
+    whole = amount / div;
+    frac = amount % div;
+    if (exponent == 2)
+        wsprintfA(out, "%s%d.%02d%s%s", sym, whole, frac, sym[0] ? "" : " ", sym[0] ? "" : currency);
+    else
+        wsprintfA(out, "%s%d%s%s", sym, amount, sym[0] ? "" : " ", sym[0] ? "" : currency);
+}
+
+/* A picture of the Shop's CDN by its full URL, fitted to `px`. */
+static r_image_t *shop_image(const char *url, int px)
+{
+    char key[96];
+    int n = lstrlenA(url);
+
+    if (!url[0])
+        return NULL;
+    wsprintfA(key, "sh:%d:%s", px, url + (n > 60 ? n - 60 : 0));
+    return image_get(key, url, px);
+}
+
+#define SHOP_PAD 24
+#define SHOP_GAP 16
+#define SHOP_CARD_MIN 200
+#define SHOP_HERO_H 240
+#define SHOP_BANNER_H 140
+#define SHOP_INFO_H 68
+
+/* A product's card at (x, y), w wide: its picture on its colors, then its name and prices. */
+static void shop_card(const shop_item_t *it, int index, int x, int y, int w, int ph)
+{
+    int hov = g_shop.hover == index;
+    float t = tween_on(TW_SHOP, index, hov, TW_FAST, x, y, w, ph + S(SHOP_INFO_H));
+    char price[40], nitro[40], line[96];
+
+    r_round(x, y, w, ph + S(SHOP_INFO_H), S(8), 0xFF121214u);
+    r_clip(x, y, w, ph);
+    r_round_gradient(x, y, w, ph + S(8), S(8), it->bg[0] ? it->bg[0] : 0xFF2B2D31u, it->bg[1] ? it->bg[1] : 0xFF1E1F22u);
+    r_unclip();
+    switch (it->type) {
+    case SHOP_DECORATION: {
+        /* On our own avatar, as Discord previews it. */
+        int d = ph * 45 / 100, ax = x + (w - d) / 2, ay = y + (ph - d) / 2, dd = d * 6 / 5;
+        r_image_t *av = user_avatar(g_ui.model->user_id, g_ui.model->user_avatar);
+        r_image_t *deco = it->art ? cdn_image("sd", "/avatar-decoration-presets/%s.png?size=240&passthrough=true",
+                                               shop_s(it->art), NULL, dd)
+                                  : NULL;
+        if (av)
+            r_image(av, ax, ay, d, d, d / 2);
+        else
+            r_circle(ax, ay, d, ARGB(C_ITEM));
+        if (deco)
+            r_image(deco, ax - (dd - d) / 2, ay - (dd - d) / 2, dd, dd, 0);
+        break;
+    }
+    case SHOP_EFFECT: {
+        r_image_t *img = shop_image(shop_s(it->art), ph);
+        if (img) {
+            r_clip(x, y, w, ph);
+            r_image_cover(img, x, y, w, ph + S(8), S(8));
+            r_unclip();
+        }
+        break;
+    }
+    case SHOP_NAMEPLATE: {
+        /* The plate behind our name, as it shows in a member list. */
+        char url[200];
+        int ph2 = S(44), py = y + (ph - ph2) / 2, px = x + S(12), pw = w - S(24);
+        r_image_t *img;
+        wsprintfA(url, "https://cdn.discordapp.com/assets/collectibles/%sstatic.png", shop_s(it->art));
+        img = shop_image(url, pw);
+        r_round(px, py, pw, ph2, S(8), 0xFF000000u);
+        if (img) {
+            r_clip(px, py, pw, ph2);
+            r_image_cover(img, px, py, pw, ph2, S(8));
+            r_unclip();
+        }
+        {
+            r_image_t *av = user_avatar(g_ui.model->user_id, g_ui.model->user_avatar);
+            if (av)
+                r_image(av, px + S(8), py + S(6), S(32), S(32), S(16));
+            text(g_ui.f_h, C_INK, rect(px + S(48), py, pw - S(56), ph2),
+                 g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name) : "", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        break;
+    }
+    case SHOP_BUNDLE: {
+        r_image_t *bg = shop_image(shop_s(it->art), w), *fg = shop_image(shop_s(it->art2), w);
+        r_clip(x, y, w, ph);
+        if (bg)
+            r_image_cover(bg, x, y, w, ph + S(8), S(8));
+        if (fg)
+            r_image_cover(fg, x, y, w, ph + S(8), S(8));
+        r_unclip();
+        break;
+    }
+    }
+    if (it->nvariants > 1)
+        for (int k = 0; k < it->nvariants && k < 4; k++) {
+            int sx = x + S(12) + k * S(18), sy = y + ph - S(24);
+            r_circle(sx - S(2), sy - S(2), S(16), 0x80000000u);
+            r_circle(sx, sy, S(12), it->variant[k]);
+        }
+    text(g_ui.f_h, C_INK, rect(x + S(12), y + ph + S(10), w - S(24), S(22)), shop_s(it->name),
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    shop_money(it->price, it->exponent, it->currency, price);
+    if (it->nitro && it->nitro != it->price) {
+        shop_money(it->nitro, it->exponent, it->currency, nitro);
+        wsprintfA(line, "%s with Nitro", nitro);
+        text(g_ui.f_small_mid, C_INK, rect(x + S(12), y + ph + S(36), w - S(24), S(20)), line,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        {
+            int lw = text_width(g_ui.f_small_mid, line) + S(8);
+            text(g_ui.f_section, C_FAINT, rect(x + S(12) + lw, y + ph + S(36), w - S(24) - lw, S(20)), price,
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    } else {
+        text(g_ui.f_small_mid, C_INK, rect(x + S(12), y + ph + S(36), w - S(24), S(20)), price, DT_LEFT | DT_SINGLELINE);
+    }
+    if (t > 0.f)
+        r_round_outline(x, y, w, ph + S(SHOP_INFO_H), S(8), S(2) > 2 ? S(2) : 2, lerp_argb(0x00000000u, ARGB(C_BRAND), t));
+}
+
+/*
+ * Lays the Shop out from x0, w wide: paints it, or finds the card at (hx, hy).
+ * Returns that card's index (-1 if none) when not drawing; sets g_shop.height.
+ */
+static int shop_walk(int x0, int w, int draw, int hx, int hy)
+{
+    int cw = w - 2 * S(SHOP_PAD), x = x0 + S(SHOP_PAD), y = S(HEADER_H) + S(SHOP_PAD) - g_shop.scroll;
+    int cols = (cw + S(SHOP_GAP)) / (S(SHOP_CARD_MIN) + S(SHOP_GAP)), cardw, ph;
+
+    if (cols < 1)
+        cols = 1;
+    if (cols > 5)
+        cols = 5;
+    cardw = (cw - (cols - 1) * S(SHOP_GAP)) / cols;
+    ph = cardw * 3 / 4;
+
+    /* The featured collection on top. */
+    if (g_shop.hero) {
+        if (draw && r_visible(y, S(SHOP_HERO_H))) {
+            r_image_t *hero = shop_image(shop_s(g_shop.hero), cw), *logo = shop_image(shop_s(g_shop.hero_logo), cw / 2);
+            r_round(x, y, cw, S(SHOP_HERO_H), S(8), 0xFF121214u);
+            if (hero) {
+                r_clip(x, y, cw, S(SHOP_HERO_H));
+                r_image_cover(hero, x, y, cw, S(SHOP_HERO_H), S(8));
+                r_unclip();
+            }
+            if (logo) {
+                int lw, lh, fw, fh;
+                r_image_size(logo, &lw, &lh);
+                fh = S(SHOP_HERO_H) * 2 / 3;
+                fw = lh ? lw * fh / lh : 0;
+                if (fw > cw / 2) {
+                    fw = cw / 2;
+                    fh = lw ? lh * fw / lw : 0;
+                }
+                r_image(logo, x + S(40), y + (S(SHOP_HERO_H) - fh) / 2, fw, fh, 0);
+            }
+        }
+        y += S(SHOP_HERO_H) + S(32);
+    }
+    for (int c = 0; c < g_shop.ncats; c++) {
+        const shop_cat_t *cat = &g_shop.cats[c];
+        int rows = (cat->count + cols - 1) / cols;
+        /* The collection's banner with its logo. */
+        if (draw && r_visible(y, S(SHOP_BANNER_H))) {
+            r_image_t *banner = shop_image(shop_s(cat->banner), cw), *logo = shop_image(shop_s(cat->logo), cw / 3);
+            r_round_gradient(x, y, cw, S(SHOP_BANNER_H), S(8), cat->bg[0] ? cat->bg[0] : 0xFF121214u,
+                             cat->bg[1] ? cat->bg[1] : 0xFF121214u);
+            if (banner) {
+                r_clip(x, y, cw, S(SHOP_BANNER_H));
+                r_image_cover(banner, x, y, cw, S(SHOP_BANNER_H), S(8));
+                r_unclip();
+            }
+            if (logo) {
+                int lw, lh, fw, fh = S(SHOP_BANNER_H) / 2;
+                r_image_size(logo, &lw, &lh);
+                fw = lh ? lw * fh / lh : 0;
+                if (fw > cw / 3) {
+                    fw = cw / 3;
+                    fh = lw ? lh * fw / lw : 0;
+                }
+                r_image(logo, x + S(32), y + (S(SHOP_BANNER_H) - fh) / 2, fw, fh, 0);
+            } else {
+                text(g_ui.f_h2, C_INK, rect(x + S(32), y, cw - S(64), S(SHOP_BANNER_H)), shop_s(cat->name),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        y += S(SHOP_BANNER_H) + S(SHOP_GAP);
+        for (int k = 0; k < cat->count; k++) {
+            int cx = x + (k % cols) * (cardw + S(SHOP_GAP)), cy = y + (k / cols) * (ph + S(SHOP_INFO_H) + S(SHOP_GAP));
+            int index = cat->first + k;
+            if (draw) {
+                if (r_visible(cy, ph + S(SHOP_INFO_H)))
+                    shop_card(&g_shop.items[index], index, cx, cy, cardw, ph);
+            } else if (hx >= cx && hx < cx + cardw && hy >= cy && hy < cy + ph + S(SHOP_INFO_H) && hy >= S(HEADER_H)) {
+                return index;
+            }
+        }
+        y += rows * (ph + S(SHOP_INFO_H) + S(SHOP_GAP)) + S(24);
+    }
+    g_shop.height = y + g_shop.scroll - S(HEADER_H);
+    return -1;
+}
+
+static void paint_shop(RECT rc, int x0, int w)
+{
+    fill(x0, S(HEADER_H) - S(1), w, S(1) > 1 ? S(1) : 1, C_LINE);
+    text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(16), 0, S(24), S(HEADER_H)), L"\xE719", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_h, C_INK, rect(x0 + S(48), 0, w - S(64), S(HEADER_H)), "Shop", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (g_ui.shop_state != 2 || !g_shop.ncats) {
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2 - S(12), w, S(24)),
+             g_ui.shop_state == 3 ? "The Shop could not be loaded." : g_ui.shop_state == 2 ? "Nothing in the Shop right now."
+                                                                                         : "Loading the Shop\xE2\x80\xA6",
+             DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    r_clip(x0, S(HEADER_H), w, rc.bottom - S(HEADER_H));
+    shop_walk(x0, w, 1, 0, 0);
+    r_unclip();
+}
+
+static int shop_hit(int x, int y)
+{
+    int x0 = S(RAIL_W + SIDE_W);
+
+    if (!shop_view() || g_ui.shop_state != 2 || x < x0 || y < S(HEADER_H))
+        return -1;
+    return shop_walk(x0, main_right() - x0, 0, x, y);
+}
+
+static void shop_scroll_by(int delta)
+{
+    RECT rc;
+    int max;
+
+    GetClientRect(g_ui.wnd, &rc);
+    max = g_shop.height - (rc.bottom - S(HEADER_H)) + S(SHOP_PAD);
+    g_shop.scroll += delta;
+    if (g_shop.scroll > max)
+        g_shop.scroll = max;
+    if (g_shop.scroll < 0)
+        g_shop.scroll = 0;
+}
+
 /* ---- Friends (home screen) ---- */
 
 #define FR_ROW 62
@@ -12487,6 +13017,14 @@ static void update_hover(int x, int y)
         link = link || th >= 0 || att || emo || bh;
     }
     {
+        int sh = shop_hit(x, y);
+        if (sh != g_shop.hover) {
+            g_shop.hover = sh;
+            redraw();
+        }
+        link = link || sh >= 0;
+    }
+    {
         int ph = post_hit(x, y);
         if (ph != g_ui.post_hover) {
             g_ui.post_hover = ph;
@@ -12813,6 +13351,16 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 friends_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 return 0;
             }
+            if (shop_view() && GET_X_LPARAM(lp) >= S(RAIL_W + SIDE_W)) {
+                /* Buying happens on Discord: the card leads to it there. */
+                int k = shop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (k >= 0) {
+                    wchar_t url[96];
+                    wsprintfW(url, L"https://discord.com/shop#itemSkuId=%S", g_shop.items[k].sku);
+                    ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+                }
+                return 0;
+            }
             {
                 int ti = tray_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 if (ti >= 0) {
@@ -12886,7 +13434,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         ScreenToClient(wnd, &pt);
         if (g_ui.view != VIEW_APP)
             return 0;
-        pop_close();
+        if (!g_ui.pop_docked)
+            pop_close();
+        if (shop_view() && pt.x >= S(RAIL_W + SIDE_W)) {
+            shop_scroll_by(delta);
+            update_hover(pt.x, pt.y);
+            redraw();
+            return 0;
+        }
         if (forum_view() && pt.x >= S(RAIL_W + SIDE_W) && pt.x < main_right()) {
             int max = g_ui.forum_content - (int)(S(HEADER_H));
             g_ui.forum_scroll += delta;
@@ -13029,7 +13584,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_STREAM) {
+        if (msg >= UI_QR && msg <= UI_SHOP) {
             on_worker(msg, wp, lp);
             return 0;
         }
@@ -13089,6 +13644,18 @@ static const char *tb_title(r_image_t **icon, const wchar_t **glyph)
     if (friends_view()) {
         *glyph = L"\xE716";
         return "Friends";
+    }
+    if (g_ui.channel < 0 && g_ui.home_page == HOME_NITRO) {
+        *glyph = L"\xE734";
+        return "Nitro";
+    }
+    if (g_ui.channel < 0 && g_ui.home_page == HOME_SHOP) {
+        *glyph = L"\xE719";
+        return "Shop";
+    }
+    if (g_ui.channel < 0 && g_ui.home_page == HOME_QUESTS) {
+        *glyph = L"\xE7C1";
+        return "Quests";
     }
     *glyph = L"\xE8BD";
     return "Direct Messages";
