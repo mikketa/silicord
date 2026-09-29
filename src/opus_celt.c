@@ -855,7 +855,7 @@ static void stereo_merge(float *x, float *y, float mid, int n)
 
 typedef struct {
     opus_rc_t *rc;
-    int spread, intensity, lm0;
+    int spread, intensity;
     int remaining_bits;
     unsigned seed;
 } band_ctx_t;

@@ -1,7 +1,6 @@
 #include <string.h>
 #include "mls_crypto.h"
 #include "hpke.h"
-#include "mem.h"
 #include "p256.h"
 #include "rng.h"
 #include "sc_asm.h"

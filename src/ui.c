@@ -255,7 +255,6 @@ typedef struct {
     int nuvol;
     sb_t voice_status;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
-    int layout_w;              /* width the cached heights were computed for */
     int hover_msg;
     sb_t send_error;
     HWND composer;
@@ -343,7 +342,6 @@ typedef struct {
     sb_t cmd_index;            /* slash commands of cmd_key's server or DM */
     char cmd_key[24];
     int cmd_loading;
-    sb_t gif_query;
     int gif_x[40], gif_y[40], gif_w[40], gif_h[40], ngif;
 
     /* Member list. */
@@ -8332,7 +8330,6 @@ static int ac_hit(int x, int y)
 /* ---- Friends (home screen) ---- */
 
 #define FR_ROW 62
-#define FR_TABS_H 48
 
 enum { REL_FRIEND = 1, REL_BLOCKED = 2, REL_INCOMING = 3, REL_OUTGOING = 4 };
 enum { TAB_ONLINE, TAB_ALL, TAB_PENDING, TAB_BLOCKED, TAB_ADD, TAB_COUNT };

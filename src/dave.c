@@ -1,7 +1,6 @@
 #include <string.h>
 #include "dave.h"
 #include "aes.h"
-#include "mem.h"
 #include "mls_crypto.h"
 #include "sha2.h"
 
