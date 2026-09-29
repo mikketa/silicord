@@ -193,7 +193,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -5169,6 +5169,457 @@ static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
     return g_ui.frame;
 }
 
+/*
+ * Context menus, drawn as Discord's instead of the system's. They are built
+ * as before, with AppendMenuW, and shown by menu_track(): popups of our own
+ * (rounded by DWM, as Discord's), submenus opening on hover, the keyboard
+ * as in any menu. An item's data says how it is ticked: MENU_CHECK, a box,
+ * or MENU_RADIO, one choice of several.
+ */
+#define MENU_CHECK 1
+#define MENU_RADIO 2
+#define MENU_ITEMS 40
+#define MENU_LEVELS 3
+#define MENU_PAD 8     /* the scroller's padding */
+#define MENU_ITEM_H 32 /* an item: 8 around a 14px label, or a 20px accessory */
+#define MENU_SEP_H 17  /* a separator: 8 above and below its line */
+#define MENU_MIN_W 188
+#define MENU_MAX_W 320
+
+typedef struct {
+    wchar_t label[64];
+    UINT id, type, state;
+    ULONG_PTR kind; /* MENU_CHECK, MENU_RADIO or 0 */
+    HMENU sub;
+} menu_item_t;
+
+typedef struct {
+    HWND wnd;
+    menu_item_t item[MENU_ITEMS];
+    int n, w, h;
+    int hover; /* the focused item, -1 if none */
+    int open;  /* the item whose submenu shows, -1 if none */
+} menu_level_t;
+
+static struct {
+    menu_level_t lv[MENU_LEVELS];
+    int depth;  /* levels shown */
+    int lost;   /* the capture went elsewhere: the menu closes */
+} g_menu;
+
+/* Marks the items of `menu` as ticked with a box or a choice: the one with `id`, or all its strings if `id` is 0. */
+static void menu_mark(HMENU menu, UINT id, int kind)
+{
+    MENUITEMINFOW mi;
+
+    mi.cbSize = sizeof mi;
+    mi.fMask = MIIM_DATA;
+    mi.dwItemData = (ULONG_PTR)kind;
+    if (id) {
+        SetMenuItemInfoW(menu, id, FALSE, &mi);
+        return;
+    }
+    for (int i = 0, n = GetMenuItemCount(menu); i < n; i++)
+        if (!(GetMenuState(menu, (UINT)i, MF_BYPOSITION) & (MF_SEPARATOR | MF_POPUP)))
+            SetMenuItemInfoW(menu, (UINT)i, TRUE, &mi);
+}
+
+static int menu_item_h(const menu_item_t *it)
+{
+    return it->type & MFT_SEPARATOR ? S(MENU_SEP_H) : S(MENU_ITEM_H);
+}
+
+static int menu_item_y(const menu_level_t *l, int k)
+{
+    int y = S(MENU_PAD);
+
+    for (int i = 0; i < k; i++)
+        y += menu_item_h(&l->item[i]);
+    return y;
+}
+
+/* The item at (x, y) in the level's window, -1 on a separator, the padding or outside. */
+static int menu_item_at(const menu_level_t *l, int x, int y)
+{
+    int top = S(MENU_PAD);
+
+    if (x < S(MENU_PAD) || x >= l->w - S(MENU_PAD))
+        return -1;
+    for (int i = 0; i < l->n; i++) {
+        int h = menu_item_h(&l->item[i]);
+        if (y >= top && y < top + h)
+            return l->item[i].type & MFT_SEPARATOR ? -1 : i;
+        top += h;
+    }
+    return -1;
+}
+
+static int menu_selectable(const menu_item_t *it)
+{
+    return !(it->type & MFT_SEPARATOR) && !(it->state & MFS_GRAYED);
+}
+
+/* Discord's destructive entries, in red. */
+static int menu_danger(const wchar_t *label)
+{
+    return !lstrcmpW(label, L"Delete Message") || !lstrcmpW(label, L"Leave Server") || !lstrcmpW(label, L"Remove Friend");
+}
+
+/* "Copy ... ID": Discord's ID badge. */
+static int menu_is_id(const wchar_t *label)
+{
+    int n = lstrlenW(label);
+
+    return n > 3 && label[n - 3] == ' ' && label[n - 2] == 'I' && label[n - 1] == 'D';
+}
+
+/* The icon Discord shows on the right of an entry, as a glyph of the icon font; NULL if none. */
+static const wchar_t *menu_icon(const wchar_t *label)
+{
+    static const struct {
+        const wchar_t *label, *glyph;
+    } k[] = {
+        {L"Add Reaction", L"\xE76E"},  {L"Reply", L"\xE97A"},         {L"Edit Message", L"\xE70F"},
+        {L"Forward", L"\xE72A"},       {L"Create Thread", L"\xE8F2"},  {L"Copy Text", L"\xE8C8"},
+        {L"Pin Message", L"\xE718"},   {L"Unpin Message", L"\xE77A"},  {L"Mark Unread", L"\xE715"},
+        {L"Copy Message Link", L"\xE71B"}, {L"Copy Link", L"\xE71B"}, {L"Delete Message", L"\xE74D"},
+    };
+
+    for (int i = 0; i < (int)ARRAYSIZE(k); i++)
+        if (!lstrcmpW(label, k[i].label))
+            return k[i].glyph;
+    return NULL;
+}
+
+static void menu_load(menu_level_t *l, HMENU menu)
+{
+    int n = GetMenuItemCount(menu), w = S(MENU_MIN_W);
+
+    l->n = 0;
+    l->hover = l->open = -1;
+    for (int i = 0; i < n && l->n < MENU_ITEMS; i++) {
+        menu_item_t *it = &l->item[l->n];
+        MENUITEMINFOW mi;
+        mi.cbSize = sizeof mi;
+        mi.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_STRING | MIIM_DATA;
+        mi.dwTypeData = it->label;
+        mi.cch = ARRAYSIZE(it->label);
+        it->label[0] = 0;
+        if (!GetMenuItemInfoW(menu, (UINT)i, TRUE, &mi))
+            continue;
+        it->id = mi.wID;
+        it->type = mi.fType;
+        it->state = mi.fState;
+        it->kind = mi.dwItemData;
+        it->sub = mi.hSubMenu;
+        l->n++;
+    }
+    for (int i = 0; i < l->n; i++)
+        if (!(l->item[i].type & MFT_SEPARATOR)) {
+            /* the label, 8 either side, the accessory with its 8 of margin, the scroller's padding */
+            int tw = r_text_width(g_ui.f_menu, l->item[i].label, -1) + S(16) + S(28) + 2 * S(MENU_PAD);
+            if (tw > w)
+                w = tw;
+        }
+    l->w = w < S(MENU_MAX_W) ? w : S(MENU_MAX_W);
+    l->h = menu_item_y(l, l->n) + S(MENU_PAD);
+}
+
+/*
+ * Shows level `d` at (x, y) on the screen, kept inside the app's window as
+ * Discord keeps it in its viewport: past the right edge it opens to the left
+ * of `flip_x` instead, past the bottom it goes up.
+ */
+static void menu_show(int d, int x, int y, int flip_x, int flip_y)
+{
+    menu_level_t *l = &g_menu.lv[d];
+    RECT b;
+    int corner = 2; /* DWMWCP_ROUND: 8px, as Discord's */
+    COLORREF border = RGB(0x2D, 0x2D, 0x30);
+
+    GetWindowRect(g_ui.top, &b);
+    InflateRect(&b, -S(8), -S(8));
+    if (x + l->w > b.right)
+        x = flip_x - l->w >= b.left ? flip_x - l->w : b.right - l->w;
+    if (x < b.left)
+        x = b.left;
+    if (y + l->h > b.bottom)
+        y = flip_y - l->h >= b.top ? flip_y - l->h : b.bottom - l->h;
+    if (y < b.top)
+        y = b.top;
+    l->wnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"SilicordMenu", L"", WS_POPUP, x, y, l->w, l->h, g_ui.top,
+                             NULL, NULL, NULL);
+    DwmSetWindowAttribute(l->wnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof corner);
+    DwmSetWindowAttribute(l->wnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof border);
+    g_menu.depth = d + 1;
+    ShowWindow(l->wnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(l->wnd);
+}
+
+/* Closes the levels from `d` on. */
+static void menu_close_from(int d)
+{
+    for (int i = g_menu.depth - 1; i >= d; i--) {
+        if (i > 0) /* the first holds the capture until the end */
+            DestroyWindow(g_menu.lv[i].wnd);
+        g_menu.lv[i].wnd = i ? NULL : g_menu.lv[i].wnd;
+    }
+    if (d < g_menu.depth)
+        g_menu.depth = d;
+    if (d > 0 && g_menu.lv[d - 1].open >= 0) {
+        g_menu.lv[d - 1].open = -1;
+        InvalidateRect(g_menu.lv[d - 1].wnd, NULL, FALSE);
+    }
+}
+
+static void menu_hover(int d, int k)
+{
+    menu_level_t *l = &g_menu.lv[d];
+
+    if (k >= 0 && !menu_selectable(&l->item[k]))
+        k = -1;
+    if (l->hover != k) {
+        l->hover = k;
+        InvalidateRect(l->wnd, NULL, FALSE);
+    }
+}
+
+/* Opens the submenu of item `k` of level `d`, beside it. */
+static void menu_open_sub(int d, int k)
+{
+    menu_level_t *l = &g_menu.lv[d];
+    RECT r;
+
+    if (l->open == k && g_menu.depth > d + 1)
+        return;
+    menu_close_from(d + 1);
+    if (d + 1 >= MENU_LEVELS || !l->item[k].sub)
+        return;
+    menu_load(&g_menu.lv[d + 1], l->item[k].sub);
+    GetWindowRect(l->wnd, &r);
+    l->open = k;
+    menu_show(d + 1, r.right + S(4), r.top + menu_item_y(l, k) - S(MENU_PAD), r.left - S(4),
+              r.top + menu_item_y(l, k) + S(MENU_ITEM_H) + S(MENU_PAD));
+}
+
+/* The next selectable item from `k` going `dir`, round the ends; `k` itself if none. */
+static int menu_step(const menu_level_t *l, int k, int dir)
+{
+    for (int i = 1; i <= l->n; i++) {
+        int j = ((k < 0 ? (dir > 0 ? -1 : 0) : k) + dir * i + l->n * 2) % l->n;
+        if (menu_selectable(&l->item[j]))
+            return j;
+    }
+    return k;
+}
+
+static void menu_paint(RECT rc)
+{
+    const menu_level_t *l = NULL;
+
+    for (int d = 0; d < g_menu.depth; d++)
+        if (g_menu.lv[d].wnd == g_ui.paint_wnd)
+            l = &g_menu.lv[d];
+    r_fill(0, 0, rc.right, rc.bottom, 0xFF121214u); /* background-surface-higher */
+    if (!l)
+        return;
+    for (int k = 0; k < l->n; k++) {
+        const menu_item_t *it = &l->item[k];
+        const wchar_t *glyph;
+        int y = menu_item_y(l, k), x = S(MENU_PAD), w = l->w - 2 * S(MENU_PAD), ax = x + w - S(8) - S(20), ay;
+        int danger = menu_danger(it->label), off = (it->state & MFS_GRAYED) != 0;
+        int hot = (k == l->hover || k == l->open) && !off, checked = (it->state & MFS_CHECKED) != 0;
+        unsigned bg = hot ? (danger ? 0xFF211417u : 0xFF222225u) : 0xFF121214u;
+        unsigned ink = off ? 0xFF77777Au : danger ? 0xFFEB5F5Eu : 0xFFDCDCDFu;
+        unsigned icon = off ? 0xFF55565Au : danger ? 0xFFEB5F5Eu : hot ? 0xFFFBFBFBu : 0xFF96979Eu;
+
+        if (it->type & MFT_SEPARATOR) {
+            r_fill(x + S(8), y + S(8), w - S(16), S(1) > 1 ? S(1) : 1, 0xFF2D2D30u); /* border-subtle */
+            continue;
+        }
+        if (hot)
+            r_round(x, y, w, S(MENU_ITEM_H), S(4), bg);
+        r_text(g_ui.f_menu, ink, x + S(8), y, w - S(16) - S(28), S(MENU_ITEM_H), it->label, -1, R_VCENTER | R_SINGLE | R_ELLIPSIS);
+        ay = y + (S(MENU_ITEM_H) - S(20)) / 2;
+        if (it->sub) {
+            r_text(g_ui.f_icon, hot ? 0xFFFBFBFBu : 0xFF81828Au, ax, ay, S(20), S(20), L"\xE76C", -1, R_CENTER | R_VCENTER | R_SINGLE);
+        } else if (it->kind == MENU_RADIO) {
+            /* a ring, filled with the brand's color and a white dot when chosen */
+            if (checked) {
+                r_circle(ax + S(1), ay + S(1), S(18), ARGB(C_BRAND));
+                r_circle(ax + S(6), ay + S(6), S(8), 0xFFFFFFFFu);
+            } else {
+                r_circle(ax + S(1), ay + S(1), S(18), icon);
+                r_circle(ax + S(3), ay + S(3), S(14), bg);
+            }
+        } else if (it->kind == MENU_CHECK || checked) {
+            if (checked) {
+                r_round(ax + S(1), ay + S(1), S(18), S(18), S(4), ARGB(C_BRAND));
+                r_text(g_ui.f_icon, 0xFFFFFFFFu, ax, ay, S(20), S(20), L"\xE73E", -1, R_CENTER | R_VCENTER | R_SINGLE);
+            } else {
+                r_round_outline(ax + S(1), ay + S(1), S(18), S(18), S(4), S(1) + 1, icon);
+            }
+        } else if (menu_is_id(it->label)) {
+            r_round_outline(ax, ay + S(3), S(20), S(14), S(3), S(1) + 1, icon);
+            r_text(g_ui.f_gif, icon, ax, ay + S(3), S(20), S(14), L"ID", -1, R_CENTER | R_VCENTER | R_SINGLE);
+        } else if ((glyph = menu_icon(it->label)) != NULL) {
+            r_text(g_ui.f_icon_tb, icon, ax, ay, S(20), S(20), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+        }
+    }
+}
+
+static LRESULT CALLBACK menu_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        paint_frame(wnd, menu_paint);
+        return 0;
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_CAPTURECHANGED:
+        if (g_menu.depth && wnd == g_menu.lv[0].wnd)
+            g_menu.lost = 1;
+        return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* A key while the menu is open; returns 1 when it closes it (`*result` the command chosen, or 0). */
+static int menu_key(WPARAM key, UINT *result)
+{
+    int d = g_menu.depth - 1;
+    menu_level_t *l = &g_menu.lv[d];
+
+    switch (key) {
+    case VK_ESCAPE:
+        if (d == 0)
+            return 1;
+        menu_close_from(d);
+        return 0;
+    case VK_LEFT:
+        if (d > 0)
+            menu_close_from(d);
+        return 0;
+    case VK_UP:
+    case VK_DOWN:
+        menu_hover(d, menu_step(l, l->hover, key == VK_DOWN ? 1 : -1));
+        return 0;
+    case VK_RIGHT:
+    case VK_RETURN:
+    case VK_SPACE:
+        if (l->hover < 0)
+            return 0;
+        if (l->item[l->hover].sub) {
+            menu_open_sub(d, l->hover);
+            if (g_menu.depth > d + 1)
+                menu_hover(d + 1, menu_step(&g_menu.lv[d + 1], -1, 1));
+            return 0;
+        }
+        if (key == VK_RIGHT)
+            return 0;
+        *result = l->item[l->hover].id;
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Shows `menu` with its top left at (x, y) on the screen until an entry is
+ * chosen, returning its command, or the menu is dismissed, returning 0. The
+ * caller still owns (and destroys) `menu`.
+ */
+static int menu_track(HMENU menu, int x, int y)
+{
+    MSG m;
+    UINT result = 0;
+    int done = 0, pressed = 0;
+
+    if (g_menu.depth)
+        return 0;
+    menu_load(&g_menu.lv[0], menu);
+    if (!g_menu.lv[0].n)
+        return 0;
+    g_menu.lost = 0;
+    menu_show(0, x, y, x, y);
+    SetCapture(g_menu.lv[0].wnd);
+    while (!done && !g_menu.lost) {
+        if (!GetMessageW(&m, NULL, 0, 0)) {
+            PostQuitMessage((int)m.wParam);
+            break;
+        }
+        switch (m.message) {
+        case WM_MOUSEMOVE:
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP: {
+            POINT pt = {GET_X_LPARAM(m.lParam), GET_Y_LPARAM(m.lParam)};
+            int d = -1, k = -1;
+            ClientToScreen(m.hwnd, &pt);
+            for (int i = g_menu.depth - 1; i >= 0 && d < 0; i--) {
+                RECT r;
+                GetWindowRect(g_menu.lv[i].wnd, &r);
+                if (PtInRect(&r, pt)) {
+                    POINT c = pt;
+                    ScreenToClient(g_menu.lv[i].wnd, &c);
+                    d = i;
+                    k = menu_item_at(&g_menu.lv[i], c.x, c.y);
+                }
+            }
+            if (m.message == WM_MOUSEMOVE) {
+                if (d < 0) {
+                    /* off the menus: the deepest loses its focus, unless it has a submenu open */
+                    if (g_menu.lv[g_menu.depth - 1].open < 0)
+                        menu_hover(g_menu.depth - 1, -1);
+                } else if (k >= 0) {
+                    menu_hover(d, k);
+                    if (g_menu.lv[d].item[k].sub && menu_selectable(&g_menu.lv[d].item[k]))
+                        menu_open_sub(d, k);
+                    else
+                        menu_close_from(d + 1);
+                }
+            } else if (m.message == WM_LBUTTONDOWN || m.message == WM_RBUTTONDOWN || m.message == WM_MBUTTONDOWN) {
+                if (d < 0)
+                    done = 1; /* a click away dismisses it */
+                else
+                    pressed = 1;
+            } else if (pressed && d >= 0 && k >= 0 && menu_selectable(&g_menu.lv[d].item[k])) {
+                /* the button up after one down on the menu: the button that opened it does not count */
+                if (g_menu.lv[d].item[k].sub) {
+                    menu_open_sub(d, k);
+                } else {
+                    result = g_menu.lv[d].item[k].id;
+                    done = 1;
+                }
+            }
+            continue;
+        }
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (m.wParam == VK_MENU || m.wParam == VK_F10 || menu_key(m.wParam, &result))
+                done = 1;
+            continue;
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+        case WM_CHAR:
+        case WM_SYSCHAR:
+        case WM_MOUSEWHEEL:
+            continue;
+        }
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    menu_close_from(1);
+    g_menu.depth = 0;
+    ReleaseCapture();
+    DestroyWindow(g_menu.lv[0].wnd);
+    g_menu.lv[0].wnd = NULL;
+    return (int)result;
+}
+
 /* The popups are painted separately: what each shows was drawn at its last paint, and stays in memory. */
 static unsigned oldest_shown_frame(void)
 {
@@ -5276,6 +5727,7 @@ static void make_fonts(void)
     g_ui.f_nav = r_font(L"Segoe UI", S(16), FW_SEMIBOLD, 0);
     g_ui.f_section = r_font(L"Segoe UI", S(14), FW_NORMAL, 0);
     g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
+    g_ui.f_menu = r_font(L"Segoe UI", S(14), FW_MEDIUM, 0);
     g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
     /* Discord's marketing headings: heavy italic capitals (Segoe UI Black stands in for its own face). */
     g_ui.f_nitro = r_font(L"Segoe UI", S(64), FW_BLACK, 1);
@@ -6346,7 +6798,7 @@ static char *pick_option(const sb_t *options)
         p = nl + 1;
     }
     GetCursorPos(&pt);
-    chosen = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_ui.wnd, NULL);
+    chosen = menu_track(menu, pt.x, pt.y);
     DestroyMenu(menu);
     for (p = options->data, n = 1; chosen && p < end; n++) {
         const char *tab = p, *nl;
@@ -7256,7 +7708,7 @@ static void pop_menu(void)
         AppendMenuW(menu, MF_STRING, 1, L"Copy username");
     AppendMenuW(menu, MF_STRING, 2, L"Copy user ID");
     ClientToScreen(g_ui.pop, &pt);
-    cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, g_ui.pop, NULL);
+    cmd = menu_track(menu, pt.x, pt.y);
     DestroyMenu(menu);
     if (cmd == 1 && g_ui.pop_profile)
         copy_text(g_ui.pop_profile->username.data);
@@ -11280,7 +11732,7 @@ static void friends_click(int x, int y)
                 int cmd;
                 AppendMenuW(menu, MF_STRING, 1, L"Remove Friend");
                 GetCursorPos(&pt);
-                cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, g_ui.wnd, NULL);
+                cmd = menu_track(menu, pt.x, pt.y);
                 DestroyMenu(menu);
                 if (cmd != 1 ||
                     MessageBoxW(g_ui.wnd, L"Remove this friend?", L"Remove Friend", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
@@ -12420,6 +12872,7 @@ static void pick_device(int input)
     AppendMenuW(menu, MF_STRING | (cur == 0 ? MF_CHECKED : 0), 1, L"Default");
     for (int i = 0; i < n; i++)
         AppendMenuW(menu, MF_STRING | (cur == i + 1 ? MF_CHECKED : 0), (UINT_PTR)(i + 2), names[i]);
+    menu_mark(menu, 0, MENU_RADIO);
     cmd = run_menu(menu);
     if (cmd > 0) {
         *(input ? &g_ui.vprefs.in_device : &g_ui.vprefs.out_device) = cmd - 1;
@@ -12574,6 +13027,7 @@ static HMENU notify_menu(int current, const wchar_t *inherit)
     AppendMenuW(sub, MF_STRING | (current == NOTIFY_MENTIONS ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_MENTIONS,
                 L"Only @mentions");
     AppendMenuW(sub, MF_STRING | (current == NOTIFY_NOTHING ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_NOTHING, L"Nothing");
+    menu_mark(sub, 0, MENU_RADIO);
     return sub;
 }
 
@@ -12583,35 +13037,13 @@ static void notify_fields(int level, char *out)
     wsprintfA(out, "\"message_notifications\":%d", level == NOTIFY_DEFAULT ? 3 : level - NOTIFY_ALL);
 }
 
-/* Dark native menus, as the rest of the window (uxtheme's undocumented but stable switch). */
-static void dark_menus(void)
-{
-    static int done;
-    HMODULE ux;
-
-    if (done)
-        return;
-    done = 1;
-    if ((ux = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) != NULL) {
-        typedef int(WINAPI * set_mode_fn)(int);
-        typedef void(WINAPI * flush_fn)(void);
-        set_mode_fn set_mode = (set_mode_fn)(void *)GetProcAddress(ux, MAKEINTRESOURCEA(135)); /* SetPreferredAppMode */
-        flush_fn flush = (flush_fn)(void *)GetProcAddress(ux, MAKEINTRESOURCEA(136));          /* FlushMenuThemes */
-        if (set_mode)
-            set_mode(2); /* force dark */
-        if (flush)
-            flush();
-    }
-}
-
 static int run_menu(HMENU menu)
 {
     POINT pt;
     int cmd;
 
-    dark_menus();
     GetCursorPos(&pt);
-    cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_ui.wnd, NULL);
+    cmd = menu_track(menu, pt.x, pt.y);
     DestroyMenu(menu);
     return cmd;
 }
@@ -12666,26 +13098,29 @@ static void message_menu(int i)
     int own = own_message(m), cmd;
     char id[24];
 
+    /* Discord's order: the reaction, what answers, what copies or marks, the deletion, the ID */
     AppendMenuW(menu, MF_STRING, CM_REACT, L"Add Reaction");
-    AppendMenuW(menu, MF_STRING, CM_REPLY, L"Reply");
-    if (own) {
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    if (own)
         AppendMenuW(menu, MF_STRING, CM_EDIT, L"Edit Message");
-    }
+    AppendMenuW(menu, MF_STRING, CM_REPLY, L"Reply");
+    AppendMenuW(menu, MF_STRING, CM_FORWARD, L"Forward");
+    if (g_ui.guild >= 0 && g_ui.channel >= 0 && !model_is_thread(chan(g_ui.channel)->type))
+        AppendMenuW(menu, MF_STRING, CM_THREAD, L"Create Thread");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (m->content.len)
         AppendMenuW(menu, MF_STRING, CM_COPY_TEXT, L"Copy Text");
     if (can_pin())
         AppendMenuW(menu, MF_STRING, CM_PIN, m->pinned ? L"Unpin Message" : L"Pin Message");
-    AppendMenuW(menu, MF_STRING, CM_FORWARD, L"Forward");
     AppendMenuW(menu, MF_STRING, CM_MARK_UNREAD, L"Mark Unread");
-    if (g_ui.guild >= 0 && g_ui.channel >= 0 && !model_is_thread(chan(g_ui.channel)->type))
-        AppendMenuW(menu, MF_STRING, CM_THREAD, L"Create Thread");
     AppendMenuW(menu, MF_STRING, CM_COPY_LINK, L"Copy Message Link");
-    if (developer_mode())
-        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
     if (own) {
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, CM_DELETE, L"Delete Message");
+    }
+    if (developer_mode()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, CM_COPY_ID, L"Copy Message ID");
     }
     lstrcpynA(id, m->id, sizeof id);
     cmd = run_menu(menu);
@@ -12817,6 +13252,8 @@ static void guild_menu(int g)
         AppendMenuW(sub, MF_STRING | (gd->suppress_everyone ? MF_CHECKED : 0), CM_SUPPRESS_EVERYONE,
                     L"Suppress @everyone and @here");
         AppendMenuW(sub, MF_STRING | (gd->suppress_roles ? MF_CHECKED : 0), CM_SUPPRESS_ROLES, L"Suppress All Role @mentions");
+        menu_mark(sub, CM_SUPPRESS_EVERYONE, MENU_CHECK);
+        menu_mark(sub, CM_SUPPRESS_ROLES, MENU_CHECK);
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, L"Notification Settings");
     }
     if (developer_mode()) {
@@ -12914,8 +13351,10 @@ static void user_menu(const char *user_id, const char *name, const char *avatar,
             wsprintfW(label, L"%d%%", k_user_volumes[k]);
             AppendMenuW(vol, MF_STRING | (volume == k_user_volumes[k] ? MF_CHECKED : 0), (UINT_PTR)(CM_USER_VOLUME + k), label);
         }
+        menu_mark(vol, 0, MENU_RADIO);
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING | (muted ? MF_CHECKED : 0), CM_USER_MUTE, L"Mute");
+        menu_mark(menu, CM_USER_MUTE, MENU_CHECK);
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)vol, L"User Volume");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -14714,6 +15153,9 @@ HWND ui_create(HINSTANCE inst)
     RegisterClassExW(&wc);
     wc.lpfnWndProc = qs_proc;
     wc.lpszClassName = L"SilicordSwitch";
+    RegisterClassExW(&wc);
+    wc.lpfnWndProc = menu_proc;
+    wc.lpszClassName = L"SilicordMenu";
     RegisterClassExW(&wc);
 
     /* The frame, then the app inside it under the title bar. */
