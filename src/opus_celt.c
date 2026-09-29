@@ -2064,12 +2064,12 @@ static void encode_pulses(const int *y, int n, int k, opus_rce_t *enc)
 }
 
 /* Pyramid vector quantization of x (unit norm) with k pulses: a greedy search after a projection. */
-static void alg_quant(float *x, int n, int k, int spread, int b, opus_rce_t *enc)
+static void alg_quant(float *x, int n, int k, opus_rce_t *enc)
 {
     int iy[176], signx[176], pulses_left = k;
     float y[176], xy = 0, yy = 0;
 
-    exp_rotation(x, n, 1, b, k, spread);
+    exp_rotation(x, n, 1, 1, k, SPREAD_NORMAL);
     for (int j = 0; j < n; j++) {
         signx[j] = x[j] > 0 ? 1 : -1;
         if (x[j] < 0)
@@ -2129,7 +2129,7 @@ static void alg_quant(float *x, int n, int k, int spread, int b, opus_rce_t *enc
 
 typedef struct {
     opus_rce_t *enc;
-    int spread, remaining_bits;
+    int remaining_bits;
 } enc_ctx_t;
 
 /* The band's angle between its two halves, in 1/16384 of a quarter turn. */
@@ -2144,12 +2144,14 @@ static int band_itheta(const float *x, const float *y, int n)
     return (int)(.5f + 16384 * 0.63662f * om_atan2(om_sqrt(eside), om_sqrt(emid)));
 }
 
-/* quant_band() of the decoder, encoding a mono band: the same splits and the same bit accounting. */
-static void quant_band_enc(enc_ctx_t *ctx, int i, float *x, int n, int b, int big_b, int tf_change, int lm, int level)
+/*
+ * quant_band() of the decoder, encoding a mono band of a long block with no time-frequency change:
+ * the same splits and the same bit accounting.
+ */
+static void quant_band_enc(enc_ctx_t *ctx, int i, float *x, int n, int b, int lm)
 {
     opus_rce_t *enc = ctx->enc;
-    int n_b = n / big_b, b0 = big_b, recombine = 0, split = 0, long_blocks = b0 == 1;
-    float *y = NULL;
+    const unsigned char *cache = pulse_cache(i, lm);
 
     if (n == 1) {
         if (ctx->remaining_bits >= 1 << BITRES) {
@@ -2158,48 +2160,24 @@ static void quant_band_enc(enc_ctx_t *ctx, int i, float *x, int n, int b, int bi
         }
         return;
     }
-    if (level == 0) {
-        if (tf_change > 0)
-            recombine = tf_change;
-        for (int k = 0; k < recombine; k++)
-            haar1(x, n >> k, 1 << k);
-        big_b >>= recombine;
-        n_b <<= recombine;
-        while ((n_b & 1) == 0 && tf_change < 0) {
-            haar1(x, n_b, big_b);
-            big_b <<= 1;
-            n_b >>= 1;
-            tf_change++;
-        }
-        b0 = big_b;
-        if (b0 > 1)
-            deinterleave_hadamard(x, n_b >> recombine, b0 << recombine, long_blocks);
-    }
-    {
-        const unsigned char *cache = pulse_cache(i, lm);
-        if (lm != -1 && b > cache[cache[0]] + 12 && n > 2) {
-            n >>= 1;
-            y = x + n;
-            split = 1;
-            lm -= 1;
-            big_b = (big_b + 1) >> 1;
-        }
-    }
-    if (split) {
-        int pulse_cap = k_log_n[i] + lm * (1 << BITRES), offset = (pulse_cap >> 1) - QTHETA_OFFSET;
-        int qn = compute_qn(n, b, offset, pulse_cap, 0), itheta = band_itheta(x, y, n), tell, qalloc, delta, mbits;
-        int sbits, rebalance;
+    if (lm != -1 && b > cache[cache[0]] + 12 && n > 2) {
+        /* Split in two halves, and code the angle between them. */
+        float *y = x + n / 2;
+        int pulse_cap, offset, qn, itheta, tell, qalloc, delta, mbits, sbits, rebalance;
+        n >>= 1;
+        lm -= 1;
+        itheta = band_itheta(x, y, n);
+        pulse_cap = k_log_n[i] + lm * (1 << BITRES);
+        offset = (pulse_cap >> 1) - QTHETA_OFFSET;
+        qn = compute_qn(n, b, offset, pulse_cap, 0);
         tell = (int)rce_tell_frac(enc);
         if (qn != 1) {
+            /* Triangular */
+            int ft = ((qn >> 1) + 1) * ((qn >> 1) + 1), fs, fl;
             itheta = (itheta * qn + 8192) >> 14;
-            if (b0 > 1) {
-                rce_uint(enc, (unsigned)itheta, (unsigned)(qn + 1));
-            } else {
-                int ft = ((qn >> 1) + 1) * ((qn >> 1) + 1);
-                int fs = itheta <= qn >> 1 ? itheta + 1 : qn + 1 - itheta;
-                int fl = itheta <= qn >> 1 ? itheta * (itheta + 1) >> 1 : ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1);
-                rce_encode(enc, (unsigned)fl, (unsigned)(fl + fs), (unsigned)ft);
-            }
+            fs = itheta <= qn >> 1 ? itheta + 1 : qn + 1 - itheta;
+            fl = itheta <= qn >> 1 ? itheta * (itheta + 1) >> 1 : ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1);
+            rce_encode(enc, (unsigned)fl, (unsigned)(fl + fs), (unsigned)ft);
             itheta = itheta * 16384 / qn;
         } else {
             itheta = 0;
@@ -2212,28 +2190,22 @@ static void quant_band_enc(enc_ctx_t *ctx, int i, float *x, int n, int b, int bi
             delta = 16384;
         else
             delta = frac_mul16((n - 1) << 7, bitexact_log2tan(bitexact_cos(16384 - itheta), bitexact_cos(itheta)));
-        if (b0 > 1 && (itheta & 0x3fff)) {
-            if (itheta > 8192)
-                delta -= delta >> (4 - lm);
-            else
-                delta = imin(0, delta + (n << BITRES >> (5 - lm)));
-        }
         mbits = imax(0, imin(b, (b - delta) / 2));
         sbits = b - mbits;
         ctx->remaining_bits -= qalloc;
         rebalance = ctx->remaining_bits;
         if (mbits >= sbits) {
-            quant_band_enc(ctx, i, x, n, mbits, big_b, tf_change, lm, level + 1);
+            quant_band_enc(ctx, i, x, n, mbits, lm);
             rebalance = mbits - (rebalance - ctx->remaining_bits);
             if (rebalance > 3 << BITRES && itheta != 0)
                 sbits += rebalance - (3 << BITRES);
-            quant_band_enc(ctx, i, y, n, sbits, big_b, tf_change, lm, level + 1);
+            quant_band_enc(ctx, i, y, n, sbits, lm);
         } else {
-            quant_band_enc(ctx, i, y, n, sbits, big_b, tf_change, lm, level + 1);
+            quant_band_enc(ctx, i, y, n, sbits, lm);
             rebalance = sbits - (rebalance - ctx->remaining_bits);
             if (rebalance > 3 << BITRES && itheta != 16384)
                 mbits += rebalance - (3 << BITRES);
-            quant_band_enc(ctx, i, x, n, mbits, big_b, tf_change, lm, level + 1);
+            quant_band_enc(ctx, i, x, n, mbits, lm);
         }
     } else {
         int q = bits2pulses(i, lm, b), curr = pulses2bits(i, lm, q);
@@ -2245,7 +2217,7 @@ static void quant_band_enc(enc_ctx_t *ctx, int i, float *x, int n, int b, int bi
             ctx->remaining_bits -= curr;
         }
         if (q != 0)
-            alg_quant(x, n, get_pulses(q), ctx->spread, big_b, enc);
+            alg_quant(x, n, get_pulses(q), enc);
     }
 }
 
@@ -2260,7 +2232,7 @@ int celt_encode(celt_encoder_t *st, const float *pcm, unsigned char *out, int nb
     const int lm = 3, n = 960, total_bits = nbytes * 8;
     float band_e[CELT_BANDS], log_e[CELT_BANDS], error[CELT_BANDS];
     int cap[CELT_BANDS], offsets[CELT_BANDS] = {0}, pulses[CELT_BANDS], fine[CELT_BANDS], fine_priority[CELT_BANDS];
-    int tf_res[CELT_BANDS], intensity = 0, dual_stereo = 0, balance, coded, bits, tell;
+    int intensity = 0, dual_stereo = 0, balance, coded, bits, tell;
     opus_rce_t enc;
     enc_ctx_t ctx;
 
@@ -2311,10 +2283,7 @@ int celt_encode(celt_encoder_t *st, const float *pcm, unsigned char *out, int nb
                 rce_bit_logp(&enc, 0, (unsigned)logp);
                 t = (unsigned)rce_tell(&enc);
             }
-        if (tf_select_rsv && k_tf_select[lm][0] != k_tf_select[lm][2])
-            rce_bit_logp(&enc, 0, 1);
-        for (int i = 0; i < CELT_BANDS; i++)
-            tf_res[i] = k_tf_select[lm][0];
+        /* tf_select is not coded: at 20 ms, both of its tables say no change. */
     }
     if (rce_tell(&enc) + 4 <= total_bits)
         rce_icdf(&enc, SPREAD_NORMAL, k_spread_icdf, 5);
@@ -2352,7 +2321,6 @@ int celt_encode(celt_encoder_t *st, const float *pcm, unsigned char *out, int nb
 
     /* The shapes, band by band. */
     ctx.enc = &enc;
-    ctx.spread = SPREAD_NORMAL;
     for (int i = 0; i < CELT_BANDS; i++) {
         int t = (int)rce_tell_frac(&enc), b, w = (k_ebands[i + 1] - k_ebands[i]) << lm;
         if (i != 0)
@@ -2364,7 +2332,7 @@ int celt_encode(celt_encoder_t *st, const float *pcm, unsigned char *out, int nb
         } else {
             b = 0;
         }
-        quant_band_enc(&ctx, i, st->x + (k_ebands[i] << lm), w, b, 1, tf_res[i], lm, 0);
+        quant_band_enc(&ctx, i, st->x + (k_ebands[i] << lm), w, b, lm);
         balance += pulses[i] + t;
     }
 
