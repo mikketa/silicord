@@ -69,6 +69,7 @@ static DWRITE_TEXT_ANTIALIAS_MODE g_aa = DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE;
 
 /* Frame in progress. */
 static int g_active, g_w, g_h, g_y0, g_bh, g_y_end;
+static RECT g_update; /* the frame's update box: nothing outside it is drawn */
 static RECT g_clip[MAX_CLIP];
 static int g_nclip;
 static UINT32 *g_scratch;           /* saved pixels while drawing text */
@@ -98,6 +99,38 @@ static inline void blend(UINT32 *d, unsigned argb, unsigned a) /* a: 0..255 */
     *d = out;
 }
 
+/*
+ * A run of n pixels of one color at one alpha: stored as is when opaque, else
+ * blended as blend() does, through a table per channel once the run is long.
+ */
+static void span(UINT32 *p, int n, unsigned argb, unsigned a)
+{
+    BYTE t[3][256];
+
+    if (n <= 0 || !a)
+        return;
+    if (a >= 255) {
+        UINT32 v = argb & 0xFFFFFF;
+        for (int i = 0; i < n; i++)
+            p[i] = v;
+        return;
+    }
+    if (n < 64) {
+        for (int i = 0; i < n; i++)
+            blend(p + i, argb, a);
+        return;
+    }
+    for (int c = 0; c < 3; c++) {
+        int sc = (int)(argb >> (c * 8) & 0xFF);
+        for (int d = 0; d < 256; d++)
+            t[c][d] = (BYTE)(d + ((sc - d) * (int)a + 127) / 255);
+    }
+    for (int i = 0; i < n; i++) {
+        UINT32 v = p[i];
+        p[i] = (UINT32)t[0][v & 0xFF] | (UINT32)t[1][v >> 8 & 0xFF] << 8 | (UINT32)t[2][v >> 16 & 0xFF] << 16;
+    }
+}
+
 static inline float fsqrt(float v)
 {
     return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(v)));
@@ -114,7 +147,7 @@ static inline int imax(int a, int b) { return a > b ? a : b; }
 /* Visible area: the band, then the clip stack. */
 static RECT clip_rect(void)
 {
-    RECT r = {0, g_y0, g_w, g_y0 + g_bh};
+    RECT r = {g_update.left, imax(g_y0, g_update.top), g_update.right, imin(g_y0 + g_bh, g_update.bottom)};
 
     if (g_nclip) {
         const RECT *c = &g_clip[g_nclip - 1];
@@ -186,10 +219,17 @@ extern "C" int r_begin(HDC dc, int w, int h)
         g_active = 1;
         g_y0 = 0;
         g_y_end = h;
-        /* Only the bands the update region touches. */
-        if (GetClipBox(dc, &clip) != ERROR && clip.bottom > clip.top) {
+        g_update.left = g_update.top = 0;
+        g_update.right = w;
+        g_update.bottom = h;
+        /* Only the bands the update region touches, and in them only its box. */
+        if (GetClipBox(dc, &clip) != ERROR && clip.bottom > clip.top && clip.right > clip.left) {
             g_y0 = clip.top / BAND * BAND;
             g_y_end = clip.bottom < h ? clip.bottom : h;
+            g_update.left = imax(clip.left, 0);
+            g_update.top = imax(clip.top, 0);
+            g_update.right = imin(clip.right, w);
+            g_update.bottom = imin(clip.bottom, h);
         }
     } else {
         g_y0 += BAND;
@@ -211,7 +251,10 @@ extern "C" int r_begin(HDC dc, int w, int h)
 
 extern "C" void r_end(HDC dc)
 {
-    BitBlt(dc, 0, g_y0, g_w, g_bh, g_mem, 0, 0, SRCCOPY);
+    int top = imax(g_y0, g_update.top), bottom = imin(g_y0 + g_bh, g_update.bottom);
+
+    if (bottom > top && g_update.right > g_update.left)
+        BitBlt(dc, g_update.left, top, g_update.right - g_update.left, bottom - top, g_mem, g_update.left, top - g_y0, SRCCOPY);
 }
 
 extern "C" int r_visible(int y, int h)
@@ -253,15 +296,8 @@ extern "C" void r_fill(int x, int y, int w, int h, unsigned argb)
 
     if (!a || !intersect(&r, x, y, w, h))
         return;
-    for (int yy = r.top; yy < r.bottom; yy++) {
-        UINT32 *p = row(yy) + r.left;
-        if (a == 255)
-            for (int xx = r.left; xx < r.right; xx++)
-                *p++ = argb & 0xFFFFFF;
-        else
-            for (int xx = r.left; xx < r.right; xx++)
-                blend(p++, argb, a);
-    }
+    for (int yy = r.top; yy < r.bottom; yy++)
+        span(row(yy) + r.left, r.right - r.left, argb, a);
 }
 
 /* Coverage of the pixel centered on (px, py) by a rounded rectangle. */
@@ -300,29 +336,42 @@ static void shape(int x, int y, int w, int h, int radius, int stroke, unsigned t
 {
     RECT r = clip_rect();
     float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
-    float rad = (float)imin(radius, imin(w, h) / 2), s = (float)stroke;
+    int irad = imin(radius, imin(w, h) / 2);
+    float rad = (float)irad, s = (float)stroke, rin = rad - s > 0 ? rad - s : 0;
+    /*
+     * Past the corners' reach and the stroke from either side, the coverage of a
+     * row no longer depends on x: the middle of each row is one span, and only
+     * its two ends are computed pixel by pixel.
+     */
+    int mid0 = x + irad + stroke + 1, mid1 = x + w - irad - stroke - 1;
 
     if (w <= 0 || h <= 0 || !intersect(&r, x, y, w, h))
         return;
+    if (mid1 < mid0)
+        mid1 = mid0;
     for (int yy = r.top; yy < r.bottom; yy++) {
-        UINT32 *p = row(yy) + r.left;
+        UINT32 *line = row(yy);
         float py = (float)yy + 0.5f;
         unsigned c = top == bottom ? top : lerp_color(top, bottom, ((float)(yy - y) + 0.5f) / (float)h);
         unsigned a = c >> 24;
-        /* Rows clear of the corners only need work near the left and right edges. */
-        int plain = !stroke && py - y0 >= rad + 1 && y1 - py >= rad + 1;
+        int ms = imax(r.left, mid0), me = imin(r.right, mid1);
 
-        for (int xx = r.left; xx < r.right; xx++, p++) {
-            float px = (float)xx + 0.5f, cov;
-            if (plain && px - x0 >= 1 && x1 - px >= 1) {
-                blend(p, c, a);
-                continue;
+        for (int part = 0; part < 2; part++) {
+            int from = part ? imax(r.left, mid1) : r.left, to = part ? r.right : imin(r.right, imax(r.left, mid0));
+            for (int xx = from; xx < to; xx++) {
+                float px = (float)xx + 0.5f, cov = rr_cover(px, py, x0, y0, x1, y1, rad);
+                if (stroke)
+                    cov -= rr_cover(px, py, x0 + s, y0 + s, x1 - s, y1 - s, rin);
+                if (cov > 0)
+                    blend(line + xx, c, (unsigned)(cov * (float)a + 0.5f));
             }
-            cov = rr_cover(px, py, x0, y0, x1, y1, rad);
+        }
+        if (ms < me) {
+            float px = (float)ms + 0.5f, cov = rr_cover(px, py, x0, y0, x1, y1, rad);
             if (stroke)
-                cov -= rr_cover(px, py, x0 + s, y0 + s, x1 - s, y1 - s, rad - s > 0 ? rad - s : 0);
+                cov -= rr_cover(px, py, x0 + s, y0 + s, x1 - s, y1 - s, rin);
             if (cov > 0)
-                blend(p, c, (unsigned)(cov * (float)a + 0.5f));
+                span(line + ms, me - ms, c, (unsigned)(cov * (float)a + 0.5f));
         }
     }
 }
@@ -1072,10 +1121,13 @@ extern "C" r_font_t *r_font_data(const void *data, size_t n, int px, int weight)
     return f;
 }
 
+static void layouts_drop(r_font_t *f);
+
 extern "C" void r_font_free(r_font_t *f)
 {
     if (!f)
         return;
+    layouts_drop(f);
     if (f->ellipsis)
         f->ellipsis->Release();
     f->format->Release();
@@ -1084,12 +1136,90 @@ extern "C" void r_font_free(r_font_t *f)
 
 /* ---- Text ---- */
 
+/*
+ * Layouts are the costly part of text: the same strings come back in every
+ * band of a frame and in every frame, so the last ones built are kept, one
+ * per slot of a small table indexed by a hash of what makes them.
+ */
+#define LAYOUTS 512 /* a power of two */
+
+static struct {
+    r_font_t *f;
+    wchar_t *s;
+    int len, w, h;
+    unsigned flags, hash;
+    IDWriteTextLayout *l;
+} g_layouts[LAYOUTS];
+
+static unsigned layout_hash(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags)
+{
+    unsigned x = 2166136261u;
+
+    for (int i = 0; i < len; i++)
+        x = (x ^ s[i]) * 16777619u;
+    x = (x ^ (unsigned)(UINT_PTR)f) * 16777619u;
+    x = (x ^ (unsigned)w) * 16777619u;
+    x = (x ^ (unsigned)h) * 16777619u;
+    return (x ^ flags) * 16777619u;
+}
+
+/* Forgets the layouts of font `f` (NULL: all of them). */
+static void layouts_drop(r_font_t *f)
+{
+    for (int i = 0; i < LAYOUTS; i++)
+        if (g_layouts[i].l && (!f || g_layouts[i].f == f)) {
+            g_layouts[i].l->Release();
+            mem_free(g_layouts[i].s);
+            g_layouts[i].l = NULL;
+            g_layouts[i].s = NULL;
+        }
+}
+
+static IDWriteTextLayout *layout_new(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags);
+
+/* The layout of `s`, from the table or new; the caller releases it. */
 static IDWriteTextLayout *layout(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags)
 {
     IDWriteTextLayout *l;
+    unsigned hash;
+    int k, same;
 
     if (len < 0)
         len = lstrlenW(s);
+    hash = layout_hash(f, s, len, w, h, flags);
+    k = (int)(hash & (LAYOUTS - 1));
+    same = g_layouts[k].l && g_layouts[k].hash == hash && g_layouts[k].f == f && g_layouts[k].len == len &&
+           g_layouts[k].w == w && g_layouts[k].h == h && g_layouts[k].flags == flags;
+    for (int i = 0; same && i < len; i++)
+        same = g_layouts[k].s[i] == s[i];
+    if (same) {
+        g_layouts[k].l->AddRef();
+        return g_layouts[k].l;
+    }
+    if (!(l = layout_new(f, s, len, w, h, flags)))
+        return NULL;
+    if (g_layouts[k].l) {
+        g_layouts[k].l->Release();
+        mem_free(g_layouts[k].s);
+    }
+    g_layouts[k].s = (wchar_t *)mem_alloc(((size_t)len + 1) * sizeof(wchar_t));
+    for (int i = 0; i < len; i++)
+        g_layouts[k].s[i] = s[i];
+    g_layouts[k].f = f;
+    g_layouts[k].len = len;
+    g_layouts[k].w = w;
+    g_layouts[k].h = h;
+    g_layouts[k].flags = flags;
+    g_layouts[k].hash = hash;
+    g_layouts[k].l = l;
+    l->AddRef();
+    return l;
+}
+
+static IDWriteTextLayout *layout_new(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags)
+{
+    IDWriteTextLayout *l;
+
     if (FAILED(g_dw->CreateTextLayout(s, (UINT32)len, f->format, (float)w, (float)h, &l)))
         return NULL;
     l->SetTextAlignment((flags & R_CENTER)  ? DWRITE_TEXT_ALIGNMENT_CENTER

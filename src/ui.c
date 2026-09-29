@@ -28,6 +28,7 @@
 #include "utf.h"
 #include "voice.h"
 #include "audio.h"
+#include "vsync.h"
 
 /*
  * Palette (GDI COLORREF and ARGB): Discord's "Midnight" dark theme, its design
@@ -458,6 +459,7 @@ static relation_t *rel_find(const char *id);
 static void rel_remove(const char *id);
 
 #define WM_TRAY (WM_APP + 60)
+#define WM_VSYNC (WM_APP + 61) /* a refresh of the display, while something moves */
 #define TIMER_ACK 1
 #define TIMER_FLASH 3
 #define TIMER_REACTORS 9
@@ -671,11 +673,10 @@ static int frame_ms(void)
  * Hover and selection ease in and out instead of snapping, as in Discord. A
  * transition is keyed by what it moves (a hit kind or a TW_ key, and an index)
  * and depends only on the frame's time, so every band of a frame reads the
- * same value. While one runs, the rectangles it covers are repainted about
- * every 16 ms; once all have settled the timer stops and nothing wakes up.
+ * same value. While one runs, the rectangles it covers are repainted at each
+ * refresh of the display (vsync.h); once all have settled nothing wakes up.
  * Popups are not animated: their values jump to the target.
  */
-#define TIMER_TWEEN 12
 #define TWEENS 64
 #define TW_FAST 120  /* hover backgrounds */
 #define TW_SHAPE 200 /* server icons and their pill */
@@ -800,7 +801,6 @@ static unsigned row_bg(int kind, int index, int sel, int hov, unsigned base, int
  * Popups (profiles, the emoji picker, the quick switcher) fade in instead of
  * appearing at once: layered while they fade, plain windows again after.
  */
-#define TIMER_FADE 13
 #define FADE_MS 120
 #define FADES 4
 
@@ -835,7 +835,7 @@ static void fade_in(HWND w)
     SetLayeredWindowAttributes(w, 0, 0, LWA_ALPHA);
     g_fade.wnd[g_fade.n] = w;
     g_fade.t0[g_fade.n++] = qpc_ms();
-    SetTimer(g_ui.wnd, TIMER_FADE, 16, NULL);
+    vsync_request();
 }
 
 static void fade_tick(void)
@@ -855,8 +855,8 @@ static void fade_tick(void)
         g_fade.wnd[i] = g_fade.wnd[--g_fade.n];
         g_fade.t0[i] = g_fade.t0[g_fade.n];
     }
-    if (!g_fade.n)
-        KillTimer(g_ui.wnd, TIMER_FADE);
+    if (g_fade.n)
+        vsync_request();
 }
 
 static void tween_frame_start(void)
@@ -867,20 +867,24 @@ static void tween_frame_start(void)
     SetRectEmpty(&g_tween.dirty);
 }
 
-/* After a paint of the main window: what still moves is painted again in 16 ms. */
+/* After a paint of the main window: what still moves is painted again at the next refresh. */
 static void tween_frame_end(void)
 {
     if (IsRectEmpty(&g_tween.dirty))
         return;
     UnionRect(&g_tween.repaint, &g_tween.repaint, &g_tween.dirty);
-    SetTimer(g_ui.wnd, TIMER_TWEEN, 16, NULL);
+    vsync_request();
 }
 
-static void tween_tick(void)
+/* A refresh of the display: the transitions and fades still running take their next step. */
+static void on_vsync(void)
 {
-    KillTimer(g_ui.wnd, TIMER_TWEEN);
-    InvalidateRect(g_ui.wnd, &g_tween.repaint, FALSE);
-    SetRectEmpty(&g_tween.repaint);
+    if (g_fade.n)
+        fade_tick();
+    if (!IsRectEmpty(&g_tween.repaint)) {
+        InvalidateRect(g_ui.wnd, &g_tween.repaint, FALSE);
+        SetRectEmpty(&g_tween.repaint);
+    }
 }
 
 /* How long the process has run and the CPU time it used, in ms. */
@@ -13853,6 +13857,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE:
         g_ui.wnd = wnd;
+        vsync_start(wnd, WM_VSYNC);
         g_ui.dpi = GetDpiForWindow(wnd);
         g_ui.b_composer = CreateSolidBrush(RGB(0x10, 0x10, 0x13));
         g_ui.composer = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, wnd, NULL,
@@ -14286,14 +14291,6 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             anim_tick();
             return 0;
         }
-        if (wp == TIMER_TWEEN) {
-            tween_tick();
-            return 0;
-        }
-        if (wp == TIMER_FADE) {
-            fade_tick();
-            return 0;
-        }
         if (wp == TIMER_REACTORS) {
             react_timer();
             return 0;
@@ -14350,6 +14347,9 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             mark_read(g_ui.channel);
             redraw();
         }
+        return 0;
+    case WM_VSYNC:
+        on_vsync();
         return 0;
     case WM_TRAY:
         switch (LOWORD(lp)) {

@@ -90,6 +90,7 @@ add_executable(silicord
   src/audio.c
   src/camera.c
   src/screen.c
+  src/vsync.c
   src/loopback.c
   src/ui.c
   src/voice.c
