@@ -116,10 +116,11 @@ static void transpose4(__m128i r[4])
 void vp8i_idct_add(unsigned char *dst, int stride, const short *in)
 {
     __m128i zero = _mm_setzero_si128(), r[4], a1, b1, c1, d1, out[4];
-    int ac = 0;
+    __m128i lo = _mm_loadu_si128((const __m128i *)in), hi = _mm_loadu_si128((const __m128i *)(in + 8));
+    /* Any AC coefficient: the 16 at once, the DC lane masked out. */
+    int ac = _mm_movemask_epi8(_mm_cmpeq_epi16(_mm_or_si128(_mm_andnot_si128(_mm_cvtsi32_si128(0xFFFF), lo), hi),
+                                               zero)) != 0xFFFF;
 
-    for (int i = 1; i < 16; i++)
-        ac |= in[i];
     if (!ac) {
         /* No AC coefficients (none at all in a skipped macroblock): every pixel moves by the same amount. */
         int dc = (in[0] + 4) >> 3;
