@@ -579,6 +579,23 @@ extern "C" void r_image(r_image_t *img, int x, int y, int w, int h, int radius)
     }
 }
 
+/* The image's alpha as a mask, filled with one color, at its own size (icons drawn in the color of the moment). */
+extern "C" void r_image_tint(r_image_t *img, int x, int y, unsigned argb)
+{
+    RECT r = clip_rect();
+    unsigned a = argb >> 24;
+
+    if (!img || !a || !intersect(&r, x, y, (int)img->w, (int)img->h))
+        return;
+    for (int yy = r.top; yy < r.bottom; yy++) {
+        const BYTE *src = img->pixels + ((size_t)(yy - y) * img->w + (size_t)(r.left - x)) * 4;
+        UINT32 *p = row(yy) + r.left;
+        for (int xx = r.left; xx < r.right; xx++, src += 4, p++)
+            if (src[3])
+                blend(p, argb, (src[3] * a + 127) / 255);
+    }
+}
+
 extern "C" RECT r_image_drawn(r_image_t *img)
 {
     RECT r = img->drawn;

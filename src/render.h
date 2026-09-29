@@ -47,6 +47,8 @@ RECT r_image_drawn(r_image_t *img);
 size_t r_image_bytes(const r_image_t *img);
 /* Same, but scaled to cover the rectangle and cropped around the center. */
 void r_image_cover(r_image_t *img, int x, int y, int w, int h, int radius);
+/* Its alpha as a mask filled with `argb`, unscaled: for icons. */
+void r_image_tint(r_image_t *img, int x, int y, unsigned argb);
 /* Average color of the opaque pixels, 0xFFRRGGBB (0 if there are none), computed when decoding. */
 unsigned r_image_average(r_image_t *img);
 /* Rounded rectangle filled with a vertical gradient, and a rounded outline. */

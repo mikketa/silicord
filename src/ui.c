@@ -36,7 +36,7 @@
  */
 #define RGBX(r, g, b) RGB(r, g, b), (0xFF000000u | ((r) << 16) | ((g) << 8) | (b))
 enum { C_RAIL, C_SIDE, C_MAIN, C_PANEL, C_ITEM, C_HOVER, C_SELECT, C_LINE, C_INK, C_MUTED, C_FAINT, C_BRAND, C_GREEN, C_TIP,
-       C_MENTION, C_MENTION_HOVER, C_NEW, C_WARN, C_RED, C_TEXT, C_COUNT };
+       C_MENTION, C_MENTION_HOVER, C_NEW, C_WARN, C_RED, C_TEXT, C_CHANNEL, C_CHANNEL_MUTED, C_COUNT };
 static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
     {RGBX(0x00, 0x00, 0x00)}, /* rail and title bar: app-frame-background */
     {RGBX(0x00, 0x00, 0x00)}, /* channel column: background-base-lowest */
@@ -58,6 +58,8 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
     {RGBX(0xF0, 0xB2, 0x32)}, /* connecting, warnings: status-warning */
     {RGBX(0xF2, 0x3F, 0x43)}, /* errors, destructive actions: status-danger */
     {RGBX(0xD4, 0xD5, 0xD8)}, /* message text: text-default */
+    {RGBX(0x7A, 0x7B, 0x83)}, /* idle channels, their icons, list headers: channels-default */
+    {RGBX(0x31, 0x31, 0x35)}, /* muted channels: channels-default at 40% */
 };
 #define GDI(c) (k_color[c].gdi)
 #define ARGB(c) (k_color[c].argb)
@@ -87,7 +89,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
 enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF, HIT_VOICE_CAMERA, HIT_VOICE_SHARE,
-       HIT_MIC, HIT_DEAFEN, HIT_VOICE_MENU, HIT_NAV, HIT_DM_SEARCH, HIT_NEW_DM };
+       HIT_MIC, HIT_DEAFEN, HIT_VOICE_MENU, HIT_NAV, HIT_DM_SEARCH, HIT_NEW_DM, HIT_GUILD_HEADER };
 
 typedef struct {
     char key[96];
@@ -193,7 +195,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -2179,6 +2181,11 @@ static void hit_test(int x, int y, int *kind, int *index)
                 *kind = HIT_DM_SEARCH;
             return;
         }
+        if (y < S(HEADER_H) && g_ui.guild >= 0 && g_ui.model) {
+            if (y >= S(8) && y < S(40) && x >= S(RAIL_W) + S(8) && x < S(RAIL_W + SIDE_W) - S(8))
+                *kind = HIT_GUILD_HEADER;
+            return;
+        }
         if (y >= S(HEADER_H) && g_ui.guild < 0 && g_ui.model) {
             int top = S(HEADER_H) + S(8) - g_ui.side_scroll, sec = top + S(NAVS * NAV_ROW) + S(13);
             if (y >= top && y < top + S(NAVS * NAV_ROW) && x >= S(RAIL_W) + S(8) && x < S(RAIL_W + SIDE_W) - S(8)) {
@@ -2468,6 +2475,52 @@ static void paint_scrollbar(int x, int top, int view, int content, int scroll)
     r_round(x, y, S(4), h, S(2), 0xFF242426);
 }
 
+/*
+ * Line icons of our own in Discord's style: a 24 unit grid, strokes 2 units
+ * wide with round ends. Rendered once per size as masks, tinted when drawn.
+ */
+enum { SI_HASH, SI_CHEVRON_DOWN, SI_CHEVRON_RIGHT, SI_COUNT };
+static const char *const k_sicon[SI_COUNT] = {
+    "M10.5 3.5 8.5 20.5M16.5 3.5l-2 17M4.5 8.5h16M3.5 15.5h16",
+    "M6 9.5l6 6 6-6",
+    "M9.5 6l6 6-6 6",
+};
+
+static struct {
+    int id, px;
+    r_image_t *img;
+} g_sicons[24];
+
+static void sicon(int id, int x, int y, int px, unsigned argb)
+{
+    r_image_t *img = NULL;
+    int k;
+
+    for (k = 0; k < (int)ARRAYSIZE(g_sicons) && g_sicons[k].img; k++)
+        if (g_sicons[k].id == id && g_sicons[k].px == px) {
+            img = g_sicons[k].img;
+            break;
+        }
+    if (!img) {
+        char svg[512];
+        int n = wsprintfA(svg,
+                          "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\">"
+                          "<path fill=\"none\" stroke=\"#fff\" stroke-width=\"2\" stroke-linecap=\"round\" "
+                          "stroke-linejoin=\"round\" d=\"%s\"/></svg>",
+                          k_sicon[id]);
+        if (!(img = r_image_decode(svg, (size_t)n, px)))
+            return;
+        if (k == (int)ARRAYSIZE(g_sicons)) { /* full: the first goes */
+            r_image_free(g_sicons[0].img);
+            k = 0;
+        }
+        g_sicons[k].id = id;
+        g_sicons[k].px = px;
+        g_sicons[k].img = img;
+    }
+    r_image_tint(img, x, y, argb);
+}
+
 static void paint_channel_row(unsigned i, int y)
 {
     const channel_t *c = chan((int)i);
@@ -2476,10 +2529,14 @@ static void paint_channel_row(unsigned i, int y)
     const char *name = model_str(g_ui.model, c->name);
 
     if (c->type == CH_CATEGORY) {
-        text_w(g_ui.f_icon, hov ? C_INK : C_FAINT, rect(x - S(2), y + S(18), S(14), S(18)),
-               g_ui.collapsed[i] ? ICON_CHEVRON_RIGHT : ICON_CHEVRON_DOWN, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        text(g_ui.f_cat, hov ? C_INK : C_MUTED, rect(x + S(14), y + S(18), w - S(14), S(18)), name,
+        /* the name in 14px medium, as Discord's refreshed type has it, and its chevron after it */
+        int tw = text_width(g_ui.f_menu, name), max = w - S(8) - S(20);
+        unsigned ink = hov ? ARGB(C_INK) : ARGB(C_CHANNEL);
+        if (tw > max)
+            tw = max;
+        text(g_ui.f_menu, hov ? C_INK : C_CHANNEL, rect(x + S(8), y + S(16), tw + S(2), S(20)), name,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        sicon(g_ui.collapsed[i] ? SI_CHEVRON_RIGHT : SI_CHEVRON_DOWN, x + S(8) + tw + S(2), y + S(18), S(16), ink);
         return;
     }
     if (is_dm_type(c->type)) {
@@ -2519,20 +2576,22 @@ static void paint_channel_row(unsigned i, int y)
         return;
     }
     row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(ROW_H) - S(2), S(6));
-    if (c->type == CH_VOICE || c->type == CH_STAGE || c->type == CH_NEWS || c->type == CH_FORUM || c->type == CH_MEDIA)
-        /* Speaker, megaphone for announcements, speech bubbles for forums, like Discord. */
-        text_w(g_ui.f_icon, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)),
-               c->type == CH_NEWS ? L"\xE789" : c->type == CH_FORUM || c->type == CH_MEDIA ? L"\xE8F2" : ICON_VOLUME, -1,
-               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    else
-        text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     {
         int unread = channel_unread(i), muted = channel_muted(i), badge = c->mentions ? S(30) : 0;
-        int color = sel || hov || unread ? C_INK : muted ? C_FAINT : C_MUTED;
+        int color = sel || hov || unread ? C_INK : C_CHANNEL;
+        /* muted channels fade to 40%, as in Discord */
+        unsigned icon = sel || hov ? ARGB(C_INK) : muted ? ARGB(C_CHANNEL_MUTED) : ARGB(C_CHANNEL);
+        if (c->type == CH_VOICE || c->type == CH_STAGE || c->type == CH_NEWS || c->type == CH_FORUM || c->type == CH_MEDIA)
+            /* Speaker, megaphone for announcements, speech bubbles for forums, like Discord. */
+            r_text(g_ui.f_icon_tb, icon, x + S(8), y, S(20), S(ROW_H),
+                   c->type == CH_NEWS ? L"\xE789" : c->type == CH_FORUM || c->type == CH_MEDIA ? L"\xE8F2" : ICON_VOLUME, -1,
+                   R_CENTER | R_VCENTER | R_SINGLE);
+        else
+            sicon(SI_HASH, x + S(8), y + (S(ROW_H) - S(20)) / 2, S(20), icon);
         if (unread && !sel)
             r_round(S(RAIL_W) - S(4), y + S(ROW_H) / 2 - S(4), S(8), S(8), S(4), ARGB(C_INK));
-        text(unread ? g_ui.f_h : g_ui.f_body, color, rect(x + S(34), y, w - S(40) - badge, S(ROW_H)), name,
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(unread ? g_ui.f_nav : g_ui.f_chan, muted && !sel && !hov ? C_CHANNEL_MUTED : color,
+             rect(x + S(34), y, w - S(40) - badge, S(ROW_H)), name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         if (c->mentions)
             paint_badge(x + w - S(8), y + S(ROW_H) / 2, c->mentions);
     }
@@ -2724,8 +2783,16 @@ static void paint_side(RECT rc)
             text(g_ui.f_small_mid, t > .5f ? C_INK : C_TEXT, rect(x0 + S(8), S(9), S(SIDE_W) - S(16), S(31)),
                  "Find or start a conversation", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         } else {
-            text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), title,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            /* Discord's guild dropdown: 32 high, 8 in, the name then a chevron, lit on hover */
+            float t = tween_on(HIT_GUILD_HEADER, 0, g_ui.hover_kind == HIT_GUILD_HEADER, TW_FAST, x0 + S(8), S(8),
+                               S(SIDE_W) - S(16), S(32));
+            int tw = text_width(g_ui.f_nav, title), max = S(SIDE_W) - S(32) - S(20);
+            if (t > 0.f)
+                r_round(x0 + S(8), S(8), S(SIDE_W) - S(16), S(32), S(8), lerp_argb(ARGB(C_SIDE), 0xFF1A1A1Cu, t));
+            if (tw > max)
+                tw = max;
+            text(g_ui.f_nav, C_INK, rect(x0 + S(16), S(8), tw + S(2), S(32)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            sicon(SI_CHEVRON_DOWN, x0 + S(16) + tw + S(4), S(8) + S(7), S(18), ARGB(C_INK));
         }
         if (!count)
             text(g_ui.f_body, C_MUTED, rect(x0 + S(16), S(HEADER_H) + S(12), S(SIDE_W) - S(32), S(24)),
@@ -2776,6 +2843,9 @@ static void paint_settings(RECT rc);
 static void settings_open(void);
 static void settings_open_voice(void);
 static int run_menu(HMENU menu);
+static void guild_menu(int g);
+static POINT g_menu_at; /* where run_menu() opens instead of at the pointer, while g_menu_at_set */
+static int g_menu_at_set;
 static void place_search(void);
 static void place_friend_input(void);
 static const char *const k_status_codes[] = {"online", "idle", "dnd", "invisible"};
@@ -2785,7 +2855,7 @@ static int search_box_x(void);
 static int members_shown(void);
 
 /* The chat header's buttons, right to left from the search box, as in Discord. */
-enum { HB_MEMBERS, HB_PINS, HB_VIDEO, HB_CALL, HB_COUNT };
+enum { HB_MEMBERS, HB_PINS, HB_VIDEO, HB_CALL, HB_BELL, HB_COUNT };
 
 static int header_buttons(int *out)
 {
@@ -2800,6 +2870,8 @@ static int header_buttons(int *out)
     if (g_ui.guild >= 0 || c->type == CH_GROUP_DM || (c->type == CH_DM && c->user_id[0]))
         out[n++] = HB_MEMBERS; /* a DM's: its person's profile */
     out[n++] = HB_PINS;
+    if (g_ui.guild >= 0)
+        out[n++] = HB_BELL; /* the channel's notifications, left of the pins as in Discord */
     if (is_dm_type(c->type)) {
         out[n++] = HB_VIDEO;
         out[n++] = HB_CALL;
@@ -4629,7 +4701,7 @@ static void paint_chat_header(RECT rc, int x0, const channel_t *c, const char *n
         }
     }
     for (int i = 0; i < n; i++) {
-        static const wchar_t *const glyphs[HB_COUNT] = {L"\xE716", L"\xE718", L"\xE714", L"\xE717"};
+        static const wchar_t *const glyphs[HB_COUNT] = {L"\xE716", L"\xE718", L"\xE714", L"\xE717", L"\xEA8F"};
         int bx = header_button_x(k[i]), on = 0;
         unsigned ink = 0xFF81828Au; /* icon-muted */
         if (k[i] == HB_MEMBERS)
@@ -4640,8 +4712,11 @@ static void paint_chat_header(RECT rc, int x0, const channel_t *c, const char *n
             ink = ARGB(C_INK);
         if (k[i] == HB_CALL && in_call(c->id))
             ink = ARGB(C_GREEN);
-        r_text(g_ui.f_icon_mid, ink, bx, 0, S(32), S(HEADER_H), k[i] == HB_MEMBERS && c->type == CH_DM ? L"\xE77B" : glyphs[k[i]], -1,
-               R_CENTER | R_VCENTER | R_SINGLE);
+        r_text(g_ui.f_icon_mid, ink, bx, 0, S(32), S(HEADER_H),
+               k[i] == HB_MEMBERS && c->type == CH_DM ? L"\xE77B"
+               : k[i] == HB_BELL && c->muted          ? L"\xE7ED" /* the bell struck through */
+                                                      : glyphs[k[i]],
+               -1, R_CENTER | R_VCENTER | R_SINGLE);
     }
     if (!voice) {
         r_round(sx, S(8), S(SEARCH_W), S(32), S(8), ARGB(C_MAIN));
@@ -5728,6 +5803,7 @@ static void make_fonts(void)
     g_ui.f_section = r_font(L"Segoe UI", S(14), FW_NORMAL, 0);
     g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
     g_ui.f_menu = r_font(L"Segoe UI", S(14), FW_MEDIUM, 0);
+    g_ui.f_chan = r_font(L"Segoe UI", S(16), FW_MEDIUM, 0);
     g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
     /* Discord's marketing headings: heavy italic capitals (Segoe UI Black stands in for its own face). */
     g_ui.f_nitro = r_font(L"Segoe UI", S(64), FW_BLACK, 1);
@@ -6194,6 +6270,17 @@ static void on_click(int kind, int index)
     case HIT_NEW_DM:
         qs_open();
         break;
+    case HIT_GUILD_HEADER: {
+        /* the server's menu, under the header as Discord's dropdown */
+        POINT pt = {S(RAIL_W) + S(8), S(44)};
+        ClientToScreen(g_ui.wnd, &pt);
+        g_menu_at = pt;
+        g_menu_at_set = 1;
+        if (g_ui.guild >= 0)
+            guild_menu(g_ui.guild);
+        g_menu_at_set = 0;
+        break;
+    }
     case HIT_RETRY:
         g_ui.disconnected = 0;
         set_text(&g_ui.status, "Connecting\xE2\x80\xA6");
@@ -8593,8 +8680,8 @@ static void paint_members(RECT rc)
                 wchar_t *wt;
                 group_title(it, title, sizeof title);
                 wt = utf8_to_wide(title, lstrlenA(title));
-                CharUpperW(wt); /* uppercase like Discord, accents included */
-                text_w(g_ui.f_cat, C_MUTED, rect(x0 + S(16), y + S(16), S(MEMBERS_W) - S(24), S(20)), wt, -1,
+                /* as Discord's refreshed type: 14px medium, not in capitals */
+                text_w(g_ui.f_menu, C_CHANNEL, rect(x0 + S(16), y + S(16), S(MEMBERS_W) - S(24), S(20)), wt, -1,
                        DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 mem_free(wt);
             } else if (it->valid) {
@@ -13017,9 +13104,18 @@ static void add_mute_items(HMENU menu, int muted, const wchar_t *what)
 }
 
 /* Notification Settings: the levels, ticked at `current`; `inherit` names the default entry for channels. */
+static void notify_items(HMENU sub, int current, const wchar_t *inherit);
+
 static HMENU notify_menu(int current, const wchar_t *inherit)
 {
     HMENU sub = CreatePopupMenu();
+
+    notify_items(sub, current, inherit);
+    return sub;
+}
+
+static void notify_items(HMENU sub, int current, const wchar_t *inherit)
+{
 
     if (inherit)
         AppendMenuW(sub, MF_STRING | (current == NOTIFY_DEFAULT ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_DEFAULT, inherit);
@@ -13028,7 +13124,6 @@ static HMENU notify_menu(int current, const wchar_t *inherit)
                 L"Only @mentions");
     AppendMenuW(sub, MF_STRING | (current == NOTIFY_NOTHING ? MF_CHECKED : 0), CM_NOTIFY + NOTIFY_NOTHING, L"Nothing");
     menu_mark(sub, 0, MENU_RADIO);
-    return sub;
 }
 
 /* The JSON Discord takes for a NOTIFY_* level. */
@@ -13042,7 +13137,10 @@ static int run_menu(HMENU menu)
     POINT pt;
     int cmd;
 
-    GetCursorPos(&pt);
+    if (g_menu_at_set)
+        pt = g_menu_at;
+    else
+        GetCursorPos(&pt);
     cmd = menu_track(menu, pt.x, pt.y);
     DestroyMenu(menu);
     return cmd;
@@ -13169,14 +13267,21 @@ static void message_menu(int i)
     redraw();
 }
 
-static void channel_menu(int i)
+/* `bell`: the header's bell menu, Discord's: muting, then the notification levels inline. */
+static void channel_menu_as(int i, int bell)
 {
     HMENU menu = CreatePopupMenu();
     const channel_t *c = chan(i);
     int muted = c->muted && (!c->mute_until || c->mute_until > now_ms()), cmd, g = model_channel_guild(g_ui.model, (unsigned)i);
     char id[24];
 
-    if (c->type == CH_CATEGORY) {
+    if (bell) {
+        add_mute_items(menu, muted, L"Channel");
+        if (g >= 0) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+            notify_items(menu, c->notify, c->parent[0] ? L"Use Category Default" : L"Use Server Default");
+        }
+    } else if (c->type == CH_CATEGORY) {
         add_mute_items(menu, muted, L"Category");
         if (g >= 0)
             AppendMenuW(menu, MF_POPUP, (UINT_PTR)notify_menu(c->notify, L"Use Server Default"), L"Notification Settings");
@@ -13233,6 +13338,11 @@ static void channel_menu(int i)
     }
     update_title();
     redraw();
+}
+
+static void channel_menu(int i)
+{
+    channel_menu_as(i, 0);
 }
 
 static void guild_menu(int g)
@@ -14518,6 +14628,16 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (open_is_text() && y < S(HEADER_H) && x >= pins_button_x() && x < pins_button_x() + S(32)) {
                     pins_toggle(0);
                     redraw();
+                    return 0;
+                }
+                if (open_is_text() && y < S(HEADER_H) && x >= header_button_x(HB_BELL) && x < header_button_x(HB_BELL) + S(32)) {
+                    /* under the bell, as Discord's popout */
+                    POINT pt = {header_button_x(HB_BELL), S(HEADER_H) - S(4)};
+                    ClientToScreen(g_ui.wnd, &pt);
+                    g_menu_at = pt;
+                    g_menu_at_set = 1;
+                    channel_menu_as(g_ui.channel, 1);
+                    g_menu_at_set = 0;
                     return 0;
                 }
                 if (open_is_text() && y < S(HEADER_H) && x >= header_button_x(HB_VIDEO) && x < header_button_x(HB_VIDEO) + S(32)) {
