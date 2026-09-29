@@ -373,10 +373,8 @@ out:
     mls_key_package_free(&kp);
     sb_free(&gsb);
     sb_free(&gib);
-    if (!ok) {
+    if (!ok)
         mls_group_free(g);
-        g->psks = NULL;
-    }
     return ok;
 }
 
@@ -428,7 +426,7 @@ static void add_unmerged(mls_node_t *node, unsigned leaf)
     node->nunmerged++;
 }
 
-static int apply_add(const mls_group_t *g, mls_tree_t *t, const mls_proposal_t *p, applied_t *a)
+static int apply_add(mls_tree_t *t, const mls_proposal_t *p, applied_t *a)
 {
     mls_key_package_t kp;
     tls_reader_t r;
@@ -457,7 +455,6 @@ static int apply_add(const mls_group_t *g, mls_tree_t *t, const mls_proposal_t *
         a->added[a->nadded] = i;
         a->added_kp[a->nadded++] = p->body;
     }
-    (void)g;
     mls_key_package_free(&kp);
     return ok;
 }
@@ -532,7 +529,7 @@ static int apply_proposals(const mls_group_t *g, mls_tree_t *t, const resolved_t
         mls_tree_truncate(t);
     for (int i = 0; ok && i < n; i++)
         if (list[i].p.type == MLS_PROPOSAL_ADD)
-            ok = apply_add(g, t, &list[i].p, a);
+            ok = apply_add(t, &list[i].p, a);
     for (int i = 0; ok && i < n; i++)
         if (list[i].p.type == MLS_PROPOSAL_PSK) {
             tls_reader_t r;
@@ -611,7 +608,7 @@ static int process_commit(mls_group_t *g, const mls_content_t *m)
     mls_bytes_t ext = bytes_of(&g->extensions);
     mls_epoch_t keys;
     sb_t gc = {0};
-    int ok = 0, applied = 0;
+    int ok = 0;
 
     tls_reader(&r, m->content.p, m->content.n);
     if (m->sender_type != MLS_SENDER_MEMBER || !mls_commit_read(&c, &r))
@@ -620,7 +617,6 @@ static int process_commit(mls_group_t *g, const mls_content_t *m)
     mls_tree_copy(&t, &g->tree);
     if (!resolve(g, &c, committer, list))
         goto out;
-    applied = 1;
     if (!apply_proposals(g, &t, list, c.n, committer, &a) || (a.path_required && !c.has_path))
         goto out;
     if (a.has_ext)
@@ -675,8 +671,7 @@ static int process_commit(mls_group_t *g, const mls_content_t *m)
 out:
     secure_wipe(commit_secret, sizeof commit_secret);
     secure_wipe(&keys, sizeof keys);
-    if (applied)
-        applied_free(&a);
+    applied_free(&a);
     mls_tree_free(&t);
     mem_free(list);
     mls_commit_free(&c);
@@ -800,7 +795,6 @@ static int make_welcome(const mls_group_t *next, const applied_t *a, const mls_p
         tls_vec(&secrets, kem, 65);
         tls_vec(&secrets, ct.data, ct.len);
         mls_key_package_free(&kp);
-        secure_wipe(gs.data, gs.len);
         sb_free(&gs);
         sb_free(&ids);
         sb_free(&ct);
@@ -811,7 +805,6 @@ static int make_welcome(const mls_group_t *next, const applied_t *a, const mls_p
         tls_vec(out, egi.data, egi.len);
     }
     secure_wipe(key, sizeof key);
-    secure_wipe(gi.data, gi.len);
     sb_free(&gi);
     sb_free(&ext);
     sb_free(&tree);
@@ -831,7 +824,7 @@ int mls_group_commit(const mls_group_t *g, sb_t *commit, sb_t *welcome, mls_grou
     mls_bytes_t ext = bytes_of(&g->extensions);
     unsigned char commit_secret[32], psk[32], th[32], cth[32], tag[32], mtag[32];
     sb_t gc = {0}, path = {0}, body = {0}, framed = {0}, tbs = {0}, sig = {0}, auth = {0};
-    int ok = 0, applied = 0;
+    int ok = 0;
 
     memset(next, 0, sizeof *next);
     for (int i = 0; i < g->nprops; i++) {
@@ -843,7 +836,6 @@ int mls_group_commit(const mls_group_t *g, sb_t *commit, sb_t *welcome, mls_grou
         list[i].sender = g->props[i].sender;
     }
     mls_tree_copy(&t, &g->tree);
-    applied = 1;
     if (!apply_proposals(g, &t, list, g->nprops, g->me, &a) || a.removed_me)
         goto out;
     if (a.has_ext)
@@ -927,8 +919,7 @@ int mls_group_commit(const mls_group_t *g, sb_t *commit, sb_t *welcome, mls_grou
 out:
     secure_wipe(commit_secret, sizeof commit_secret);
     secure_wipe(&ps, sizeof ps);
-    if (applied)
-        applied_free(&a);
+    applied_free(&a);
     if (!ok)
         mls_group_free(next);
     mls_tree_free(&t);
