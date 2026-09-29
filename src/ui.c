@@ -868,30 +868,41 @@ static void paint_loading(RECT rc)
 
 /*
  * Rail layout: home, then guilds, with folders shown as one icon when closed,
- * or as a folder icon followed by their guilds when open. Fills kind/index/y
- * for each row (RAIL_GUILD: guild index, RAIL_FOLDER: folder index); returns the count.
+ * or as a folder icon followed by their guilds when open. rail_rows() fills
+ * g_rail with kind/index/y for each row (RAIL_GUILD: guild index, RAIL_FOLDER:
+ * folder index) and returns the count.
  */
 enum { RAIL_GUILD, RAIL_FOLDER };
+#define RAIL_MAX 512
 
-static int rail_rows(int *kind, int *index, int *ys, int max)
+static struct {
+    int kind[RAIL_MAX], index[RAIL_MAX], y[RAIL_MAX];
+} g_rail;
+
+static int folder_is_open(int f)
+{
+    return f < (int)sizeof g_ui.folder_open && g_ui.folder_open[f];
+}
+
+static int rail_rows(void)
 {
     const model_t *m = g_ui.model;
     int n = 0, y = S(12) + S(RAIL_STEP) + S(12) - g_ui.rail_scroll;
 
-    for (unsigned i = 0; m && i < m->nguilds && n < max; i++) {
+    for (unsigned i = 0; m && i < m->nguilds && n < RAIL_MAX; i++) {
         int f = m->guilds[i].folder;
         if (f >= 0 && (i == 0 || m->guilds[i - 1].folder != f)) {
-            kind[n] = RAIL_FOLDER;
-            index[n] = f;
-            ys[n++] = y;
+            g_rail.kind[n] = RAIL_FOLDER;
+            g_rail.index[n] = f;
+            g_rail.y[n++] = y;
             y += S(RAIL_STEP);
         }
-        if (f >= 0 && !(f < (int)sizeof g_ui.folder_open && g_ui.folder_open[f]))
+        if (f >= 0 && !folder_is_open(f))
             continue; /* closed folder */
-        if (n < max) {
-            kind[n] = RAIL_GUILD;
-            index[n] = (int)i;
-            ys[n++] = y;
+        if (n < RAIL_MAX) {
+            g_rail.kind[n] = RAIL_GUILD;
+            g_rail.index[n] = (int)i;
+            g_rail.y[n++] = y;
             y += S(RAIL_STEP);
         }
     }
@@ -900,38 +911,33 @@ static int rail_rows(int *kind, int *index, int *ys, int max)
 
 static int rail_y(int i) /* i = -1 for home; a guild in a closed folder gives its folder's row */
 {
-    static int kind[512], index[512], ys[512];
     int n;
 
     if (i < 0)
         return S(12) - g_ui.rail_scroll;
-    n = rail_rows(kind, index, ys, 512);
+    n = rail_rows();
     for (int k = 0; k < n; k++)
-        if (kind[k] == RAIL_GUILD && index[k] == i)
-            return ys[k];
+        if (g_rail.kind[k] == RAIL_GUILD && g_rail.index[k] == i)
+            return g_rail.y[k];
     for (int k = 0; k < n; k++)
-        if (kind[k] == RAIL_FOLDER && index[k] == g_ui.model->guilds[i].folder)
-            return ys[k];
+        if (g_rail.kind[k] == RAIL_FOLDER && g_rail.index[k] == g_ui.model->guilds[i].folder)
+            return g_rail.y[k];
     return -10000;
 }
 
 static int rail_folder_y(int f)
 {
-    static int kind[512], index[512], ys[512];
-    int n = rail_rows(kind, index, ys, 512);
+    int n = rail_rows();
 
     for (int k = 0; k < n; k++)
-        if (kind[k] == RAIL_FOLDER && index[k] == f)
-            return ys[k];
+        if (g_rail.kind[k] == RAIL_FOLDER && g_rail.index[k] == f)
+            return g_rail.y[k];
     return -10000;
 }
 
 static int rail_content(void)
 {
-    static int kind[512], index[512], ys[512];
-    int n = rail_rows(kind, index, ys, 512);
-
-    return S(12) + (n + 1) * S(RAIL_STEP) + S(12) + S(12);
+    return S(12) + (rail_rows() + 1) * S(RAIL_STEP) + S(12) + S(12);
 }
 
 static const channel_t *chan(int i)
@@ -1570,16 +1576,12 @@ static void hit_test(int x, int y, int *kind, int *index)
             *kind = HIT_HOME;
             return;
         }
-        {
-            static int rk[512], ri[512], ry[512];
-            int n = rail_rows(rk, ri, ry, 512);
-            for (int k = 0; k < n; k++)
-                if (y >= ry[k] && y < ry[k] + S(ICON)) {
-                    *kind = rk[k] == RAIL_GUILD ? HIT_GUILD : HIT_FOLDER;
-                    *index = ri[k];
-                    return;
-                }
-        }
+        for (int k = 0, n = rail_rows(); k < n; k++)
+            if (y >= g_rail.y[k] && y < g_rail.y[k] + S(ICON)) {
+                *kind = g_rail.kind[k] == RAIL_GUILD ? HIT_GUILD : HIT_FOLDER;
+                *index = g_rail.index[k];
+                return;
+            }
     } else if (x < S(RAIL_W + SIDE_W)) {
         int top = rc.bottom - S(PANEL_H) + (S(PANEL_H) - S(32)) / 2;
         int right = S(RAIL_W + SIDE_W) - S(8);
@@ -1739,7 +1741,7 @@ static void paint_pill(int y, int height)
 
 static void paint_rail(RECT rc)
 {
-    int x = (S(RAIL_W) - S(ICON)) / 2;
+    int x = (S(RAIL_W) - S(ICON)) / 2, n = rail_rows();
     int home_y = rail_y(-1), sel_home = g_ui.guild < 0, hov_home = g_ui.hover_kind == HIT_HOME;
 
     fill(0, 0, S(RAIL_W), rc.bottom, C_RAIL);
@@ -1760,85 +1762,82 @@ static void paint_rail(RECT rc)
     }
     fill(x + S(8), home_y + S(ICON) + S(10), S(32), S(2), C_LINE);
 
-    {
-        static int rk[512], ri[512], ry[512];
-        int n = rail_rows(rk, ri, ry, 512);
-        /* Open folders: a tinted column behind the folder and its servers. */
-        for (int k = 0; k < n; k++) {
-            if (rk[k] != RAIL_FOLDER || !(ri[k] < (int)sizeof g_ui.folder_open && g_ui.folder_open[ri[k]]))
-                continue;
-            {
-                int end = k + 1;
-                const folder_t *f = &g_ui.model->folders[ri[k]];
-                unsigned c = f->has_color ? f->color : 0x5865F2;
-                while (end < n && rk[end] == RAIL_GUILD && g_ui.model->guilds[ri[end]].folder == ri[k])
-                    end++;
-                r_round(x - S(4), ry[k] - S(4), S(ICON) + S(8), ry[end - 1] + S(ICON) + S(4) - (ry[k] - S(4)), S(16),
-                        0x33000000u | (c & 0xFFFFFF));
-            }
+    /* Open folders: a tinted column behind the folder and its servers. */
+    for (int k = 0; k < n; k++) {
+        if (g_rail.kind[k] != RAIL_FOLDER || !folder_is_open(g_rail.index[k]))
+            continue;
+        {
+            int end = k + 1;
+            const folder_t *f = &g_ui.model->folders[g_rail.index[k]];
+            unsigned c = f->has_color ? f->color : 0x5865F2;
+            while (end < n && g_rail.kind[end] == RAIL_GUILD &&
+                   g_ui.model->guilds[g_rail.index[end]].folder == g_rail.index[k])
+                end++;
+            r_round(x - S(4), g_rail.y[k] - S(4), S(ICON) + S(8), g_rail.y[end - 1] + S(ICON) + S(4) - (g_rail.y[k] - S(4)),
+                    S(16), 0x33000000u | (c & 0xFFFFFF));
         }
-        for (int k = 0; k < n; k++) {
-            int y = ry[k];
-            if (rk[k] != RAIL_FOLDER || y + S(ICON) < 0 || y > rc.bottom)
-                continue;
-            {
-                int f = ri[k], open = f < (int)sizeof g_ui.folder_open && g_ui.folder_open[f];
-                const folder_t *fd = &g_ui.model->folders[f];
-                unsigned c = fd->has_color ? fd->color : 0x5865F2;
-                int hov = g_ui.hover_kind == HIT_FOLDER && g_ui.hover_index == f, unread = 0, mentions = 0, sel = 0, j = 0;
-                for (unsigned g = 0; g < g_ui.model->nguilds; g++)
-                    if (g_ui.model->guilds[g].folder == f) {
-                        int u, mm;
-                        guild_state((int)g, &u, &mm);
-                        unread |= u;
-                        mentions += mm;
-                        sel |= g_ui.guild == (int)g;
+    }
+    for (int k = 0; k < n; k++) {
+        int y = g_rail.y[k];
+        if (g_rail.kind[k] != RAIL_FOLDER || y + S(ICON) < 0 || y > rc.bottom)
+            continue;
+        {
+            int f = g_rail.index[k], open = folder_is_open(f);
+            const folder_t *fd = &g_ui.model->folders[f];
+            unsigned c = fd->has_color ? fd->color : 0x5865F2;
+            int hov = g_ui.hover_kind == HIT_FOLDER && g_ui.hover_index == f, unread = 0, mentions = 0, sel = 0, j = 0;
+            for (unsigned g = 0; g < g_ui.model->nguilds; g++)
+                if (g_ui.model->guilds[g].folder == f) {
+                    int u, mm;
+                    guild_state((int)g, &u, &mm);
+                    unread |= u;
+                    mentions += mm;
+                    sel |= g_ui.guild == (int)g;
+                }
+            if (open) {
+                text_w(g_ui.f_icon_mid, C_INK, rect(x, y, S(ICON), S(ICON)), L"\xE8B7", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                /* folder glyph tinted with its color */
+                r_round(x + S(14), y + S(30), S(20), S(3), S(1), 0xFF000000u | c);
+            } else {
+                /* Closed: up to four of its icons in a grid, like Discord. */
+                r_round(x, y, S(ICON), S(ICON), S(16), hov ? 0x66000000u | c : 0x40000000u | c);
+                for (unsigned g = 0; g < g_ui.model->nguilds && j < 4; g++) {
+                    if (g_ui.model->guilds[g].folder != f)
+                        continue;
+                    {
+                        int gx = x + S(6) + (j % 2) * S(19), gy = y + S(6) + (j / 2) * S(19);
+                        r_image_t *img = guild_icon(&g_ui.model->guilds[g]);
+                        if (img)
+                            r_image(img, gx, gy, S(17), S(17), S(9));
+                        else
+                            r_circle(gx, gy, S(17), ARGB(C_ITEM));
                     }
-                if (open) {
-                    text_w(g_ui.f_icon_mid, C_INK, rect(x, y, S(ICON), S(ICON)), L"\xE8B7", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                    /* folder glyph tinted with its color */
-                    r_round(x + S(14), y + S(30), S(20), S(3), S(1), 0xFF000000u | c);
-                } else {
-                    /* Closed: up to four of its icons in a grid, like Discord. */
-                    r_round(x, y, S(ICON), S(ICON), S(16), hov ? 0x66000000u | c : 0x40000000u | c);
-                    for (unsigned g = 0; g < g_ui.model->nguilds && j < 4; g++) {
-                        if (g_ui.model->guilds[g].folder != f)
-                            continue;
-                        {
-                            int gx = x + S(6) + (j % 2) * S(19), gy = y + S(6) + (j / 2) * S(19);
-                            r_image_t *img = guild_icon(&g_ui.model->guilds[g]);
-                            if (img)
-                                r_image(img, gx, gy, S(17), S(17), S(9));
-                            else
-                                r_circle(gx, gy, S(17), ARGB(C_ITEM));
-                        }
-                        j++;
-                    }
-                    if (sel)
-                        paint_pill(y, S(40));
-                    else if (hov)
-                        paint_pill(y, S(20));
-                    else if (unread || mentions)
-                        paint_pill(y, S(8));
-                    if (mentions) {
-                        r_circle(x + S(ICON) - S(20), y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
-                        paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
-                    }
+                    j++;
+                }
+                if (sel)
+                    paint_pill(y, S(40));
+                else if (hov)
+                    paint_pill(y, S(20));
+                else if (unread || mentions)
+                    paint_pill(y, S(8));
+                if (mentions) {
+                    r_circle(x + S(ICON) - S(20), y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
+                    paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
                 }
             }
         }
     }
 
-    for (int i = 0; g_ui.model && i < (int)g_ui.model->nguilds; i++) {
-        const guild_t *gd = &g_ui.model->guilds[i];
-        int y = rail_y(i), sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i;
+    for (int k = 0; k < n; k++) {
+        int i = g_rail.index[k], y = g_rail.y[k];
+        int sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i;
         int radius = sel || hov ? S(16) : S(ICON) / 2;
+        const guild_t *gd;
         r_image_t *img;
 
-        if (gd->folder >= 0 && !(gd->folder < (int)sizeof g_ui.folder_open && g_ui.folder_open[gd->folder]))
-            continue; /* inside a closed folder */
-        if (y + S(ICON) < 0 || y > rc.bottom)
+        if (g_rail.kind[k] != RAIL_GUILD || y + S(ICON) < 0 || y > rc.bottom)
             continue;
+        gd = &g_ui.model->guilds[i];
         img = guild_icon(gd);
         if (img) {
             r_image(img, x, y, S(ICON), S(ICON), radius);
