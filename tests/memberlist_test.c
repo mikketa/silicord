@@ -68,8 +68,13 @@ void entry(void)
     check(lstrcmpA(l.items[3].avatar, "own") == 0 && lstrcmpA(l.items[3].member_avatar, "srv") == 0,
           "the server avatar is kept apart from the user's own");
 
-    check(apply(&l, "{\"guild_id\":\"2\",\"id\":\"everyone\",\"ops\":[]}") && l.n == 0 && lstrcmpA(l.guild, "2") == 0,
-          "another server starts over");
+    check(!apply(&l, "{\"guild_id\":\"1\",\"id\":\"123\",\"ops\":[{\"op\":\"UPDATE\",\"index\":1,\"item\":"
+                     "{\"member\":{\"user\":{\"id\":\"12\",\"username\":\"other\"},\"roles\":[]}}}]}") &&
+              member_is(&l, 3, "11", "solo") && l.n == 100 && lstrcmpA(l.list_id, "everyone") == 0,
+          "updates to another list leave ours alone");
+    check(apply(&l, "{\"guild_id\":\"2\",\"id\":\"everyone\",\"ops\":[{\"op\":\"SYNC\",\"range\":[0,99],\"items\":[]}]}") &&
+              l.n == 100 && !l.items[3].valid && lstrcmpA(l.guild, "2") == 0,
+          "another server starts over with its sync");
     ml_free(&l);
     finish();
 }

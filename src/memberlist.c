@@ -160,6 +160,21 @@ int ml_apply(ml_t *l, json_t d)
     get_raw(d, "guild_id", guild, sizeof guild);
     get_raw(d, "id", id, sizeof id);
     if (lstrcmpA(guild, l->guild) != 0 || lstrcmpA(id, l->list_id) != 0) {
+        /*
+         * Another list (the channel open before, or one with other permissions)
+         * only replaces ours with a SYNC: its updates alone would leave a list
+         * of empty rows around the one member they touch.
+         */
+        int sync = 0;
+        if (json_get(d, "ops", &ops)) {
+            json_iter(ops, &it);
+            while (!sync && json_next(&it, NULL, &op)) {
+                json_t kind;
+                sync = json_get(op, "op", &kind) && json_str_eq(kind, "SYNC");
+            }
+        }
+        if (!sync)
+            return 0;
         ml_free(l);
         lstrcpynA(l->guild, guild, sizeof l->guild);
         lstrcpynA(l->list_id, id, sizeof l->list_id);
