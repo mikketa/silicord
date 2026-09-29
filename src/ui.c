@@ -12894,24 +12894,25 @@ static void paint_settings(RECT rc)
         if (k == 0 || k == SET_VOICE || k == SET_ABOUT) {
             if (k)
                 y += S(12);
-            text(g_ui.f_cat, C_FAINT, rect(S(28), y, nav - S(40), S(28)),
+            text(g_ui.f_cat, C_CHANNEL, rect(S(28), y, nav - S(40), S(28)), /* headers: channels-default */
                  k == 0 ? "USER SETTINGS" : k == SET_VOICE ? "APP SETTINGS" : "SILICORD", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             y += S(30);
         }
+        /* Discord's items: 6 above and below a 24px line, 10 in, rounded 4, 2 apart; text-subtle, text-strong when on */
         if (sel || hov)
-            r_round(S(16), y, nav - S(32), S(34), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
-        text(g_ui.f_body, sel || hov ? C_INK : C_MUTED, rect(S(28), y, nav - S(56), S(34)), pages[k],
+            r_round(S(16), y, nav - S(32), S(36), S(4), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        text(g_ui.f_chan, sel || hov ? C_INK : C_MUTED, rect(S(26), y, nav - S(52), S(36)), pages[k],
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        set_hit(S(16), y, nav - S(32), S(34), SH_PAGE + k);
+        set_hit(S(16), y, nav - S(32), S(36), SH_PAGE + k);
         y += S(38);
     }
     fill(S(28), y + S(8), nav - S(56), 1, C_LINE);
     y += S(20);
     if (g_ui.settings_hover == SH_LOGOUT)
-        r_round(S(16), y, nav - S(32), S(34), S(6), ARGB(C_HOVER));
-    text(g_ui.f_body, C_INK, rect(S(28), y, nav - S(56), S(34)), "Log Out", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    text_w(g_ui.f_icon, C_MUTED, rect(nav - S(52), y, S(24), S(34)), ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    set_hit(S(16), y, nav - S(32), S(34), SH_LOGOUT);
+        r_round(S(16), y, nav - S(32), S(36), S(4), ARGB(C_HOVER));
+    text(g_ui.f_chan, C_INK, rect(S(26), y, nav - S(52), S(36)), "Log Out", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text_w(g_ui.f_icon, C_MUTED, rect(nav - S(52), y, S(24), S(36)), ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    set_hit(S(16), y, nav - S(32), S(36), SH_LOGOUT);
 
     /* Close, with the Esc hint under it. */
     {
@@ -12920,7 +12921,8 @@ static void paint_settings(RECT rc)
                         g_ui.settings_hover == SH_CLOSE ? ARGB(C_INK) : ARGB(C_MUTED));
         text_w(g_ui.f_icon, g_ui.settings_hover == SH_CLOSE ? C_INK : C_MUTED, rect(cx, cy, S(36), S(36)), L"\xE711", -1,
                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        text(g_ui.f_cat, C_FAINT, rect(cx - S(8), cy + S(40), S(52), S(20)), "ESC", DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_cat, g_ui.settings_hover == SH_CLOSE ? C_INK : C_MUTED, rect(cx - S(8), cy + S(40), S(52), S(20)), "ESC",
+             DT_CENTER | DT_SINGLELINE); /* interactive-text-default, as the button */
         set_hit(cx, cy, S(36), S(36), SH_CLOSE);
     }
 
