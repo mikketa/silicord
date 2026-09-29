@@ -75,6 +75,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define RAIL_STEP 48
 #define RAIL_FIRST 56 /* the first server, under home and its separator */
 #define PANEL_GAP 8   /* around the floating user panel */
+#define SEARCH_W 244  /* the chat header search box */
 #define SIDE_W 240
 #define HEADER_H 48
 #define PANEL_H 56
@@ -191,7 +192,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -209,6 +210,7 @@ typedef struct {
     int last_dm;
     unsigned char *collapsed;  /* per channel (categories) */
     int rail_scroll, side_scroll;
+    int camera_on_connect; /* the video button started the call: the camera follows */
     int home_page; /* HOME_*: what home shows when no conversation is open */
     unsigned char folder_open[64];
     int hover_kind, hover_index;
@@ -1065,6 +1067,68 @@ static r_image_t *dm_icon(const channel_t *c)
     wsprintfA(key, "c:%s:%s", c->id, c->avatar);
     wsprintfA(path, "/channel-icons/%s/%s.png?size=64", c->id, c->avatar);
     return image_get(key, path, S(40));
+}
+
+static void initials(const char *name, wchar_t *out, int max);
+
+/* The next member of a group DM from model_t.recipients ("id\tavatar\tname\n"), or NULL at the end. */
+static const char *recip_next(const char *p, char *id, char *avatar, char *name, int name_size)
+{
+    int n;
+
+    if (!p || !*p)
+        return NULL;
+    for (n = 0; *p && *p != '\t' && n < 23; p++)
+        id[n++] = *p;
+    id[n] = 0;
+    p += *p == '\t';
+    for (n = 0; *p && *p != '\t' && n < 39; p++)
+        avatar[n++] = *p;
+    avatar[n] = 0;
+    p += *p == '\t';
+    for (n = 0; *p && *p != '\n'; p++)
+        if (n < name_size - 1)
+            name[n++] = *p;
+    name[n] = 0;
+    return p + (*p == '\n');
+}
+
+/*
+ * A DM's picture at (x, y), d wide: the group's icon or the other person; a
+ * group without one shows two of its members, one over the other, as in
+ * Discord. `bg` is what it sits on, for the ring around the second face.
+ */
+static void paint_dm_icon(const channel_t *c, int x, int y, int d, unsigned bg)
+{
+    r_image_t *img = dm_icon(c);
+
+    if (img) {
+        r_image(img, x, y, d, d, d / 2);
+    } else if (c->recipients) {
+        const char *p = model_str(g_ui.model, c->recipients);
+        char id[2][24] = {"", ""}, av[2][40] = {"", ""}, name[8];
+        int f = d * 5 / 8, off = d - f;
+        for (int k = 0; k < 2 && (p = recip_next(p, id[k], av[k], name, sizeof name)) != NULL; k++)
+            ;
+        for (int k = 0; k < 2; k++) {
+            int fx = x + (k ? off : 0), fy = y + (k ? off : 0);
+            r_image_t *face = id[k][0] ? user_avatar(id[k], av[k]) : NULL;
+            if (k && !id[k][0])
+                break;
+            if (k)
+                r_circle(fx - d / 16, fy - d / 16, f + d / 8, bg);
+            if (face)
+                r_image(face, fx, fy, f, f, f / 2);
+            else
+                r_circle(fx, fy, f, ARGB(C_ITEM));
+        }
+    } else {
+        const char *name = model_str(g_ui.model, c->name);
+        wchar_t ini[8];
+        initials(name, ini, 8);
+        r_circle(x, y, d, ARGB(C_ITEM));
+        text_w(d > S(28) ? g_ui.f_small : g_ui.f_cat, C_INK, rect(x, y, d, d), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 }
 
 /* ---- Login view ---- */
@@ -2413,43 +2477,8 @@ static void paint_channel_row(unsigned i, int y)
     if (is_dm_type(c->type)) {
         r_image_t *img = dm_icon(c);
         unsigned bg = row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(DM_ROW_H) - S(2), S(8));
-        if (img) {
-            r_image(img, x + S(8), y + S(6), S(32), S(32), S(16));
-        } else if (c->faces) {
-            /* A group without a picture: two of its members, one over the other, as in Discord. */
-            const char *f = model_str(g_ui.model, c->faces);
-            char id[2][24] = {"", ""}, av[2][40] = {"", ""};
-            for (int k = 0; k < 2 && *f; k++) {
-                int n = 0;
-                while (*f && *f != ' ' && n < 23)
-                    id[k][n++] = *f++;
-                id[k][n] = 0;
-                if (*f == ' ')
-                    f++;
-                n = 0;
-                while (*f && *f != '\n' && n < 39)
-                    av[k][n++] = *f++;
-                av[k][n] = 0;
-                if (*f == '\n')
-                    f++;
-            }
-            for (int k = 0; k < 2; k++) {
-                int fx = x + S(8) + (k ? S(12) : 0), fy = y + S(6) + (k ? S(12) : 0), d = S(20);
-                r_image_t *face = id[k][0] ? user_avatar(id[k], av[k]) : NULL;
-                if (k)
-                    r_circle(fx - S(2), fy - S(2), d + S(4), bg);
-                if (face)
-                    r_image(face, fx, fy, d, d, d / 2);
-                else if (id[k][0] || !k)
-                    r_circle(fx, fy, d, ARGB(C_ITEM));
-            }
-        } else {
-            wchar_t ini[8];
-            initials(name, ini, 8);
-            r_circle(x + S(8), y + S(6), S(32), ARGB(C_ITEM));
-            text_w(g_ui.f_small, C_INK, rect(x + S(8), y + S(6), S(32), S(32)), ini, -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
+        (void)img;
+        paint_dm_icon(c, x + S(8), y + S(6), S(32), bg);
         {
             int unread = channel_unread(i), badge = c->mentions ? S(30) : 0;
             presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
@@ -2742,7 +2771,42 @@ static void place_friend_input(void);
 static const char *const k_status_codes[] = {"online", "idle", "dnd", "invisible"};
 static const char *const k_status_names[] = {"Online", "Idle", "Do Not Disturb", "Invisible"};
 static const int k_status_states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
-static int inbox_button_x(void);
+static int search_box_x(void);
+static int members_shown(void);
+
+/* The chat header's buttons, right to left from the search box, as in Discord. */
+enum { HB_MEMBERS, HB_PINS, HB_VIDEO, HB_CALL, HB_COUNT };
+
+static int header_buttons(int *out)
+{
+    const channel_t *c;
+    int n = 0;
+
+    if (!g_ui.model || g_ui.channel < 0 || g_ui.view != VIEW_APP)
+        return 0;
+    c = chan(g_ui.channel);
+    if (is_voice_type(c->type))
+        return 0;
+    if (g_ui.guild >= 0 || c->type == CH_GROUP_DM)
+        out[n++] = HB_MEMBERS;
+    out[n++] = HB_PINS;
+    if (is_dm_type(c->type)) {
+        out[n++] = HB_VIDEO;
+        out[n++] = HB_CALL;
+    }
+    return n;
+}
+
+/* Left edge of a header button's 32 wide box, far off when it is not shown. */
+static int header_button_x(int kind)
+{
+    int k[HB_COUNT], n = header_buttons(k);
+
+    for (int i = 0; i < n; i++)
+        if (k[i] == kind)
+            return search_box_x() - S(12) - S(32) - i * S(40);
+    return -100000;
+}
 static void paint_pins(void);
 static void pins_close(void);
 static int divider_h(const msg_t *m);
@@ -2769,7 +2833,11 @@ static void typing_clear(void);
 static void on_typing(const sb_t *p);
 
 #define GROUP_MS (7 * 60 * 1000)
-#define COMPOSER_H 44
+#define COMPOSER_H 56
+#define COMPOSER_GAP 8   /* around the box, as in Discord */
+#define TYPING_H 24      /* above the box: "X is typing..." */
+/* The composer's buttons, right to left: emoji, stickers, GIFs. */
+enum { CB_NONE, CB_EMOJI, CB_STICKER, CB_GIF, CB_COUNT };
 #define WELCOME_H 190
 
 static int is_voice_type(int type)
@@ -2845,7 +2913,7 @@ static RECT message_area(void)
     r.left = S(RAIL_W + SIDE_W);
     r.right = main_right();
     r.top = S(HEADER_H) + call_h();
-    r.bottom = rc.bottom - S(24) - S(COMPOSER_H) - S(8) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
+    r.bottom = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H) - S(TYPING_H) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
     return r;
 }
 
@@ -2870,6 +2938,8 @@ static int pings_me(const msg_t *m)
         return 0;
     if (m->mention_everyone)
         return 1;
+    if (m->reply_pings && lstrcmpA(m->reply_author, g_ui.model->user_id) == 0)
+        return 1; /* a reply to us, with its ping on */
     wsprintfA(tag, "<@%s>", g_ui.model->user_id);
     if (find_str(s, tag))
         return 1;
@@ -4327,9 +4397,34 @@ static void paint_message(int i, int x0, int y, int w)
         RECT nr;
 
         if (m->reply.len) {
-            fill(x0 + S(36), ny + S(10), S(2), S(14), C_LINE);
-            fill(x0 + S(36), ny + S(10), S(26), S(2), C_LINE);
-            text(g_ui.f_small, C_MUTED, rect(tx, ny, tw, S(20)), m->reply.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            /* The spine from the avatar up to the message replied to, then its author's picture, "@name" and first line. */
+            int th = S(2) > 2 ? S(2) : 2, sx = x0 + S(35), rx = tx;
+            unsigned spine = 0xFF3F4046u;
+            r_clip(sx, ny + S(10), S(30), S(12));
+            r_round_outline(sx, ny + S(10), S(80), S(80), S(6), th, spine);
+            r_unclip();
+            if (m->reply_author[0]) {
+                r_image_t *face = user_avatar(m->reply_author, m->reply_avatar);
+                char name[128];
+                int nl = m->reply_name_len < (int)sizeof name - 2 ? m->reply_name_len : (int)sizeof name - 2, nw;
+                if (face)
+                    r_image(face, rx, ny + S(2), S(16), S(16), S(8));
+                else
+                    r_circle(rx, ny + S(2), S(16), ARGB(C_ITEM));
+                rx += S(20);
+                name[0] = '@';
+                lstrcpynA(name + 1, m->reply.data, nl + 1);
+                if (!m->reply_pings)
+                    lstrcpynA(name, m->reply.data, nl + 1);
+                nw = text_width(g_ui.f_small_mid, name);
+                text(g_ui.f_small_mid, C_INK, rect(rx, ny, tw - (rx - tx), S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                rx += nw + S(4);
+                if (rx < tx + tw && m->reply.len > (size_t)nl + 2)
+                    text(g_ui.f_section, C_MUTED, rect(rx, ny, tw - (rx - tx), S(20)), m->reply.data + nl + 2,
+                         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            } else {
+                text(g_ui.f_section, C_MUTED, rect(tx, ny, tw, S(20)), m->reply.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
             ny += S(22);
         }
         img = m->author_id[0] ? user_avatar_anim(m->author_id, m->avatar,
@@ -4479,6 +4574,59 @@ static void paint_voice_grid(RECT rc, int x0, int w, const char *channel)
     }
 }
 
+/* The chat header: the conversation's picture or its "#", its name and topic, then call, video, pins, members and search. */
+static void paint_chat_header(RECT rc, int x0, const channel_t *c, const char *name, int voice)
+{
+    int k[HB_COUNT], n = header_buttons(k), sx = search_box_x(), right = sx - S(12) - n * S(40), tx;
+
+    (void)rc;
+    if (is_dm_type(c->type)) {
+        int ay = (S(HEADER_H) - S(24)) / 2;
+        paint_dm_icon(c, x0 + S(16), ay, S(24), ARGB(C_MAIN));
+        if (c->type == CH_DM && c->user_id[0]) {
+            presence_t *pr = presence_find(c->user_id);
+            paint_status(x0 + S(16), ay, S(24), pr ? pr->status : ML_OFFLINE, ARGB(C_MAIN));
+        }
+        tx = x0 + S(52);
+    } else {
+        if (voice)
+            text_w(g_ui.f_icon_mid, C_FAINT, rect(x0 + S(12), 0, S(28), S(HEADER_H)), ICON_VOLUME, -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        else
+            text(g_ui.f_title, C_FAINT, rect(x0 + S(12), 0, S(28), S(HEADER_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        tx = x0 + S(48);
+    }
+    {
+        int nw = text_width(g_ui.f_h, name), topic = tx + nw + S(16);
+        text(g_ui.f_h, C_INK, rect(tx, 0, right - tx, S(HEADER_H)), name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (c->topic && topic + S(40) < right) {
+            fill(topic - S(8), S(16), S(1) > 1 ? S(1) : 1, S(16), C_LINE);
+            text(g_ui.f_section, C_MUTED, rect(topic + S(8), 0, right - topic - S(8), S(HEADER_H)), model_str(g_ui.model, c->topic),
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        static const wchar_t *const glyphs[HB_COUNT] = {L"\xE716", L"\xE718", L"\xE714", L"\xE717"};
+        int bx = header_button_x(k[i]), on = 0;
+        unsigned ink = 0xFF81828Au; /* icon-muted */
+        if (k[i] == HB_MEMBERS)
+            on = members_shown();
+        else if (k[i] == HB_PINS)
+            on = g_ui.pins_open && !g_ui.pins_inbox;
+        if (on)
+            ink = ARGB(C_INK);
+        if (k[i] == HB_CALL && in_call(c->id))
+            ink = ARGB(C_GREEN);
+        r_text(g_ui.f_icon_mid, ink, bx, 0, S(32), S(HEADER_H), glyphs[k[i]], -1, R_CENTER | R_VCENTER | R_SINGLE);
+    }
+    if (!voice) {
+        r_round(sx, S(8), S(SEARCH_W), S(32), S(8), ARGB(C_MAIN));
+        r_round_outline(sx, S(8), S(SEARCH_W), S(32), S(8), S(1) > 1 ? S(1) : 1, 0xFF242426u);
+        r_text(g_ui.f_icon, 0xFF81828Au, sx + S(SEARCH_W) - S(32), S(8), S(28), S(32), L"\xE721", -1,
+               R_CENTER | R_VCENTER | R_SINGLE);
+    }
+}
+
 static void paint_main(RECT rc)
 {
     int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0;
@@ -4488,38 +4636,16 @@ static void paint_main(RECT rc)
     SetRectEmpty(&g_ui.stream_close);
 
     fill(x0, 0, w, rc.bottom, C_MAIN);
-    fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
+    /* The header runs over the member list too, as in Discord. */
+    fill(x0, 0, rc.right - x0, S(HEADER_H), C_MAIN);
+    fill(x0, S(HEADER_H) - S(1), rc.right - x0, S(1) > 1 ? S(1) : 1, C_LINE);
 
     if (g_ui.model && g_ui.channel >= 0) {
         const channel_t *c = chan(g_ui.channel);
         const char *name = model_str(g_ui.model, c->name);
         int voice = is_voice_type(c->type);
 
-        if (voice)
-            text_w(g_ui.f_icon, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), ICON_VOLUME, -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        else
-            text(g_ui.f_title, C_FAINT, rect(x0 + S(16), 0, S(24), S(HEADER_H)), is_dm_type(c->type) ? "@" : "#",
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        {
-            int nw = text_width(g_ui.f_h, name), right = x0 + w - (is_dm_type(c->type) ? S(136) : S(96)), tx = x0 + S(46) + nw + S(16);
-            text(g_ui.f_h, C_INK, rect(x0 + S(46), 0, right - x0 - S(46), S(HEADER_H)), name,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            if (c->topic && tx + S(40) < right) {
-                fill(tx - S(8), S(16), 1, S(16), C_LINE);
-                text(g_ui.f_small, C_MUTED, rect(tx + S(8), 0, right - tx - S(8), S(HEADER_H)), model_str(g_ui.model, c->topic),
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            }
-            if (is_dm_type(c->type))
-                text_w(g_ui.f_icon, in_call(c->id) ? C_GREEN : C_MUTED, rect(call_button_x(), 0, S(32), S(HEADER_H)), L"\xE717",
-                       -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            if (!voice) {
-                text_w(g_ui.f_icon, g_ui.pins_open && !g_ui.pins_inbox ? C_INK : C_MUTED,
-                       rect(pins_button_x(), 0, S(32), S(HEADER_H)), L"\xE718", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                text_w(g_ui.f_icon, g_ui.pins_open && g_ui.pins_inbox ? C_INK : C_MUTED,
-                       rect(inbox_button_x(), 0, S(32), S(HEADER_H)), L"\xE715", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
-        }
+        paint_chat_header(rc, x0, c, name, voice);
 
         if (voice && in_call(c->id)) {
             paint_voice_grid(rc, x0, w, c->id);
@@ -4539,35 +4665,47 @@ static void paint_main(RECT rc)
         paint_autocomplete();
         paint_pins();
         paint_search();
-        if (g_ui.guild >= 0)
-            text_w(g_ui.f_icon, g_ui.show_members ? C_INK : C_MUTED, rect(x0 + w - S(48), 0, S(32), S(HEADER_H)), L"\xE716",
-                   -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         /* Composer frame; the edit control sits inside it. */
         {
-            int cy = rc.bottom - S(24) - S(COMPOSER_H);
+            int cy = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
             paint_tray(x0, w, cy - (g_ui.bar ? S(BAR_H) : 0));
             paint_bar(x0, w, cy);
             paint_detached(x0, w, cy);
-            r_round(x0 + S(16), cy, w - S(32), S(COMPOSER_H), S(10), 0xFF1F1F1F);
-            /* Attach button, like Discord's "+": a disc with a plus drawn as two bars, so it stays centered. */
+            /* The box: chat-background-default, outlined, as in Discord's current look. */
+            r_round(x0 + S(COMPOSER_GAP), cy, w - 2 * S(COMPOSER_GAP), S(COMPOSER_H), S(8), 0xFF101013u);
+            r_round_outline(x0 + S(COMPOSER_GAP), cy, w - 2 * S(COMPOSER_GAP), S(COMPOSER_H), S(8), S(1) > 1 ? S(1) : 1,
+                            0xFF25252Au);
+            /* Attach: a plain "+", drawn as two bars so it stays centered. */
             {
-                int d = S(24), bx = x0 + S(28), by = cy + (S(COMPOSER_H) - d) / 2, len = S(12), th = S(2) > 2 ? S(2) : 2;
+                int d = S(24), bx = x0 + S(COMPOSER_GAP) + S(16), by = cy + (S(COMPOSER_H) - d) / 2, len = S(16);
+                int th = S(2) > 2 ? S(2) : 2;
                 float t = tween_on(TW_ATTACH, 0, g_ui.hover_attach, TW_FAST, bx, by, d, d);
-                r_circle(bx, by, d, lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t));
-                r_round(bx + (d - len) / 2, by + (d - th) / 2, len, th, th / 2, ARGB(C_PANEL));
-                r_round(bx + (d - th) / 2, by + (d - len) / 2, th, len, th / 2, ARGB(C_PANEL));
+                unsigned ink = lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t);
+                r_round(bx + (d - len) / 2, by + (d - th) / 2, len, th, th / 2, ink);
+                r_round(bx + (d - th) / 2, by + (d - len) / 2, th, len, th / 2, ink);
             }
-            {
-                int open = g_ui.picker && g_ui.picker_mode == PICK_COMPOSER;
-                float t = tween_on(TW_EMOJI, 0, open || g_ui.hover_emoji, TW_FAST, x0 + w - S(60), cy, S(40), S(COMPOSER_H));
-                r_text(g_ui.f_icon_mid, lerp_argb(ARGB(C_MUTED), ARGB(C_BRAND), t), x0 + w - S(60), cy, S(40), S(COMPOSER_H),
-                       L"\xE76E", -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
+            /* GIFs, stickers and emoji open the picker on their tab; lit while it is open there. */
+            for (int b = CB_EMOJI; b < CB_COUNT; b++) {
+                static const wchar_t *const glyphs[CB_COUNT] = {NULL, L"\xE76E", L"\xE8EC", L"\xF4A9"};
+                int bx = x0 + w - S(COMPOSER_GAP) - S(8) - b * S(40), tab = b == CB_EMOJI ? TAB_EMOJI : b == CB_GIF ? TAB_GIFS : TAB_STICKERS;
+                int open = g_ui.picker && g_ui.picker_mode == PICK_COMPOSER && g_ui.picker_tab == tab;
+                float t = tween_on(TW_EMOJI, b, open || g_ui.hover_emoji == b, TW_FAST, bx, cy, S(40), S(COMPOSER_H));
+                if (b == CB_GIF) {
+                    /* "GIF" in a rounded box, like Discord's button */
+                    unsigned ink = lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t);
+                    r_round_outline(bx + S(9), cy + (S(COMPOSER_H) - S(18)) / 2, S(22), S(18), S(4), S(2) > 2 ? S(2) : 2, ink);
+                    r_text(g_ui.f_gif, ink, bx + S(9), cy + (S(COMPOSER_H) - S(18)) / 2, S(22), S(18), L"GIF", -1,
+                           R_CENTER | R_VCENTER | R_SINGLE);
+                } else {
+                    r_text(g_ui.f_icon_mid, lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t), bx, cy, S(40), S(COMPOSER_H), glyphs[b], -1,
+                           R_CENTER | R_VCENTER | R_SINGLE);
+                }
             }
             if (g_ui.send_error.len)
                 text(g_ui.f_small, C_RED, rect(x0 + S(20), cy - S(20) - (g_ui.bar ? S(BAR_H) : 0), w - S(40), S(18)),
                      g_ui.send_error.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-            paint_typing(x0, w, rc.bottom - S(22));
+            paint_typing(x0, w, cy - (g_ui.bar ? S(BAR_H) : 0) - tray_h() - S(TYPING_H) + S(2));
         }
     } else if (friends_view()) {
         fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
@@ -5108,6 +5246,7 @@ static void make_fonts(void)
     g_ui.f_nav = r_font(L"Segoe UI", S(16), FW_SEMIBOLD, 0);
     g_ui.f_section = r_font(L"Segoe UI", S(14), FW_NORMAL, 0);
     g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
+    g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
     build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
@@ -5121,7 +5260,7 @@ static void make_fonts(void)
 
     /* The composer is a real EDIT control: it keeps a GDI font. */
     if (g_ui.composer) {
-        HFONT font = CreateFontW(-S(15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        HFONT font = CreateFontW(-S(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         SendMessageW(g_ui.composer, WM_SETFONT, (WPARAM)font, TRUE);
         if (old)
@@ -5328,9 +5467,10 @@ static void place_composer(void)
 
     GetClientRect(g_ui.wnd, &rc);
     if (show) {
-        int cy = rc.bottom - S(24) - S(COMPOSER_H);
-        int eh = S(22);
-        MoveWindow(g_ui.composer, x0 + S(64), cy + (S(COMPOSER_H) - eh) / 2, main_right() - x0 - S(96) - S(40), eh, TRUE);
+        int cy = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
+        int eh = S(24);
+        MoveWindow(g_ui.composer, x0 + S(COMPOSER_GAP) + S(56), cy + (S(COMPOSER_H) - eh) / 2,
+                   main_right() - x0 - 2 * S(COMPOSER_GAP) - S(56) - (CB_COUNT - 1) * S(40) - S(16), eh, TRUE);
     }
     ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
 }
@@ -5412,7 +5552,8 @@ static void open_channel(int index)
     app_open_channel(c->id);
     app_fetch_messages(c->id, NULL);
 
-    wsprintfA(text, is_dm_type(c->type) ? "Message @%.120s" : "Message #%.120s", model_str(g_ui.model, c->name));
+    wsprintfA(text, c->type == CH_DM ? "Message @%.120s" : c->type == CH_GROUP_DM ? "Message %.120s" : "Message #%.120s",
+              model_str(g_ui.model, c->name));
     hint = utf8_to_wide(text, lstrlenA(text));
     SendMessageW(g_ui.composer, EM_SETCUEBANNER, TRUE, (LPARAM)hint);
     mem_free(hint);
@@ -5897,6 +6038,12 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
             sb_add(&g_ui.voice_status, p->data + 2);
             if (g_ui.voice_state == VOICE_OFF)
                 g_ui.voice_channel[0] = 0;
+            if (g_ui.voice_state == VOICE_CONNECTED && g_ui.camera_on_connect) {
+                g_ui.camera_on_connect = 0;
+                g_ui.voice_camera = app_video_camera(1);
+            }
+            if (g_ui.voice_state != VOICE_CONNECTING && g_ui.voice_state != VOICE_CONNECTED)
+                g_ui.camera_on_connect = 0;
             if (g_ui.voice_state == VOICE_CONNECTED)
                 SetTimer(g_ui.wnd, TIMER_VOICE, 100, NULL);
             else
@@ -7346,12 +7493,12 @@ static void paint_bar(int x0, int w, int cy)
 
     if (!g_ui.bar)
         return;
-    r_round(x0 + S(16), y, w - S(32), S(BAR_H) + S(10), S(10), 0xFF181818);
+    r_round(x0 + S(COMPOSER_GAP), y, w - 2 * S(COMPOSER_GAP), S(BAR_H) + S(10), S(8), 0xFF121214u);
     if (g_ui.bar == BAR_REPLY)
         wsprintfA(line, "Replying to %.100s", g_ui.bar_name.data ? g_ui.bar_name.data : "");
     else
         lstrcpyA(line, "Editing message \xE2\x80\xA2 escape to cancel \xE2\x80\xA2 enter to save");
-    text(g_ui.f_small, C_MUTED, rect(x0 + S(32), y, w - S(160), S(BAR_H)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(24), y, w - S(160), S(BAR_H)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (g_ui.bar == BAR_REPLY) {
         /* Whether the reply pings its author: "@" and a switch whose knob slides across. */
         int zx = x0 + w - S(128), tw = S(34), th = S(20), tx = zx + S(64) - tw - S(4), ty = y + (S(BAR_H) - th) / 2;
@@ -7383,7 +7530,7 @@ static int bar_hit(int x, int y)
         return 0;
     GetClientRect(g_ui.wnd, &rc);
     w = main_right() - x0;
-    cy = rc.bottom - S(24) - S(COMPOSER_H);
+    cy = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
     if (y < cy - S(BAR_H) || y >= cy)
         return 0;
     if (x >= x0 + w - S(56) && x < x0 + w - S(32))
@@ -7403,7 +7550,7 @@ static int click_bar(int x, int y)
         return 0;
     GetClientRect(g_ui.wnd, &rc);
     w = main_right() - x0;
-    cy = rc.bottom - S(24) - S(COMPOSER_H);
+    cy = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
     top = cy - S(BAR_H);
     if (y < top || y >= cy)
         return 0;
@@ -7636,8 +7783,41 @@ static void composer_changed(void)
 
 static int members_shown(void)
 {
-    return g_ui.show_members && g_ui.view == VIEW_APP && g_ui.guild >= 0 && open_is_text();
+    return g_ui.show_members && g_ui.view == VIEW_APP && open_is_text() &&
+           (g_ui.guild >= 0 || chan(g_ui.channel)->type == CH_GROUP_DM);
 }
+
+/* A group DM's members, us included, sorted by name: fills ids, avatars and names, returns how many. */
+#define DM_MEMBERS_MAX 16
+typedef struct {
+    char id[24], avatar[40], name[100];
+} dm_member_t;
+
+static int dm_members(dm_member_t *out)
+{
+    const channel_t *c = chan(g_ui.channel);
+    const char *p = c->recipients ? model_str(g_ui.model, c->recipients) : NULL;
+    int n = 0;
+
+    while (n < DM_MEMBERS_MAX - 1 && (p = recip_next(p, out[n].id, out[n].avatar, out[n].name, sizeof out[n].name)) != NULL)
+        n++;
+    lstrcpynA(out[n].id, g_ui.model->user_id, sizeof out[n].id);
+    lstrcpynA(out[n].avatar, g_ui.model->user_avatar, sizeof out[n].avatar);
+    lstrcpynA(out[n].name, g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name) : "", sizeof out[n].name);
+    n++;
+    for (int a = 1; a < n; a++)
+        for (int b = a; b > 0 && CompareStringA(LOCALE_USER_DEFAULT, NORM_IGNORECASE, out[b - 1].name, -1, out[b].name, -1) ==
+                                     CSTR_GREATER_THAN;
+             b--) {
+            dm_member_t t = out[b];
+            out[b] = out[b - 1];
+            out[b - 1] = t;
+        }
+    return n;
+}
+
+#define DM_MEMBER_H 42
+#define DM_MEMBERS_TOP 44
 
 /* Right edge of the message column. */
 static int main_right(void)
@@ -7729,12 +7909,47 @@ static void group_title(const ml_item_t *it, char *out, int size)
     lstrcpynA(out, buf, size);
 }
 
+/* A group DM's members: "Members—3", then each with their status; those offline are faded, as in Discord. */
+static void paint_dm_members(RECT rc, int x0)
+{
+    static dm_member_t m[DM_MEMBERS_MAX];
+    int n = dm_members(m), y = S(HEADER_H) + S(16);
+    char title[40];
+
+    wsprintfA(title, "Members\xE2\x80\x94%d", n);
+    text(g_ui.f_small_mid, C_MUTED, rect(x0 + S(16), y, S(MEMBERS_W) - S(32), S(20)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    y = S(HEADER_H) + S(DM_MEMBERS_TOP);
+    for (int i = 0; i < n && y < rc.bottom; i++, y += S(DM_MEMBER_H)) {
+        int st = user_status(m[i].id), off = st == ML_OFFLINE || st == ML_UNKNOWN, hov = g_ui.ml_hover == 1000 + i;
+        r_image_t *img = user_avatar(m[i].id, m[i].avatar);
+        unsigned bg = row_bg(TW_MEMBER, 1000 + i, 0, hov, ARGB(C_SIDE), x0 + S(8), y + S(1), S(MEMBERS_W) - S(16),
+                             S(DM_MEMBER_H) - S(2), S(8));
+        int ay = y + (S(DM_MEMBER_H) - S(32)) / 2;
+        wchar_t *name = utf8_to_wide(m[i].name, lstrlenA(m[i].name));
+        if (img)
+            r_image(img, x0 + S(16), ay, S(32), S(32), S(16));
+        else
+            r_circle(x0 + S(16), ay, S(32), ARGB(C_ITEM));
+        if (!off)
+            paint_status(x0 + S(16), ay, S(32), st, bg);
+        else if (!hov)
+            r_circle(x0 + S(16), ay, S(32), 0xB3000000u);
+        r_text(g_ui.f_body, off && !hov ? 0x66DCDCDFu : hov ? ARGB(C_INK) : ARGB(C_MUTED), x0 + S(56), y, S(MEMBERS_W) - S(64),
+               S(DM_MEMBER_H), name, -1, R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
+        mem_free(name);
+    }
+}
+
 static void paint_members(RECT rc)
 {
     int x0 = rc.right - S(MEMBERS_W), y = S(HEADER_H) + S(8) - g_ui.ml_scroll;
 
-    fill(x0, 0, S(MEMBERS_W), rc.bottom, C_SIDE);
-    fill(x0, S(HEADER_H) - 1, S(MEMBERS_W), 1, C_LINE);
+    fill(x0, S(HEADER_H), S(MEMBERS_W), rc.bottom - S(HEADER_H), C_SIDE);
+    fill(x0, S(HEADER_H), S(1) > 1 ? S(1) : 1, rc.bottom - S(HEADER_H), C_LINE);
+    if (g_ui.guild < 0) {
+        paint_dm_members(rc, x0);
+        return;
+    }
     r_clip(x0, S(HEADER_H), S(MEMBERS_W), rc.bottom - S(HEADER_H));
     for (int i = 0; i < g_ui.ml.n; i++) {
         const ml_item_t *it = &g_ui.ml.items[i];
@@ -7801,6 +8016,15 @@ static int ml_hit(int x, int y, int *top)
     GetClientRect(g_ui.wnd, &rc);
     if (x < rc.right - S(MEMBERS_W) || y < S(HEADER_H))
         return -1;
+    if (g_ui.guild < 0) { /* a group DM: 1000 + its place in dm_members() */
+        dm_member_t m[DM_MEMBERS_MAX];
+        int n = dm_members(m), k = (y - S(HEADER_H) - S(DM_MEMBERS_TOP)) / S(DM_MEMBER_H);
+        if (y < S(HEADER_H) + S(DM_MEMBERS_TOP) || k >= n)
+            return -1;
+        if (top)
+            *top = S(HEADER_H) + S(DM_MEMBERS_TOP) + k * S(DM_MEMBER_H);
+        return 1000 + k;
+    }
     for (int i = 0; i < g_ui.ml.n; i++) {
         int h = ml_row_h(&g_ui.ml.items[i]);
         if (y >= yy && y < yy + h) {
@@ -8512,7 +8736,7 @@ static void paint_tray(int x0, int w, int bottom)
 
     if (!g_ui.nuploads)
         return;
-    r_round(x0 + S(16), y, w - S(32), S(TRAY_H) + S(10), S(10), 0xFF181818);
+    r_round(x0 + S(COMPOSER_GAP), y, w - 2 * S(COMPOSER_GAP), S(TRAY_H) + S(10), S(8), 0xFF121214u);
     for (int i = 0; i < g_ui.nuploads; i++, x += S(CARD) + S(12)) {
         const upload_t *u = &g_ui.uploads[i];
         int cy = y + S(12);
@@ -8540,7 +8764,7 @@ static int tray_hit(int x, int y)
     if (!g_ui.nuploads)
         return -1;
     GetClientRect(g_ui.wnd, &rc);
-    top = rc.bottom - S(24) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - S(TRAY_H) + S(12);
+    top = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - S(TRAY_H) + S(12);
     cx = x0 + S(28);
     for (int i = 0; i < g_ui.nuploads; i++, cx += S(CARD) + S(12))
         if (x >= cx + S(CARD) - S(22) && x < cx + S(CARD) + S(4) && y >= top - S(6) && y < top + S(20))
@@ -9065,7 +9289,7 @@ static RECT ac_rect(void)
     int bottom;
 
     GetClientRect(g_ui.wnd, &rc);
-    bottom = rc.bottom - S(24) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - tray_h() - S(8);
+    bottom = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - tray_h() - S(8);
     return rect(x0 + S(16), bottom - h, w - S(32), h);
 }
 
@@ -9749,17 +9973,12 @@ static wchar_t *plain_text(const sb_t *text)
 
 static int pins_button_x(void)
 {
-    return main_right() - (g_ui.guild >= 0 ? S(88) : S(48));
-}
-
-static int inbox_button_x(void)
-{
-    return pins_button_x() - S(40);
+    return header_button_x(HB_PINS);
 }
 
 static int call_button_x(void)
 {
-    return inbox_button_x() - S(40);
+    return header_button_x(HB_CALL);
 }
 
 static void pins_close(void)
@@ -11398,7 +11617,6 @@ static void on_right_click(int x, int y)
 
 /* ---- Search and jumping to messages ---- */
 
-#define SEARCH_W 200
 #define RESULTS_W 460
 
 /* Opens channel `channel_id` at message `message_id` (loading the messages around it). */
@@ -11457,7 +11675,10 @@ static int open_discord_link(const char *url)
 
 static int search_box_x(void)
 {
-    return inbox_button_x() - S(SEARCH_W) - S(12);
+    RECT rc;
+
+    GetClientRect(g_ui.wnd, &rc);
+    return rc.right - S(8) - S(SEARCH_W);
 }
 
 static void place_search(void)
@@ -11474,7 +11695,7 @@ static void place_search(void)
     }
     if (g_ui.search_edit) {
         if (show)
-            MoveWindow(g_ui.search_edit, search_box_x() + S(8), (S(HEADER_H) - S(20)) / 2, S(SEARCH_W) - S(16), S(20), TRUE);
+            MoveWindow(g_ui.search_edit, search_box_x() + S(10), (S(HEADER_H) - S(20)) / 2, S(SEARCH_W) - S(46), S(20), TRUE);
         ShowWindow(g_ui.search_edit, show ? SW_SHOWNA : SW_HIDE);
     }
 }
@@ -11638,9 +11859,6 @@ static void paint_search(void)
     int y;
     char title[64];
 
-    /* The box in the header. */
-    if (open_is_text())
-        r_round(search_box_x(), (S(HEADER_H) - S(28)) / 2, S(SEARCH_W), S(28), S(6), 0xFF0B0B0B);
     if (!g_ui.results_open)
         return;
     r = results_rect();
@@ -11757,7 +11975,7 @@ static int click_detached(int x, int y)
     if (!g_ui.detached)
         return 0;
     GetClientRect(g_ui.wnd, &rc);
-    cy = rc.bottom - S(24) - S(COMPOSER_H);
+    cy = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
     top = cy - S(32) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
     if (y < top || y >= top + S(28) || x < x0 + S(24) || x >= x0 + w - S(24))
         return 0;
@@ -12003,7 +12221,7 @@ static int shortcut(WPARAM key)
         if (g_ui.picker)
             picker_close();
         else
-            picker_open(PICK_COMPOSER, NULL, x0 + w - S(16), rc.bottom - S(24) - S(COMPOSER_H) - S(8));
+            picker_open(PICK_COMPOSER, NULL, x0 + w - S(16), rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H) - S(8));
         return 1;
     }
     return 0;
@@ -12151,9 +12369,16 @@ static void update_hover(int x, int y)
         RECT crc;
         int th = tray_hit(x, y), cy, att, emo, bh;
         GetClientRect(g_ui.wnd, &crc);
-        cy = crc.bottom - S(24) - S(COMPOSER_H);
-        att = open_is_text() && x >= S(RAIL_W + SIDE_W) + S(24) && x < S(RAIL_W + SIDE_W) + S(56) && y >= cy && y < cy + S(COMPOSER_H);
-        emo = open_is_text() && y >= cy && y < cy + S(COMPOSER_H) && x >= main_right() - S(60) && x < main_right() - S(16);
+        cy = crc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
+        att = open_is_text() && x >= S(RAIL_W + SIDE_W) + S(COMPOSER_GAP) + S(8) && x < S(RAIL_W + SIDE_W) + S(COMPOSER_GAP) + S(48) &&
+              y >= cy && y < cy + S(COMPOSER_H);
+        emo = CB_NONE;
+        if (open_is_text() && y >= cy && y < cy + S(COMPOSER_H))
+            for (int b = CB_EMOJI; b < CB_COUNT; b++) {
+                int bx = main_right() - S(COMPOSER_GAP) - S(8) - b * S(40);
+                if (x >= bx && x < bx + S(40))
+                    emo = b;
+            }
         bh = bar_hit(x, y);
         if (th != g_ui.upload_hover || att != g_ui.hover_attach || emo != g_ui.hover_emoji || bh != g_ui.bar_hover) {
             g_ui.upload_hover = th;
@@ -12237,7 +12462,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         g_ui.wnd = wnd;
         g_ui.dpi = GetDpiForWindow(wnd);
-        g_ui.b_composer = CreateSolidBrush(RGB(0x1F, 0x1F, 0x1F));
+        g_ui.b_composer = CreateSolidBrush(RGB(0x10, 0x10, 0x13));
         g_ui.composer = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, wnd, NULL,
                                         NULL, NULL);
         g_ui.composer_proc = (WNDPROC)SetWindowLongPtrW(g_ui.composer, GWLP_WNDPROC, (LONG_PTR)composer_proc);
@@ -12309,7 +12534,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             SetBkColor((HDC)wp, RGB(0x12, 0x12, 0x14));
             return (LRESULT)field;
         }
-        if ((HWND)lp == g_ui.search_edit || (HWND)lp == g_ui.settings_edit) {
+        if ((HWND)lp == g_ui.search_edit) {
+            SetTextColor((HDC)wp, GDI(C_TEXT));
+            SetBkColor((HDC)wp, GDI(C_MAIN));
+            return (LRESULT)GetStockObject(BLACK_BRUSH);
+        }
+        if ((HWND)lp == g_ui.settings_edit) {
             if ((HWND)lp == g_ui.settings_edit) {
                 static HBRUSH box;
                 if (!box)
@@ -12325,8 +12555,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             SetBkColor((HDC)wp, RGB(0x0B, 0x0B, 0x0B));
             return (LRESULT)dark;
         }
-        SetTextColor((HDC)wp, GDI(C_INK));
-        SetBkColor((HDC)wp, RGB(0x1F, 0x1F, 0x1F));
+        SetTextColor((HDC)wp, GDI(C_TEXT));
+        SetBkColor((HDC)wp, RGB(0x10, 0x10, 0x13));
         return (LRESULT)g_ui.b_composer;
     case WM_ERASEBKGND:
         return 1;
@@ -12455,9 +12685,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                     redraw();
                     return 0;
                 }
-                if (open_is_text() && y < S(HEADER_H) && x >= inbox_button_x() && x < inbox_button_x() + S(32)) {
-                    pins_toggle(1);
-                    redraw();
+                if (open_is_text() && y < S(HEADER_H) && x >= header_button_x(HB_VIDEO) && x < header_button_x(HB_VIDEO) + S(32)) {
+                    /* A video call: the camera comes on once the call is connected. */
+                    g_ui.camera_on_connect = 1;
+                    call_start(g_ui.channel);
                     return 0;
                 }
                 if (g_ui.pins_open) {
@@ -12501,19 +12732,26 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             {
                 RECT crc;
-                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), cx0 = S(RAIL_W + SIDE_W), cw, cy;
+                int y = GET_Y_LPARAM(lp), cx0 = S(RAIL_W + SIDE_W), cw, cy;
                 GetClientRect(wnd, &crc);
                 cw = main_right() - cx0;
-                cy = crc.bottom - S(24) - S(COMPOSER_H);
-                if (open_is_text() && y >= cy && y < cy + S(COMPOSER_H) && x >= cx0 + cw - S(60) && x < cx0 + cw - S(16)) {
-                    picker_open(PICK_COMPOSER, NULL, cx0 + cw - S(16), cy - S(8));
+                cy = crc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
+                if (open_is_text() && y >= cy && y < cy + S(COMPOSER_H) && g_ui.hover_emoji != CB_NONE) {
+                    int tab = g_ui.hover_emoji == CB_EMOJI ? TAB_EMOJI : g_ui.hover_emoji == CB_GIF ? TAB_GIFS : TAB_STICKERS;
+                    if (g_ui.picker && g_ui.picker_tab == tab) {
+                        picker_close();
+                    } else {
+                        picker_close();
+                        g_ui.picker_tab = tab;
+                        picker_open(PICK_COMPOSER, NULL, cx0 + cw - S(COMPOSER_GAP), cy - S(8));
+                    }
                     return 0;
                 }
             }
             {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), top, mi;
-                if (g_ui.guild >= 0 && open_is_text() && y < S(HEADER_H) && x >= main_right() - S(48) &&
-                    x < main_right() - S(16)) {
+                if (open_is_text() && y < S(HEADER_H) && x >= header_button_x(HB_MEMBERS) &&
+                    x < header_button_x(HB_MEMBERS) + S(32)) {
                     g_ui.show_members ^= 1;
                     place_composer();
                     invalidate_views();
@@ -12521,7 +12759,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                     redraw();
                     return 0;
                 }
-                if ((mi = ml_hit(x, y, &top)) >= 0) {
+                if ((mi = ml_hit(x, y, &top)) >= 1000 && g_ui.guild < 0) {
+                    dm_member_t m[DM_MEMBERS_MAX];
+                    int n = dm_members(m);
+                    if (mi - 1000 < n)
+                        pop_open(m[mi - 1000].id, m[mi - 1000].name, m[mi - 1000].avatar, main_right() - S(POP_W) - S(8), top, 0);
+                    return 0;
+                }
+                if (mi >= 0) {
                     const ml_item_t *it = &g_ui.ml.items[mi];
                     pop_open(it->id, it->name.data, it->avatar, main_right() - S(POP_W) - S(8), top, 0);
                     return 0;
