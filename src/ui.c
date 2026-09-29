@@ -8223,17 +8223,17 @@ static void ac_accept(int i)
 }
 
 /* "@name" and "#channel" picked from the suggestions become real mentions. */
-static void apply_mentions(const sb_t *in, sb_t *out)
+static void apply_mentions(const char *s, size_t len, sb_t *out)
 {
     size_t i = 0;
 
-    while (i < in->len) {
+    while (i < len) {
         int best = -1;
         size_t best_len = 0;
         for (int k = 0; k < g_ui.nmention; k++) {
             size_t n = (size_t)lstrlenA(g_ui.mention[k].text);
-            if (n > best_len && i + n <= in->len &&
-                CompareStringA(LOCALE_INVARIANT, 0, in->data + i, (int)n, g_ui.mention[k].text, (int)n) == CSTR_EQUAL) {
+            if (n > best_len && i + n <= len &&
+                CompareStringA(LOCALE_INVARIANT, 0, s + i, (int)n, g_ui.mention[k].text, (int)n) == CSTR_EQUAL) {
                 best = k;
                 best_len = n;
             }
@@ -8242,7 +8242,7 @@ static void apply_mentions(const sb_t *in, sb_t *out)
             sb_add(out, g_ui.mention[best].markup);
             i += best_len;
         } else {
-            sb_addn(out, in->data + i, 1);
+            sb_addn(out, s + i, 1);
             i++;
         }
     }
@@ -10938,7 +10938,7 @@ static void send_composer(void)
     while (b > a && (text.data[b - 1] == ' ' || text.data[b - 1] == '	'))
         b--;
     if (b > a || g_ui.nuploads) {
-        sb_t out = {0}, rewritten = {0};
+        sb_t out = {0}, rewritten = {0}, mentioned = {0};
         if (text.data[a] == '/' && builtin_rewrite(text.data + a, b - a, &rewritten)) {
             sb_free(&text);
             text = rewritten;
@@ -10946,28 +10946,15 @@ static void send_composer(void)
             b = text.len;
         }
         text.data[b] = 0;
-        if (text.data[a] == '/' && !g_ui.nuploads && g_ui.bar != BAR_EDIT) {
-            sb_t trimmed = {0}, mentioned = {0};
-            int sent;
-            sb_addn(&trimmed, text.data + a, b - a);
-            apply_mentions(&trimmed, &mentioned);
-            sent = send_command(mentioned.data, mentioned.len);
-            sb_free(&trimmed);
+        apply_mentions(text.data + a, b - a, &mentioned);
+        if (text.data[a] == '/' && !g_ui.nuploads && g_ui.bar != BAR_EDIT && send_command(mentioned.data, mentioned.len)) {
             sb_free(&mentioned);
-            if (sent) {
-                sb_free(&text);
-                return;
-            }
+            sb_free(&text);
+            return;
         }
         /* :smile: and :server_emoji: become the real thing, as in Discord. */
-        {
-            sb_t trimmed = {0}, mentioned = {0};
-            sb_addn(&trimmed, text.data + a, b - a);
-            apply_mentions(&trimmed, &mentioned);
-            emoji_expand(mentioned.data ? mentioned.data : "", mentioned.len, &out, custom_emoji_markup, NULL);
-            sb_free(&trimmed);
-            sb_free(&mentioned);
-        }
+        emoji_expand(mentioned.data ? mentioned.data : "", mentioned.len, &out, custom_emoji_markup, NULL);
+        sb_free(&mentioned);
         g_ui.nmention = 0;
         sb_clear(&g_ui.send_error);
         if (g_ui.nuploads && g_ui.bar != BAR_EDIT) {
