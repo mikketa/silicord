@@ -139,6 +139,7 @@ typedef struct {
     sb_t name, username;
     char avatar[48];
     char tag[24], tag_badge[48], tag_guild[24]; /* their server tag, as Discord shows it beside the name */
+    int font_id;                                 /* their display name's font */
 } relation_t;
 
 typedef struct {
@@ -425,6 +426,7 @@ typedef struct {
     DWORD profile_time[8];
     /* Display name fonts, downloaded on first use. */
     r_font_t *name_fonts[9];
+    r_font_t *name_fonts16[9]; /* the same at 16px, for names in lists */
     sb_t font_data[9];
     unsigned char font_state[9];
 } ui_t;
@@ -470,6 +472,7 @@ static void rel_store(json_t obj);
 static relation_t *rel_find(const char *id);
 static void on_application(sb_t *p);
 static int tag_chip(int x, int cy, const char *tag, const char *guild, const char *badge, int draw);
+static int styled_name(const relation_t *r, r_font_t *font, unsigned ink, int x, int y, int w, int h, const char *name);
 static void rel_remove(const char *id);
 
 #define WM_TRAY (WM_APP + 60)
@@ -2562,25 +2565,24 @@ static void paint_channel_row(unsigned i, int y)
             presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
             if (c->type == CH_DM && c->user_id[0])
                 paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE, bg);
+            const relation_t *rl = c->type == CH_DM && c->user_id[0] ? rel_find(c->user_id) : NULL;
+            unsigned nink = sel || hov || unread ? ARGB(C_INK) : ARGB(C_MUTED);
+            int nmw;
             if ((pr && (pr->activity.len || pr->game.len) && pr->status != ML_OFFLINE) || (c->type == CH_GROUP_DM && c->members)) {
                 char members[32];
                 wsprintfA(members, "%d Members", c->members);
-                text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
-                     rect(x + S(52), y + S(3), w - S(58) - badge, S(21)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                nmw = styled_name(rl, unread ? g_ui.f_h : g_ui.f_body, nink, x + S(52), y + S(3), w - S(58) - badge, S(21), name);
                 if (c->type == CH_GROUP_DM)
                     text(g_ui.f_small, C_MUTED, rect(x + S(52), y + S(23), w - S(58) - badge, S(16)), members,
                          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 else
                     activity_line(pr, g_ui.f_small, C_MUTED, x + S(52), y + S(23), w - S(58) - badge, S(16));
-            } else
-            text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
-                 rect(x + S(52), y, w - S(58) - badge, S(DM_ROW_H)), name,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            } else {
+                nmw = styled_name(rl, unread ? g_ui.f_h : g_ui.f_body, nink, x + S(52), y, w - S(58) - badge, S(DM_ROW_H), name);
+            }
             if (c->type == CH_DM && c->user_id[0]) {
                 /* their server tag after the name, as in Discord's list */
-                const relation_t *rl = rel_find(c->user_id);
-                r_font_t *nf = unread ? g_ui.f_h : g_ui.f_body;
-                int nw = text_width(nf, name), two = pr && (pr->activity.len || pr->game.len) && pr->status != ML_OFFLINE;
+                int nw = nmw, two = pr && (pr->activity.len || pr->game.len) && pr->status != ML_OFFLINE;
                 if (rl && rl->tag[0] && nw + S(6) + tag_chip(0, 0, rl->tag, rl->tag_guild, rl->tag_badge, 0) < w - S(58) - badge)
                     tag_chip(x + S(52) + nw + S(6), two ? y + S(13) : y + S(DM_ROW_H) / 2, rl->tag, rl->tag_guild, rl->tag_badge, 1);
             }
@@ -7281,9 +7283,13 @@ static void build_name_fonts(void)
 {
     for (int i = 0; i < (int)ARRAYSIZE(k_name_fonts); i++) {
         r_font_free(g_ui.name_fonts[i]);
+        r_font_free(g_ui.name_fonts16[i]);
         g_ui.name_fonts[i] = g_ui.font_data[i].len ? r_font_data(g_ui.font_data[i].data, g_ui.font_data[i].len,
                                                                  S(20), k_name_fonts[i].weight)
                                                    : NULL;
+        g_ui.name_fonts16[i] = g_ui.font_data[i].len ? r_font_data(g_ui.font_data[i].data, g_ui.font_data[i].len,
+                                                                   S(16), k_name_fonts[i].weight)
+                                                     : NULL;
     }
 }
 
@@ -7301,6 +7307,31 @@ static r_font_t *name_font(int id)
     return g_ui.name_fonts[i] ? g_ui.name_fonts[i] : g_ui.f_name;
 }
 
+/*
+ * A name in a list (friends, DMs) in its display name font at 16px, as
+ * Discord draws it there: in the list's color, its colors and effect are for
+ * profiles. `font` is the list's own, for names without one. Returns its width.
+ */
+static int styled_name(const relation_t *r, r_font_t *font, unsigned ink, int x, int y, int w, int h, const char *name)
+{
+    wchar_t *wn = utf8_to_wide(name ? name : "", name ? lstrlenA(name) : 0);
+    int i = r ? name_font_slot(r->font_id) : -1, tw;
+    r_font_t *f = font;
+
+    if (i >= 0) {
+        if (!g_ui.font_state[i]) {
+            g_ui.font_state[i] = 1;
+            app_fetch_font(r->font_id, k_name_fonts[i].file);
+        }
+        if (g_ui.name_fonts16[i])
+            f = g_ui.name_fonts16[i];
+    }
+    tw = r_text_width(f, wn, -1);
+    r_text(f, ink, x, y, w, h, wn, -1, R_SINGLE | R_ELLIPSIS | R_VCENTER);
+    mem_free(wn);
+    return tw < w ? tw : w;
+}
+
 static void on_font(int id, sb_t *data)
 {
     int i = name_font_slot(id);
@@ -7315,7 +7346,9 @@ static void on_font(int id, sb_t *data)
     *data = (sb_t){0};
     g_ui.font_state[i] = 2;
     r_font_free(g_ui.name_fonts[i]);
+    r_font_free(g_ui.name_fonts16[i]);
     g_ui.name_fonts[i] = r_font_data(g_ui.font_data[i].data, g_ui.font_data[i].len, S(20), k_name_fonts[i].weight);
+    g_ui.name_fonts16[i] = r_font_data(g_ui.font_data[i].data, g_ui.font_data[i].len, S(16), k_name_fonts[i].weight);
 }
 
 /* ---- Cache ---- */
@@ -11725,6 +11758,14 @@ static void rel_store(json_t obj)
     if (json_get(user, "avatar", &v) && json_type(v) == JSON_STRING)
         json_raw(v, r->avatar, sizeof r->avatar);
     r->tag[0] = r->tag_badge[0] = r->tag_guild[0] = 0;
+    r->font_id = 0;
+    {
+        json_t st;
+        long long n;
+        if (json_get(user, "display_name_styles", &st) && json_type(st) == JSON_OBJECT && json_get(st, "font_id", &v) &&
+            json_int(v, &n))
+            r->font_id = (int)n;
+    }
     {
         json_t pg, on;
         if (json_get(user, "primary_guild", &pg) && json_type(pg) == JSON_OBJECT &&
@@ -12150,9 +12191,7 @@ static void paint_friends(RECT rc, int x0, int w)
             paint_status(ax, y + S(15), S(32), st == ML_UNKNOWN ? ML_OFFLINE : st, bg);
         {
             /* The name, then on hover the username beside it, as Discord does. */
-            int nw = text_width(g_ui.f_h, r->name.data ? r->name.data : ""), cw;
-            text(g_ui.f_h, C_INK, rect(ax + S(44), y + S(10), lw - S(260), S(22)), r->name.data ? r->name.data : "",
-                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            int nw = styled_name(r, g_ui.f_h, ARGB(C_INK), ax + S(44), y + S(10), lw - S(260), S(22), r->name.data), cw;
             cw = nw + S(80) < lw - S(260) ? tag_chip(ax + S(44) + nw + S(6), y + S(21), r->tag, r->tag_guild, r->tag_badge, 1) : 0;
             if (cw)
                 nw += S(6) + cw;
