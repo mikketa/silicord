@@ -10164,6 +10164,24 @@ static const struct {
 };
 
 /* Discord's own words for the page (its English strings), the apostrophe curly as there. */
+/*
+ * The hero's trinkets and flying Wumpus, where Discord's page puts them around
+ * its heading: offsets from the heading block's left (or right, when `right`)
+ * and from the top of the page, for a page 960 wide or more, then narrower.
+ */
+#define NITRO_ART "https://cdn.discordapp.com/assets/content/"
+static const struct {
+    const char *png;
+    int right, x, y, x_narrow, y_narrow, h; /* h: height, 0 for the trinkets' 60 wide */
+} k_nitro_trinkets[] = {
+    {NITRO_ART "0b1a59149e615fc048010a3c7f109f8695c8b2004712e99417fcb0dec43fcb44.png", 0, -135, 110, -105, 60, 0}, /* star */
+    {NITRO_ART "7c23a220a6f31150648930e2ebb435aa7cc89ad57895275bed6f1900869f4de0.png", 0, -70, 350, -40, 300, 0},  /* key */
+    {NITRO_ART "6cb761e3e97838c7927f738882b67bd825d5eeed89633e0af126bda5f9d4e71d.png", 0, 40, 270, 70, 220, 0},    /* car */
+    {NITRO_ART "b39a5f2755e6da320fce10c8a4a10bdebef9926b671256b1681976198c5656d4.png", 1, 90, 60, 90, 60, 0},      /* hammer */
+    {NITRO_ART "ae5638c61a572593c6b03b92e80d3846e0cfe7a9e893f3faf05aecd670a4017d.png", 1, -250, 115, -100, 325, 0}, /* bolt */
+    {NITRO_ART "46e72137fc3631c8024b00c33dbab5cf45740d4ab35f77bd96517830e727d0c5.png", 1, -155, 200, -100, 170, 293}, /* Wumpus */
+};
+
 static const char *const k_nitro_tabs[5] = {"Home", "What\xE2\x80\x99s New", "Best of Nitro", "Plans", "Compare"};
 
 static struct {
@@ -10254,8 +10272,31 @@ static int nitro_walk(RECT rc, int x0, int w, int draw, int hx, int hy)
         r_round_gradient(x0, y + S(260), w, S(360), 0, 0x00000000u, 0xFF000000u);
     }
     {
-        int hy0 = y + S(76), hh = nitro_heading(g_ui.f_nitro, S(64), x0 + (w - S(760)) / 2, hy0, S(760),
-                                                "Unlock a World of Perks with Nitro", draw);
+        /* The heading block: 800 wide at most, 650 under 960, 500 under 720; 120 from the page's top, under the tabs. */
+        int wide = w >= S(960), hw = wide ? S(800) : w >= S(720) ? S(650) : S(500), hl = x0 + (w - hw) / 2;
+        int page = y - S(NITRO_NAV_H), hy0 = page + S(120), hh;
+        if (draw)
+            for (int k = 0; k < (int)ARRAYSIZE(k_nitro_trinkets); k++) {
+                int tw = S(60), th = S(60), tx, ty;
+                r_image_t *img = shop_image(k_nitro_trinkets[k].png, k_nitro_trinkets[k].h ? S(293) : S(120));
+                if (!img)
+                    continue;
+                {
+                    int iw, ih;
+                    r_image_size(img, &iw, &ih);
+                    if (k_nitro_trinkets[k].h) {
+                        th = S(wide ? k_nitro_trinkets[k].h : 200);
+                        tw = ih ? iw * th / ih : th;
+                    } else {
+                        th = iw ? ih * tw / iw : tw;
+                    }
+                }
+                tx = S(wide ? k_nitro_trinkets[k].x : k_nitro_trinkets[k].x_narrow);
+                ty = page + S(wide ? k_nitro_trinkets[k].y : k_nitro_trinkets[k].y_narrow);
+                tx = k_nitro_trinkets[k].right ? hl + hw - tx - tw : hl + tx;
+                r_image(img, tx, ty, tw, th, 0);
+            }
+        hh = nitro_heading(g_ui.f_nitro, S(64), hl, hy0, hw, "Unlock a World of Perks with Nitro", draw);
         int by = hy0 + hh + S(32), bw1 = S(150), bw2 = S(170), bx = x0 + (w - bw1 - bw2 - S(16)) / 2;
         RECT sub = rect(bx, by, bw1, S(44)), gift = rect(bx + bw1 + S(16), by, bw2, S(44));
         if (draw) {
