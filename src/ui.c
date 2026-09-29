@@ -192,7 +192,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -214,6 +214,8 @@ typedef struct {
     int pop_docked;        /* the popout is the profile panel beside a DM */
     int home_page; /* HOME_*: what home shows when no conversation is open */
     int shop_state; /* 0 not asked, 1 loading, 2 loaded, 3 failed */
+    int quests_state; /* the same, for the Quests page */
+    int nitro_hover;  /* over the Nitro page's Subscribe */
     unsigned char folder_open[64];
     int hover_kind, hover_index;
     image_t *images;
@@ -678,7 +680,7 @@ static int frame_ms(void)
 #define TW_FAST 120  /* hover backgrounds */
 #define TW_SHAPE 200 /* server icons and their pill */
 enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_MESSAGE, TW_MEMBER, TW_FRIEND, TW_ATTACH, TW_EMOJI, TW_MENTION,
-       TW_BAR_CLOSE, TW_SHOP };
+       TW_BAR_CLOSE, TW_SHOP, TW_QUEST, TW_NITRO };
 
 typedef struct {
     int kind, index;
@@ -2820,6 +2822,13 @@ static void paint_shop(RECT rc, int x0, int w);
 static int shop_view(void);
 static int shop_hit(int x, int y);
 static void shop_scroll_by(int delta);
+static void paint_quests(RECT rc, int x0, int w);
+static int quests_view(void);
+static int quests_hit(int x, int y);
+static void quests_scroll_by(int delta);
+static void paint_nitro(RECT rc, int x0, int w);
+static int nitro_view(void);
+static RECT nitro_button(int x0, int w);
 static void rels_clear(void);
 static void paint_autocomplete(void);
 static void ac_update(void);
@@ -4721,8 +4730,12 @@ static void paint_main(RECT rc)
         paint_friends(rc, x0, w);
     } else if (shop_view()) {
         paint_shop(rc, x0, w);
+    } else if (quests_view()) {
+        paint_quests(rc, x0, w);
+    } else if (nitro_view()) {
+        paint_nitro(rc, x0, w);
     } else if (g_ui.model && g_ui.guild < 0 && g_ui.channel < 0) {
-        /* Nitro, Quests: their header, the page itself comes with its own step. */
+        /* A home page not drawn above: its header only. */
         static const wchar_t *const icons[NAVS] = {L"\xE716", L"\xE734", L"\xE719", L"\xE7C1"};
         static const char *const titles[NAVS] = {"Friends", "Nitro", "Shop", "Quests"};
         int k = g_ui.home_page >= 0 && g_ui.home_page < NAVS ? g_ui.home_page : 0;
@@ -5258,6 +5271,7 @@ static void make_fonts(void)
     g_ui.f_section = r_font(L"Segoe UI", S(14), FW_NORMAL, 0);
     g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
     g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
+    g_ui.f_nitro = r_font(L"Segoe UI", S(32), FW_BOLD, 0);
     build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
@@ -5601,6 +5615,16 @@ static void select_guild(int i)
 
 /* The Shop's answer: kept whole, parsed while painting. */
 static int shop_parse(const sb_t *json);
+static int quests_parse(const sb_t *json);
+
+static void on_quests(sb_t *p)
+{
+    int n = quests_parse(p);
+
+    sb_free(p);
+    g_ui.quests_state = n >= 0 ? 2 : 3;
+    redraw();
+}
 
 static void on_shop(sb_t *p)
 {
@@ -5695,6 +5719,10 @@ static void on_click(int kind, int index)
         if (index == HOME_SHOP && (g_ui.shop_state == 0 || g_ui.shop_state == 3)) {
             g_ui.shop_state = 1;
             app_fetch_shop();
+        }
+        if (index == HOME_QUESTS && g_ui.quests_state != 1) {
+            g_ui.quests_state = 1; /* asked again each time: progress moves */
+            app_fetch_quests();
         }
         g_ui.last_dm = -1;
         open_channel(-1);
@@ -6015,6 +6043,13 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == UI_STREAM) {
         stream_refresh();
+        return;
+    }
+    if (msg == UI_QUESTS) {
+        if (p) {
+            on_quests(p);
+            mem_free(p);
+        }
         return;
     }
     if (msg == UI_SHOP) {
@@ -10092,6 +10127,312 @@ static void shop_scroll_by(int delta)
         g_shop.scroll = 0;
 }
 
+/* ---- Nitro ---- */
+
+/* Discord's Nitro page: what it gives, and a way to subscribe, which happens on discord.com. */
+static const struct {
+    const wchar_t *icon;
+    const char *title, *text;
+} k_nitro_perks[] = {
+    {L"\xE76E", "Custom emoji anywhere", "Use custom emoji and stickers in any server, and animated ones too."},
+    {L"\xE8FB", "Super Reactions", "React with animated Super Reactions that burst across the message."},
+    {L"\xE714", "HD video streaming", "Stream your screen and camera in HD, up to 4K at 60 frames a second."},
+    {L"\xE898", "Bigger uploads", "Share files up to 500 MB, full-quality videos and screenshots included."},
+    {L"\xE77B", "Your profile, your way", "Animated avatar, profile banner, theme colors and display name styles."},
+    {L"\xE734", "Server boosts", "Two Server Boosts, and 30% off extra ones for the servers you love."},
+};
+
+static int nitro_view(void)
+{
+    return g_ui.view == VIEW_APP && g_ui.model && !g_ui.settings_open && g_ui.guild < 0 && g_ui.channel < 0 &&
+           g_ui.home_page == HOME_NITRO;
+}
+
+#define NITRO_HERO_H 280
+
+/* The Subscribe button of the hero, in the main pane's coordinates. */
+static RECT nitro_button(int x0, int w)
+{
+    (void)w;
+    return rect(x0 + S(SHOP_PAD) + S(40), S(HEADER_H) + S(SHOP_PAD) + S(NITRO_HERO_H) - S(40) - S(44), S(160), S(44));
+}
+
+static void paint_nitro(RECT rc, int x0, int w)
+{
+    int cw = w - 2 * S(SHOP_PAD), x = x0 + S(SHOP_PAD), y = S(HEADER_H) + S(SHOP_PAD);
+    int cols = cw >= S(900) ? 3 : cw >= S(560) ? 2 : 1, pw = (cw - (cols - 1) * S(SHOP_GAP)) / cols;
+    RECT b = nitro_button(x0, w);
+    float t = tween_on(TW_NITRO, 0, g_ui.nitro_hover, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
+
+    (void)rc;
+    fill(x0, S(HEADER_H) - S(1), w, S(1) > 1 ? S(1) : 1, C_LINE);
+    text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(16), 0, S(24), S(HEADER_H)), L"\xE734", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_h, C_INK, rect(x0 + S(48), 0, w - S(64), S(HEADER_H)), "Nitro", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    /* The hero: Nitro's purple to pink, its promise, and Subscribe. */
+    r_round_gradient(x, y, cw, S(NITRO_HERO_H), S(12), 0xFF6A38C2u, 0xFFB845C1u);
+    r_round(x, y, cw, S(NITRO_HERO_H), S(12), 0x33000000u);
+    text(g_ui.f_nitro, 0xFFFFFFFFu, rect(x + S(40), y + S(40), cw - S(80), S(44)), "Unleash more fun with Nitro",
+         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(g_ui.f_body, 0xFFFFFFFFu, rect(x + S(40), y + S(96), cw * 3 / 5, S(80)),
+         "Subscribe to Nitro to upgrade your emoji, personalize your profile, share bigger files and so much more.",
+         DT_LEFT | DT_WORDBREAK);
+    r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(22), lerp_argb(0xFFFFFFFFu, 0xFFEDEDF7u, t));
+    text(g_ui.f_nav, C_RAIL, b, "Subscribe", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    y += S(NITRO_HERO_H) + S(32);
+
+    text(g_ui.f_h2, C_INK, rect(x, y, cw, S(28)), "Popular Nitro perks", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    y += S(44);
+    for (int k = 0; k < (int)ARRAYSIZE(k_nitro_perks); k++) {
+        int px = x + (k % cols) * (pw + S(SHOP_GAP)), py = y + (k / cols) * (S(140) + S(SHOP_GAP));
+        if (!r_visible(py, S(140)))
+            continue;
+        r_round(px, py, pw, S(140), S(8), 0xFF121214u);
+        r_round_outline(px, py, pw, S(140), S(8), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        r_round_gradient(px + S(20), py + S(20), S(40), S(40), S(20), 0xFF8A5CF6u, 0xFFD946EFu);
+        r_text(g_ui.f_icon_mid, 0xFFFFFFFFu, px + S(20), py + S(20), S(40), S(40), k_nitro_perks[k].icon, -1,
+               R_CENTER | R_VCENTER | R_SINGLE);
+        text(g_ui.f_h, C_INK, rect(px + S(20), py + S(70), pw - S(40), S(22)), k_nitro_perks[k].title,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_section, C_MUTED, rect(px + S(20), py + S(94), pw - S(40), S(40)), k_nitro_perks[k].text,
+             DT_LEFT | DT_WORDBREAK);
+    }
+}
+
+/* ---- Quests ---- */
+
+/*
+ * Discord's Quests: the ones still running, each a card with its game's
+ * picture, its name and reward, and when it ends. Taking one on happens in
+ * Discord, where the card's button leads.
+ */
+typedef struct {
+    char id[24];
+    char ends[24];              /* "Sep 1": when it ends, in the local time */
+    unsigned name, game, publisher, reward, hero; /* offsets in g_quests.strings */
+    int state;                  /* 0 available, 1 accepted, 2 completed */
+} quest_t;
+
+static struct {
+    sb_t strings;
+    quest_t *v;
+    int n, scroll, height, hover;
+} g_quests = {.hover = -1};
+
+static unsigned quest_str(json_t obj, const char *key)
+{
+    json_t v;
+    unsigned at;
+
+    if (!json_get(obj, key, &v) || json_type(v) != JSON_STRING)
+        return 0;
+    at = (unsigned)g_quests.strings.len;
+    json_str(v, &g_quests.strings);
+    sb_addn(&g_quests.strings, "", 1);
+    return at;
+}
+
+static const char *quest_s(unsigned at)
+{
+    return at && g_quests.strings.data ? g_quests.strings.data + at : "";
+}
+
+/* "2026-09-01T04:00:00+00:00" as a local "Sep 1". */
+static void quest_date(const char *iso, char *out, int size)
+{
+    SYSTEMTIME st = {0}, local;
+    wchar_t w[32];
+
+    out[0] = 0;
+    if (lstrlenA(iso) < 16)
+        return;
+    st.wYear = (WORD)((iso[0] - '0') * 1000 + (iso[1] - '0') * 100 + (iso[2] - '0') * 10 + (iso[3] - '0'));
+    st.wMonth = (WORD)((iso[5] - '0') * 10 + (iso[6] - '0'));
+    st.wDay = (WORD)((iso[8] - '0') * 10 + (iso[9] - '0'));
+    st.wHour = (WORD)((iso[11] - '0') * 10 + (iso[12] - '0'));
+    st.wMinute = (WORD)((iso[14] - '0') * 10 + (iso[15] - '0'));
+    if (!SystemTimeToTzSpecificLocalTime(NULL, &st, &local))
+        local = st;
+    if (GetDateFormatEx(L"en-US", 0, &local, L"MMM d", w, ARRAYSIZE(w), NULL))
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, out, size, NULL, NULL);
+}
+
+/* Returns how many quests are still running, -1 if the answer could not be read. */
+static int quests_parse(const sb_t *json)
+{
+    json_t root, list, q, config, v, msgs, assets, rewards, rlist, r, st;
+    json_iter_t it, rit;
+    SYSTEMTIME now;
+    char now_iso[32];
+
+    sb_free(&g_quests.strings);
+    mem_free(g_quests.v);
+    g_quests.v = NULL;
+    g_quests.n = 0;
+    sb_addn(&g_quests.strings, "", 1);
+    if (!json->len || !json_parse(json->data, json->len, &root) || !json_get(root, "quests", &list))
+        return -1;
+    GetSystemTime(&now);
+    wsprintfA(now_iso, "%04d-%02d-%02dT%02d:%02d:%02d", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    g_quests.v = mem_alloc((json_count(list) + 1) * sizeof *g_quests.v);
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &q)) {
+        quest_t *x = &g_quests.v[g_quests.n];
+        char ends[40] = "";
+        if (!json_get(q, "config", &config))
+            continue;
+        if (json_get(config, "expires_at", &v))
+            json_raw(v, ends, sizeof ends);
+        if (lstrcmpA(ends, now_iso) <= 0)
+            continue; /* over: ISO dates compare as text */
+        *x = (quest_t){0};
+        if (json_get(q, "id", &v))
+            json_raw(v, x->id, sizeof x->id);
+        quest_date(ends, x->ends, sizeof x->ends);
+        if (json_get(config, "messages", &msgs)) {
+            x->name = quest_str(msgs, "quest_name");
+            x->game = quest_str(msgs, "game_title");
+            x->publisher = quest_str(msgs, "game_publisher");
+        }
+        if (json_get(config, "assets", &assets) && json_get(assets, "hero", &v) && json_type(v) == JSON_STRING) {
+            x->hero = (unsigned)g_quests.strings.len;
+            sb_add(&g_quests.strings, "https://cdn.discordapp.com/");
+            json_str(v, &g_quests.strings);
+            sb_addn(&g_quests.strings, "", 1);
+        }
+        if (json_get(config, "rewards_config", &rewards) && json_get(rewards, "rewards", &rlist)) {
+            json_iter(rlist, &rit);
+            if (json_next(&rit, NULL, &r) && json_get(r, "messages", &msgs))
+                x->reward = quest_str(msgs, "name");
+        }
+        if (json_get(q, "user_status", &st) && json_type(st) == JSON_OBJECT) {
+            if (json_get(st, "completed_at", &v) && json_type(v) == JSON_STRING)
+                x->state = 2;
+            else if (json_get(st, "enrolled_at", &v) && json_type(v) == JSON_STRING)
+                x->state = 1;
+        }
+        g_quests.n++;
+    }
+    return g_quests.n;
+}
+
+static int quests_view(void)
+{
+    return g_ui.view == VIEW_APP && g_ui.model && !g_ui.settings_open && g_ui.guild < 0 && g_ui.channel < 0 &&
+           g_ui.home_page == HOME_QUESTS;
+}
+
+#define QUEST_MIN_W 300
+#define QUEST_BODY_H 132
+
+/* Lays the Quests out: paints them, or returns the card at (hx, hy) (-1 if none). */
+static int quests_walk(int x0, int w, int draw, int hx, int hy)
+{
+    int cw = w - 2 * S(SHOP_PAD), x = x0 + S(SHOP_PAD), y = S(HEADER_H) + S(SHOP_PAD) - g_quests.scroll;
+    int cols = (cw + S(SHOP_GAP)) / (S(QUEST_MIN_W) + S(SHOP_GAP)), cardw, ih;
+    char title[48];
+
+    if (cols < 1)
+        cols = 1;
+    if (cols > 3)
+        cols = 3;
+    cardw = (cw - (cols - 1) * S(SHOP_GAP)) / cols;
+    ih = cardw * 9 / 16;
+    wsprintfA(title, "Available Quests \xE2\x80\x94 %d", g_quests.n);
+    if (draw)
+        text(g_ui.f_h2, C_INK, rect(x, y, cw, S(28)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    y += S(44);
+    for (int k = 0; k < g_quests.n; k++) {
+        const quest_t *q = &g_quests.v[k];
+        int cx = x + (k % cols) * (cardw + S(SHOP_GAP)), cy = y + (k / cols) * (ih + S(QUEST_BODY_H) + S(SHOP_GAP));
+        int bx = cx + cardw - S(16) - S(128), by = cy + ih + S(QUEST_BODY_H) - S(16) - S(32);
+        if (!draw) {
+            if (hx >= bx && hx < bx + S(128) && hy >= by && hy < by + S(32) && hy >= S(HEADER_H))
+                return k;
+            continue;
+        }
+        if (!r_visible(cy, ih + S(QUEST_BODY_H)))
+            continue;
+        r_round(cx, cy, cardw, ih + S(QUEST_BODY_H), S(8), 0xFF121214u);
+        r_round_outline(cx, cy, cardw, ih + S(QUEST_BODY_H), S(8), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        {
+            r_image_t *hero = shop_image(quest_s(q->hero), cardw);
+            r_clip(cx, cy, cardw, ih);
+            if (hero)
+                r_image_cover(hero, cx, cy, cardw, ih + S(8), S(8));
+            else
+                r_round(cx, cy, cardw, ih + S(8), S(8), 0xFF17181Bu);
+            r_unclip();
+        }
+        {
+            char line[160];
+            int ty = cy + ih + S(12);
+            /* The game above the quest's name, or its publisher when the quest is named after the game. */
+            text(g_ui.f_cat, C_MUTED, rect(cx + S(16), ty, cardw - S(32), S(16)),
+                 lstrcmpA(quest_s(q->game), quest_s(q->name)) ? quest_s(q->game) : quest_s(q->publisher),
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            text(g_ui.f_h, C_INK, rect(cx + S(16), ty + S(18), cardw - S(32), S(22)), quest_s(q->name),
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            wsprintfA(line, "Claim %.120s", quest_s(q->reward));
+            text(g_ui.f_section, C_TEXT, rect(cx + S(16), ty + S(42), cardw - S(32), S(20)), line,
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            wsprintfA(line, "Ends %s", q->ends);
+            text(g_ui.f_section, C_FAINT, rect(cx + S(16), by, bx - cx - S(24), S(32)), line,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        {
+            static const char *const labels[3] = {"Accept Quest", "In Progress", "Completed"};
+            float t = tween_on(TW_QUEST, k, g_quests.hover == k, TW_FAST, bx, by, S(128), S(32));
+            unsigned bg = q->state == 2 ? 0xFF248045u : q->state == 1 ? lerp_argb(0xFF242426u, 0xFF2E2E31u, t)
+                                                                       : lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, t);
+            r_round(bx, by, S(128), S(32), S(8), bg);
+            text(g_ui.f_small_mid, C_INK, rect(bx, by, S(128), S(32)), labels[q->state], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+    g_quests.height = y + ((g_quests.n + cols - 1) / cols) * (ih + S(QUEST_BODY_H) + S(SHOP_GAP)) + g_quests.scroll - S(HEADER_H);
+    return -1;
+}
+
+static void paint_quests(RECT rc, int x0, int w)
+{
+    fill(x0, S(HEADER_H) - S(1), w, S(1) > 1 ? S(1) : 1, C_LINE);
+    text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(16), 0, S(24), S(HEADER_H)), L"\xE7C1", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_h, C_INK, rect(x0 + S(48), 0, w - S(64), S(HEADER_H)), "Quests", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (g_ui.quests_state != 2 || !g_quests.n) {
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2 - S(12), w, S(24)),
+             g_ui.quests_state == 3 ? "Quests could not be loaded." : g_ui.quests_state == 2 ? "No Quests right now. Check back soon!"
+                                                                                             : "Loading Quests\xE2\x80\xA6",
+             DT_CENTER | DT_SINGLELINE);
+        return;
+    }
+    r_clip(x0, S(HEADER_H), w, rc.bottom - S(HEADER_H));
+    quests_walk(x0, w, 1, 0, 0);
+    r_unclip();
+}
+
+static int quests_hit(int x, int y)
+{
+    int x0 = S(RAIL_W + SIDE_W);
+
+    if (!quests_view() || g_ui.quests_state != 2 || x < x0 || y < S(HEADER_H))
+        return -1;
+    return quests_walk(x0, main_right() - x0, 0, x, y);
+}
+
+static void quests_scroll_by(int delta)
+{
+    RECT rc;
+    int max;
+
+    GetClientRect(g_ui.wnd, &rc);
+    max = g_quests.height - (rc.bottom - S(HEADER_H)) + S(SHOP_PAD);
+    g_quests.scroll += delta;
+    if (g_quests.scroll > max)
+        g_quests.scroll = max;
+    if (g_quests.scroll < 0)
+        g_quests.scroll = 0;
+}
+
 /* ---- Friends (home screen) ---- */
 
 #define FR_ROW 62
@@ -13025,12 +13366,18 @@ static void update_hover(int x, int y)
         link = link || th >= 0 || att || emo || bh;
     }
     {
-        int sh = shop_hit(x, y);
-        if (sh != g_shop.hover) {
+        int sh = shop_hit(x, y), qh = quests_hit(x, y), nh = 0;
+        if (nitro_view()) {
+            RECT b = nitro_button(S(RAIL_W + SIDE_W), main_right() - S(RAIL_W + SIDE_W));
+            nh = x >= b.left && x < b.right && y >= b.top && y < b.bottom;
+        }
+        if (sh != g_shop.hover || qh != g_quests.hover || nh != g_ui.nitro_hover) {
             g_shop.hover = sh;
+            g_quests.hover = qh;
+            g_ui.nitro_hover = nh;
             redraw();
         }
-        link = link || sh >= 0;
+        link = link || sh >= 0 || qh >= 0 || nh;
     }
     {
         int ph = post_hit(x, y);
@@ -13352,6 +13699,20 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 friends_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 return 0;
             }
+            if (nitro_view() && g_ui.nitro_hover) {
+                ShellExecuteW(NULL, L"open", L"https://discord.com/nitro", NULL, NULL, SW_SHOWNORMAL);
+                return 0;
+            }
+            if (quests_view() && GET_X_LPARAM(lp) >= S(RAIL_W + SIDE_W)) {
+                /* Quests are taken on in Discord: the button opens this one there. */
+                int k = quests_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (k >= 0) {
+                    wchar_t url[96];
+                    wsprintfW(url, L"https://discord.com/quests/%S", g_quests.v[k].id);
+                    ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+                }
+                return 0;
+            }
             if (shop_view() && GET_X_LPARAM(lp) >= S(RAIL_W + SIDE_W)) {
                 /* Buying happens on Discord: the card leads to it there. */
                 int k = shop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
@@ -13437,6 +13798,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         if (!g_ui.pop_docked)
             pop_close();
+        if (quests_view() && pt.x >= S(RAIL_W + SIDE_W)) {
+            quests_scroll_by(delta);
+            update_hover(pt.x, pt.y);
+            redraw();
+            return 0;
+        }
         if (shop_view() && pt.x >= S(RAIL_W + SIDE_W)) {
             shop_scroll_by(delta);
             update_hover(pt.x, pt.y);
@@ -13585,7 +13952,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_SHOP) {
+        if (msg >= UI_QR && msg <= UI_QUESTS) {
             on_worker(msg, wp, lp);
             return 0;
         }
