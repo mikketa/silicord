@@ -1,3 +1,4 @@
+#include <emmintrin.h>
 #include <string.h>
 #include "vp8_int.h"
 #include "vp8_tables.h"
@@ -656,91 +657,220 @@ static void predict_inter(vp8_decoder_t *d, const vp8_mb_t *m, int row, int col,
 
 /* ---- Loop filter (section 15) ---- */
 
-static int s8(int v)
+/*
+ * Sixteen positions along an edge at a time (eight for chroma, in the low
+ * lanes): each line across an edge is filtered on its own, so this is the
+ * scalar filter's result. Pixels are biased to signed bytes (x ^ 0x80),
+ * where clamping p + a to 0..255 is a saturating add, and the thresholds
+ * (at most 193) fit the saturating unsigned compares.
+ */
+typedef struct {
+    __m128i p3, p2, p1, p0, q0, q1, q2, q3;
+} lf_px_t;
+
+static __m128i abs_diff(__m128i a, __m128i b)
 {
-    return v < -128 ? -128 : v > 127 ? 127 : v;
+    return _mm_or_si128(_mm_subs_epu8(a, b), _mm_subs_epu8(b, a));
 }
 
-static int iabs(int v)
+/* All-ones lanes where a <= limit. */
+static __m128i at_most(__m128i a, __m128i limit)
 {
-    return v < 0 ? -v : v;
+    return _mm_cmpeq_epi8(_mm_subs_epu8(a, limit), _mm_setzero_si128());
 }
 
-/* p points at q0; `step` crosses the edge. */
-static int simple_ok(const unsigned char *p, int step, int limit)
+/* |p0 - q0| * 2 + |p1 - q1| / 2 <= limit */
+static __m128i simple_mask(const lf_px_t *x, int limit)
 {
-    return iabs(p[-step] - p[0]) * 2 + (iabs(p[-2 * step] - p[step]) >> 1) <= limit;
+    /* Halving bytes as 16-bit lanes, their low bits cleared first so nothing crosses into the next byte. */
+    __m128i d = abs_diff(x->p0, x->q0);
+    __m128i h = _mm_srli_epi16(_mm_and_si128(abs_diff(x->p1, x->q1), _mm_set1_epi8(-2)), 1);
+
+    return at_most(_mm_adds_epu8(_mm_adds_epu8(d, d), h), _mm_set1_epi8((char)limit));
 }
 
-static int normal_ok(const unsigned char *p, int step, int edge, int interior)
+/* Arithmetic shift right by 3 of signed bytes. */
+static __m128i sra3_s8(__m128i a)
 {
-    int p3 = p[-4 * step], p2 = p[-3 * step], p1 = p[-2 * step], p0 = p[-step];
-    int q0 = p[0], q1 = p[step], q2 = p[2 * step], q3 = p[3 * step];
+    __m128i zero = _mm_setzero_si128();
 
-    return simple_ok(p, step, 2 * edge + interior) && iabs(p3 - p2) <= interior && iabs(p2 - p1) <= interior &&
-           iabs(p1 - p0) <= interior && iabs(q3 - q2) <= interior && iabs(q2 - q1) <= interior &&
-           iabs(q1 - q0) <= interior;
+    /* Each byte as the high half of a 16-bit lane: shifting by 8 + 3 keeps its sign. */
+    return _mm_packs_epi16(_mm_srai_epi16(_mm_unpacklo_epi8(zero, a), 11),
+                           _mm_srai_epi16(_mm_unpackhi_epi8(zero, a), 11));
 }
 
-static int hev(const unsigned char *p, int step, int threshold)
+/* (w * k + 63) >> 7 for signed bytes w, as signed bytes. */
+static __m128i tap_s8(__m128i w, int k)
 {
-    return iabs(p[-2 * step] - p[-step]) > threshold || iabs(p[step] - p[0]) > threshold;
+    __m128i zero = _mm_setzero_si128(), m = _mm_set1_epi16((short)k), r = _mm_set1_epi16(63);
+    __m128i lo = _mm_srai_epi16(_mm_add_epi16(_mm_mullo_epi16(_mm_srai_epi16(_mm_unpacklo_epi8(zero, w), 8), m), r), 7);
+    __m128i hi = _mm_srai_epi16(_mm_add_epi16(_mm_mullo_epi16(_mm_srai_epi16(_mm_unpackhi_epi8(zero, w), 8), m), r), 7);
+
+    return _mm_packs_epi16(lo, hi);
 }
 
-static void filter_common(unsigned char *p, int step, int outer)
+static __m128i blend(__m128i mask, __m128i yes, __m128i no)
 {
-    int p1 = p[-2 * step], p0 = p[-step], q0 = p[0], q1 = p[step];
-    int a = 3 * (q0 - p0), f1, f2;
+    return _mm_or_si128(_mm_and_si128(mask, yes), _mm_andnot_si128(mask, no));
+}
 
-    if (outer)
-        a += s8(p1 - q1);
-    a = s8(a);
-    f1 = (a + 4 > 127 ? 127 : a + 4) >> 3;
-    f2 = (a + 3 > 127 ? 127 : a + 3) >> 3;
-    p[-step] = vp8i_clamp255(p0 + f2);
-    p[0] = vp8i_clamp255(q0 - f1);
-    if (!outer) {
-        a = (f1 + 1) >> 1;
-        p[-2 * step] = vp8i_clamp255(p1 + a);
-        p[step] = vp8i_clamp255(q1 - a);
+/*
+ * Filters the lanes in `mask`. `outer` selects the lanes whose base value
+ * takes p1 - q1 into account (the others move p1 and q1 too); `mb` those
+ * filtered as a macroblock edge, over three pixels on each side.
+ */
+static void lf_filter(lf_px_t *x, __m128i mask, __m128i outer, __m128i mb)
+{
+    const __m128i bias = _mm_set1_epi8(-128);
+    __m128i ps2 = _mm_xor_si128(x->p2, bias), ps1 = _mm_xor_si128(x->p1, bias), ps0 = _mm_xor_si128(x->p0, bias);
+    __m128i qs0 = _mm_xor_si128(x->q0, bias), qs1 = _mm_xor_si128(x->q1, bias), qs2 = _mm_xor_si128(x->q2, bias);
+    __m128i d = _mm_subs_epi8(qs0, ps0), pq = _mm_subs_epi8(ps1, qs1);
+    /* s8(3 * (q0 - p0) [+ s8(p1 - q1)]): the saturating adds all go d's way, so they clamp once in effect. */
+    __m128i a = _mm_adds_epi8(_mm_adds_epi8(_mm_adds_epi8(_mm_and_si128(_mm_or_si128(outer, mb), pq), d), d), d);
+    __m128i f1 = sra3_s8(_mm_adds_epi8(a, _mm_set1_epi8(4))), f2 = sra3_s8(_mm_adds_epi8(a, _mm_set1_epi8(3)));
+    /* (f1 + 1) >> 1, for p1 and q1 inside a block */
+    __m128i one = _mm_set1_epi16(1), zero = _mm_setzero_si128();
+    __m128i u = _mm_packs_epi16(_mm_srai_epi16(_mm_add_epi16(_mm_srai_epi16(_mm_unpacklo_epi8(zero, f1), 8), one), 1),
+                                _mm_srai_epi16(_mm_add_epi16(_mm_srai_epi16(_mm_unpackhi_epi8(zero, f1), 8), one), 1));
+    __m128i inner = _mm_andnot_si128(_mm_or_si128(outer, mb), mask), common = _mm_andnot_si128(mb, mask);
+    __m128i a27 = tap_s8(a, 27), a18 = tap_s8(a, 18), a9 = tap_s8(a, 9);
+    mb = _mm_and_si128(mb, mask);
+    /* The base filter moves p0 and q0 (and, inside, p1 and q1); the macroblock filter three pixels each side. */
+    ps0 = blend(common, _mm_adds_epi8(ps0, f2), blend(mb, _mm_adds_epi8(ps0, a27), ps0));
+    qs0 = blend(common, _mm_subs_epi8(qs0, f1), blend(mb, _mm_subs_epi8(qs0, a27), qs0));
+    ps1 = blend(inner, _mm_adds_epi8(ps1, u), blend(mb, _mm_adds_epi8(ps1, a18), ps1));
+    qs1 = blend(inner, _mm_subs_epi8(qs1, u), blend(mb, _mm_subs_epi8(qs1, a18), qs1));
+    ps2 = blend(mb, _mm_adds_epi8(ps2, a9), ps2);
+    qs2 = blend(mb, _mm_subs_epi8(qs2, a9), qs2);
+    x->p2 = _mm_xor_si128(ps2, bias);
+    x->p1 = _mm_xor_si128(ps1, bias);
+    x->p0 = _mm_xor_si128(ps0, bias);
+    x->q0 = _mm_xor_si128(qs0, bias);
+    x->q1 = _mm_xor_si128(qs1, bias);
+    x->q2 = _mm_xor_si128(qs2, bias);
+}
+
+/* The normal filter's lanes: the edge test, then high edge variance picks the filter. */
+static void lf_normal(lf_px_t *x, int edge, int interior, int threshold, int mb)
+{
+    __m128i lim = _mm_set1_epi8((char)interior), thr = _mm_set1_epi8((char)threshold);
+    __m128i m = _mm_max_epu8(_mm_max_epu8(abs_diff(x->p3, x->p2), abs_diff(x->p2, x->p1)),
+                             _mm_max_epu8(abs_diff(x->q3, x->q2), abs_diff(x->q2, x->q1)));
+    __m128i v = _mm_max_epu8(abs_diff(x->p1, x->p0), abs_diff(x->q1, x->q0));
+    __m128i mask = _mm_and_si128(simple_mask(x, 2 * edge + interior), at_most(_mm_max_epu8(m, v), lim));
+    __m128i hev = _mm_xor_si128(at_most(v, thr), _mm_set1_epi8(-1));
+
+    lf_filter(x, mask, hev, mb ? _mm_andnot_si128(hev, mask) : _mm_setzero_si128());
+}
+
+/* 16 (or 8) rows of 8 pixels, p - 4 .. p + 3, into the eight columns' lanes. */
+static void lf_load_across(lf_px_t *x, const unsigned char *p, int stride, int n)
+{
+    __m128i r[16], b[8], lo[4], hi[4], c[8];
+
+    for (int i = 0; i < 16; i++)
+        r[i] = i < n ? _mm_loadl_epi64((const __m128i *)(p - 4 + i * stride)) : _mm_setzero_si128();
+    for (int k = 0; k < 8; k++)
+        b[k] = _mm_unpacklo_epi8(r[2 * k], r[2 * k + 1]);
+    for (int k = 0; k < 4; k++) {
+        lo[k] = _mm_unpacklo_epi16(b[2 * k], b[2 * k + 1]); /* columns 0-3 of rows 4k..4k+3 */
+        hi[k] = _mm_unpackhi_epi16(b[2 * k], b[2 * k + 1]); /* columns 4-7 */
+    }
+    for (int h = 0; h < 2; h++) {
+        __m128i *s = h ? hi : lo;
+        __m128i a0 = _mm_unpacklo_epi32(s[0], s[1]), a1 = _mm_unpackhi_epi32(s[0], s[1]);
+        __m128i b0 = _mm_unpacklo_epi32(s[2], s[3]), b1 = _mm_unpackhi_epi32(s[2], s[3]);
+        c[4 * h] = _mm_unpacklo_epi64(a0, b0);
+        c[4 * h + 1] = _mm_unpackhi_epi64(a0, b0);
+        c[4 * h + 2] = _mm_unpacklo_epi64(a1, b1);
+        c[4 * h + 3] = _mm_unpackhi_epi64(a1, b1);
+    }
+    x->p3 = c[0];
+    x->p2 = c[1];
+    x->p1 = c[2];
+    x->p0 = c[3];
+    x->q0 = c[4];
+    x->q1 = c[5];
+    x->q2 = c[6];
+    x->q3 = c[7];
+}
+
+/* The inverse of lf_load_across. */
+static void lf_store_across(const lf_px_t *x, unsigned char *p, int stride, int n)
+{
+    __m128i c[8] = {x->p3, x->p2, x->p1, x->p0, x->q0, x->q1, x->q2, x->q3}, b[8], d[8];
+
+    for (int k = 0; k < 4; k++) {
+        b[2 * k] = _mm_unpacklo_epi8(c[2 * k], c[2 * k + 1]);     /* rows 0-7, columns 2k and 2k+1 */
+        b[2 * k + 1] = _mm_unpackhi_epi8(c[2 * k], c[2 * k + 1]); /* rows 8-15 */
+    }
+    for (int h = 0; h < 2; h++) {
+        __m128i a0 = _mm_unpacklo_epi16(b[h], b[2 + h]), a1 = _mm_unpackhi_epi16(b[h], b[2 + h]);
+        __m128i b0 = _mm_unpacklo_epi16(b[4 + h], b[6 + h]), b1 = _mm_unpackhi_epi16(b[4 + h], b[6 + h]);
+        d[4 * h] = _mm_unpacklo_epi32(a0, b0);     /* rows 8h, 8h+1: columns 0-7 each */
+        d[4 * h + 1] = _mm_unpackhi_epi32(a0, b0); /* rows 8h+2, 8h+3 */
+        d[4 * h + 2] = _mm_unpacklo_epi32(a1, b1);
+        d[4 * h + 3] = _mm_unpackhi_epi32(a1, b1);
+    }
+    for (int i = 0; i < n; i++) {
+        __m128i row = d[i >> 1];
+        _mm_storel_epi64((__m128i *)(p - 4 + i * stride), (i & 1) ? _mm_srli_si128(row, 8) : row);
     }
 }
 
-static void filter_mb(unsigned char *p, int step)
+static void lf_load_along(lf_px_t *x, const unsigned char *p, int stride, int n)
 {
-    int p2 = p[-3 * step], p1 = p[-2 * step], p0 = p[-step], q0 = p[0], q1 = p[step], q2 = p[2 * step];
-    int w = s8(s8(p1 - q1) + 3 * (q0 - p0)), a;
+    __m128i *v = &x->p3;
 
-    a = (27 * w + 63) >> 7;
-    p[-step] = vp8i_clamp255(p0 + a);
-    p[0] = vp8i_clamp255(q0 - a);
-    a = (18 * w + 63) >> 7;
-    p[-2 * step] = vp8i_clamp255(p1 + a);
-    p[step] = vp8i_clamp255(q1 - a);
-    a = (9 * w + 63) >> 7;
-    p[-3 * step] = vp8i_clamp255(p2 + a);
-    p[2 * step] = vp8i_clamp255(q2 - a);
+    for (int k = 0; k < 8; k++) {
+        const unsigned char *r = p + (k - 4) * stride;
+        v[k] = n == 16 ? _mm_loadu_si128((const __m128i *)r) : _mm_loadl_epi64((const __m128i *)r);
+    }
 }
 
-/* An edge of n pixels: `step` crosses it, `along` follows it. */
-static void edge_normal(unsigned char *p, int step, int along, int n, int edge, int interior, int threshold, int mb)
+static void lf_store_along(const lf_px_t *x, unsigned char *p, int stride, int n)
 {
-    for (int i = 0; i < n; i++, p += along)
-        if (normal_ok(p, step, edge, interior)) {
-            if (mb && !hev(p, step, threshold))
-                filter_mb(p, step);
-            else if (mb)
-                filter_common(p, step, 1);
-            else
-                filter_common(p, step, hev(p, step, threshold));
-        }
+    const __m128i *v = &x->p3;
+
+    for (int k = 1; k < 7; k++) {
+        unsigned char *r = p + (k - 4) * stride;
+        if (n == 16)
+            _mm_storeu_si128((__m128i *)r, v[k]);
+        else
+            _mm_storel_epi64((__m128i *)r, v[k]);
+    }
 }
 
-static void edge_simple(unsigned char *p, int step, int along, int limit)
+/* An edge of n (16 or 8) pixels: `step` crosses it, 1 for a vertical edge, the stride for a horizontal one. */
+static void edge_normal(unsigned char *p, int step, int stride, int n, int edge, int interior, int threshold, int mb)
 {
-    for (int i = 0; i < 16; i++, p += along)
-        if (simple_ok(p, step, limit))
-            filter_common(p, step, 1);
+    lf_px_t x;
+
+    if (step == 1) {
+        lf_load_across(&x, p, stride, n);
+        lf_normal(&x, edge, interior, threshold, mb);
+        lf_store_across(&x, p, stride, n);
+    } else {
+        lf_load_along(&x, p, stride, n);
+        lf_normal(&x, edge, interior, threshold, mb);
+        lf_store_along(&x, p, stride, n);
+    }
+}
+
+static void edge_simple(unsigned char *p, int step, int stride, int limit)
+{
+    lf_px_t x;
+    __m128i all = _mm_set1_epi8(-1), none = _mm_setzero_si128();
+
+    if (step == 1) {
+        lf_load_across(&x, p, stride, 16);
+        lf_filter(&x, simple_mask(&x, limit), all, none);
+        lf_store_across(&x, p, stride, 16);
+    } else {
+        lf_load_along(&x, p, stride, 16);
+        lf_filter(&x, simple_mask(&x, limit), all, none);
+        lf_store_along(&x, p, stride, 16);
+    }
 }
 
 static void loop_filter(vp8_decoder_t *d, const frame_t *f)
@@ -784,10 +914,10 @@ static void loop_filter(vp8_decoder_t *d, const frame_t *f)
                     for (int k = 4; k < 16; k += 4)
                         edge_simple(y + k, 1, s, b_limit);
                 if (row)
-                    edge_simple(y, s, 1, mb_limit);
+                    edge_simple(y, s, s, mb_limit);
                 if (inner)
                     for (int k = 4; k < 16; k += 4)
-                        edge_simple(y + k * s, s, 1, b_limit);
+                        edge_simple(y + k * s, s, s, b_limit);
                 continue;
             }
             if (col) {
@@ -802,15 +932,15 @@ static void loop_filter(vp8_decoder_t *d, const frame_t *f)
                 edge_normal(v + 4, 1, us, 8, level, interior, threshold, 0);
             }
             if (row) {
-                edge_normal(y, s, 1, 16, level + 2, interior, threshold, 1);
-                edge_normal(u, us, 1, 8, level + 2, interior, threshold, 1);
-                edge_normal(v, us, 1, 8, level + 2, interior, threshold, 1);
+                edge_normal(y, s, s, 16, level + 2, interior, threshold, 1);
+                edge_normal(u, us, us, 8, level + 2, interior, threshold, 1);
+                edge_normal(v, us, us, 8, level + 2, interior, threshold, 1);
             }
             if (inner) {
                 for (int k = 4; k < 16; k += 4)
-                    edge_normal(y + k * s, s, 1, 16, level, interior, threshold, 0);
-                edge_normal(u + 4 * us, us, 1, 8, level, interior, threshold, 0);
-                edge_normal(v + 4 * us, us, 1, 8, level, interior, threshold, 0);
+                    edge_normal(y + k * s, s, s, 16, level, interior, threshold, 0);
+                edge_normal(u + 4 * us, us, us, 8, level, interior, threshold, 0);
+                edge_normal(v + 4 * us, us, us, 8, level, interior, threshold, 0);
             }
         }
 }
