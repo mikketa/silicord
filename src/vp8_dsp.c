@@ -307,11 +307,24 @@ void vp8i_find_near_mvs(const int *sign_bias, const vp8_mb_t *m, const vp8_mb_t 
         near_mvs[0] = near_mvs[1];
 }
 
+/* One pass of a subpixel filter over bw x bh pixels; `step` is 1 across a row, the stride down a column. */
+static void filter_pass(unsigned char *dst, int ds, const unsigned char *src, int ss, int step, int bw, int bh,
+                        const short *f)
+{
+    for (int r = 0; r < bh; r++, dst += ds, src += ss)
+        for (int c = 0; c < bw; c++) {
+            const unsigned char *s = src + c;
+            dst[c] = vp8i_clamp255((s[-2 * step] * f[0] + s[-step] * f[1] + s[0] * f[2] + s[step] * f[3] +
+                                    s[2 * step] * f[4] + s[3 * step] * f[5] + 64) >> 7);
+        }
+}
+
 /*
  * A bw x bh block of plane `ref` (pw x ph, the macroblock-aligned size)
  * at (x, y) moved by mv, into dst. Pixels past the edges repeat the edge;
  * fractional positions go through the frame's six-tap or bilinear filters,
- * horizontally then vertically.
+ * horizontally then vertically. A whole-pixel component's filter is
+ * {0, 0, 128, 0, 0, 0}, which returns its input: that pass is skipped.
  */
 void vp8i_predict_inter_block(vp8i_scratch_t *d, unsigned char *dst, int ds, const unsigned char *ref, int rs, int pw,
                                 int ph, int x, int y, int bw, int bh, vp8_mv_t mv)
@@ -340,21 +353,13 @@ void vp8i_predict_inter_block(vp8i_scratch_t *d, unsigned char *dst, int ds, con
     if (!(mx | my)) {
         for (int r = 0; r < bh; r++)
             memcpy(dst + r * ds, src + r * ss, (size_t)bw);
-        return;
-    }
-    {
-        const short *fh = d->filters[mx], *fv = d->filters[my];
-        for (int r = -2; r < bh + 3; r++) {
-            const unsigned char *s = src + r * ss;
-            for (int c = 0; c < bw; c++)
-                d->pass[(r + 2) * 16 + c] = vp8i_clamp255((s[c - 2] * fh[0] + s[c - 1] * fh[1] + s[c] * fh[2] +
-                                                           s[c + 1] * fh[3] + s[c + 2] * fh[4] + s[c + 3] * fh[5] + 64) >> 7);
-        }
-        for (int r = 0; r < bh; r++)
-            for (int c = 0; c < bw; c++) {
-                const unsigned char *t = d->pass + (r + 2) * 16 + c;
-                dst[r * ds + c] = vp8i_clamp255((t[-32] * fv[0] + t[-16] * fv[1] + t[0] * fv[2] + t[16] * fv[3] +
-                                                 t[32] * fv[4] + t[48] * fv[5] + 64) >> 7);
-            }
+    } else if (!my) {
+        filter_pass(dst, ds, src, ss, 1, bw, bh, d->filters[mx]);
+    } else if (!mx) {
+        filter_pass(dst, ds, src, ss, ss, bw, bh, d->filters[my]);
+    } else {
+        /* Two rows above and three below for the vertical taps. */
+        filter_pass(d->pass, 16, src - 2 * ss, ss, 1, bw, bh + 5, d->filters[mx]);
+        filter_pass(dst, ds, d->pass + 2 * 16, 16, 16, bw, bh, d->filters[my]);
     }
 }
