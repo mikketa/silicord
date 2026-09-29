@@ -1008,23 +1008,45 @@ static void sort_guilds(guild_t *g, unsigned n)
 
 /* ---- Direct messages ---- */
 
-/* Recipients come as full user objects, or as ids pointing into `users` (READY's; empty if none). */
-static int next_recipient(json_t users, json_iter_t *it, int by_id, json_t *user)
+/* The user objects recipient ids point to (READY's "users"), their ids read once. Free v with mem_free. */
+typedef struct {
+    char id[24];
+    json_t user;
+} user_ref_t;
+
+typedef struct {
+    user_ref_t *v;
+    unsigned n;
+} users_t;
+
+static void users_read(json_t list, users_t *out)
 {
-    json_t v, u, uid;
-    json_iter_t uit;
+    json_iter_t it;
+    json_t u, uid;
+
+    out->n = 0;
+    out->v = mem_alloc((json_count(list) + 1) * sizeof *out->v);
+    json_iter(list, &it);
+    while (json_next(&it, NULL, &u))
+        if (json_get(u, "id", &uid)) {
+            json_raw(uid, out->v[out->n].id, sizeof out->v[0].id);
+            out->v[out->n++].user = u;
+        }
+}
+
+/* Recipients come as full user objects, or as ids pointing into `users`. */
+static int next_recipient(const users_t *users, json_iter_t *it, int by_id, json_t *user)
+{
+    json_t v;
 
     if (!by_id)
         return json_next(it, NULL, user);
     while (json_next(it, NULL, &v)) {
         char id[24];
         json_raw(v, id, sizeof id);
-        if (!users.p)
-            return 0;
-        json_iter(users, &uit);
-        while (json_next(&uit, NULL, &u))
-            if (json_get(u, "id", &uid) && id_eq(uid, id)) {
-                *user = u;
+        for (unsigned i = 0; i < users->n; i++)
+            if (str_eq(users->v[i].id, id)) {
+                *user = users->v[i].user;
                 return 1;
             }
     }
@@ -1039,8 +1061,8 @@ static void add_user_name(model_t *m, json_t user)
         json_str(v, &m->strings);
 }
 
-/* Returns 0 if `ch` is not a DM or group DM. `users`: the user objects recipient ids point to. */
-static int make_dm(model_t *m, json_t users, json_t ch, channel_t *out)
+/* Returns 0 if `ch` is not a DM or group DM. */
+static int make_dm(model_t *m, const users_t *users, json_t ch, channel_t *out)
 {
     json_t v, list, user;
     json_iter_t it;
@@ -1088,23 +1110,26 @@ static const char *dm_key(const channel_t *c)
     return c->last_message[0] ? c->last_message : c->id;
 }
 
-/* READY's private_channels, whose recipient ids point into its `users`. */
-static void add_dms(model_t *m, unsigned *cap, json_t list, json_t users)
+/* READY's private_channels, whose recipient ids point into its `user_list`. */
+static void add_dms(model_t *m, unsigned *cap, json_t list, json_t user_list)
 {
     json_t ch;
     json_iter_t it;
     unsigned total, n = 0;
     channel_t *tmp;
+    users_t users;
 
     m->dm_first = m->nchannels;
     if (!list.p)
         return;
     total = (unsigned)json_count(list);
     tmp = mem_alloc((total + 1) * sizeof *tmp);
+    users_read(user_list, &users);
     json_iter(list, &it);
     while (n < total && json_next(&it, NULL, &ch))
-        if (make_dm(m, users, ch, &tmp[n]))
+        if (make_dm(m, &users, ch, &tmp[n]))
             n++;
+    mem_free(users.v);
     /* Most recent conversation first; one without messages by when it was created, like Discord. */
     for (unsigned a = 1; a < n; a++) {
         channel_t x = tmp[a];
@@ -1695,22 +1720,27 @@ static model_t *apply_channel(const model_t *m, json_t d, int deleted)
 
     if (gi < 0) {
         channel_t c;
-        json_t users = {0};
+        json_t list = {0};
+        users_t users;
         if (deleted && old < 0)
             return NULL;
         n = clone_empty(m, 0);
         for (unsigned g = 0; g < m->nguilds; g++)
             copy_guild(n, &cap, m, g);
-        json_get(d, "users", &users);
         if (deleted) {
             copy_dms(n, &cap, m, id, NULL, NULL);
-        } else if (!make_dm(n, users, d, &c)) {
+            return n;
+        }
+        json_get(d, "users", &list);
+        users_read(list, &users);
+        if (!make_dm(n, &users, d, &c)) {
             model_free(n);
-            return NULL;
+            n = NULL;
         } else {
             carry_state(&c, find_any((model_t *)m, c.id));
             copy_dms(n, &cap, m, old >= 0 ? id : NULL, old >= 0 ? &c : NULL, old >= 0 ? NULL : &c);
         }
+        mem_free(users.v);
         return n;
     }
 
