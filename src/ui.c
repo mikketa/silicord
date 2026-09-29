@@ -5947,9 +5947,25 @@ static int dm_with(const char *user_id)
     return -1;
 }
 
+/* Opens our direct message with a user, and sends `text` there when not NULL. */
+static void open_dm(const char *user_id, const char *text)
+{
+    int dm = dm_with(user_id);
+
+    if (dm >= 0) {
+        go_to_channel(dm);
+        if (text)
+            app_send_message(chan(dm)->id, text);
+    } else {
+        /* No conversation yet: Discord creates it, then we switch to it. */
+        lstrcpynA(g_ui.pending_dm, user_id, sizeof g_ui.pending_dm);
+        app_open_dm(user_id, text ? text : "");
+    }
+}
+
 static void pop_send(void)
 {
-    int n = GetWindowTextLengthW(g_ui.pop_edit), dm;
+    int n = GetWindowTextLengthW(g_ui.pop_edit);
     wchar_t *w;
     sb_t text = {0};
     char user[24];
@@ -5962,15 +5978,7 @@ static void pop_send(void)
     mem_free(w);
     lstrcpynA(user, g_ui.pop_user, sizeof user);
     pop_close();
-    dm = dm_with(user);
-    if (dm >= 0) {
-        go_to_channel(dm);
-        app_send_message(chan(dm)->id, text.data);
-    } else {
-        /* No conversation yet: Discord creates it, then we switch to it. */
-        lstrcpynA(g_ui.pending_dm, user, sizeof g_ui.pending_dm);
-        app_open_dm(user, text.data);
-    }
+    open_dm(user, text.data);
     sb_free(&text);
 }
 
@@ -8595,16 +8603,9 @@ static void friends_click(int x, int y)
         int acts[2];
         row_actions(r, acts);
         switch (acts[act]) {
-        case ACT_MESSAGE: {
-            int dm = dm_with(r->id);
-            if (dm >= 0) {
-                go_to_channel(dm);
-            } else {
-                lstrcpynA(g_ui.pending_dm, r->id, sizeof g_ui.pending_dm);
-                app_open_dm(r->id, "");
-            }
+        case ACT_MESSAGE:
+            open_dm(r->id, NULL);
             break;
-        }
         case ACT_ACCEPT:
             app_relationship(r->id, "PUT");
             break;
@@ -10241,16 +10242,9 @@ static void user_menu(const char *user_id, const char *name, const char *avatar,
     case CM_PROFILE:
         pop_open(id, nm, av, x, y, 0);
         break;
-    case CM_MESSAGE: {
-        int dm = dm_with(id);
-        if (dm >= 0)
-            go_to_channel(dm);
-        else {
-            lstrcpynA(g_ui.pending_dm, id, sizeof g_ui.pending_dm);
-            app_open_dm(id, "");
-        }
+    case CM_MESSAGE:
+        open_dm(id, NULL);
         break;
-    }
     case CM_COPY_USERNAME:
         copy_text(nm);
         break;
