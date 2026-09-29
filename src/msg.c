@@ -194,14 +194,6 @@ static void first_line(const char *s, size_t n, size_t max, sb_t *out)
     }
 }
 
-static void add_line(sb_t *text, const char *prefix, json_t name)
-{
-    if (text->len)
-        sb_add(text, "\n");
-    sb_add(text, prefix);
-    json_str(name, text);
-}
-
 /*
  * Formatted text to plain text for one-line previews: mentions keep their
  * "@name", custom emoji become ":name:", markdown markers go.
@@ -671,7 +663,7 @@ static void poll_result(json_t obj, msg_t *out)
 {
     json_t list, e, fields, f, name, value;
     json_iter_t it, fit;
-    sb_t question = {0}, winner = {0}, votes = {0}, key = {0};
+    sb_t question = {0}, winner = {0}, votes = {0};
 
     if (json_get(obj, "embeds", &list)) {
         json_iter(list, &it);
@@ -712,7 +704,6 @@ static void poll_result(json_t obj, msg_t *out)
     sb_free(&question);
     sb_free(&winner);
     sb_free(&votes);
-    sb_free(&key);
 }
 
 int msg_parse(json_t obj, msg_t *out)
@@ -797,7 +788,6 @@ int msg_parse(json_t obj, msg_t *out)
     out->edited = json_get(obj, "edited_timestamp", &v) && json_type(v) == JSON_STRING;
     out->mention_everyone = json_get(obj, "mention_everyone", &v) && json_type(v) == JSON_TRUE;
     out->pinned = json_get(obj, "pinned", &v) && json_type(v) == JSON_TRUE;
-    (void)add_line;
 
     if (type == TYPE_RECIPIENT_ADD || type == TYPE_RECIPIENT_REMOVE) {
         /* "added Bob to the group.", "removed Bob from the group.", or "left the group." */
