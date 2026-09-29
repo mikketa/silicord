@@ -37,6 +37,10 @@ Your token grants full access to your account. Silicord stores it in the Windows
 
 Silicord is not affiliated with or endorsed by Discord Inc.
 
+## Download
+
+Get `silicord.exe` from the [latest release](https://github.com/mikketa/silicord/releases/latest). It is a single portable executable: no installer, no dependencies. Release builds are made by GitHub Actions from the tagged commit; see the [Code Signing Policy](#code-signing-policy).
+
 ## Usage
 
 Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings › Scan QR Code), then confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works.
@@ -76,7 +80,7 @@ ctest --test-dir build-host --output-on-failure
 build-host/fuzz 100000 json 42   # a longer run: iterations, target (all, json, command, text, inflate, apng), seed
 ```
 
-If Smart App Control is enabled, Windows blocks unsigned executables you build yourself. Use the CI artifact instead.
+If Smart App Control is enabled, Windows blocks unsigned executables, including the ones you build yourself and the CI artifacts. Use a signed [release](https://github.com/mikketa/silicord/releases), or test local builds on a machine without Smart App Control.
 
 ## Layout
 
@@ -88,6 +92,52 @@ assets/  logo, icon and banners
 tools/   generators: the icon (make_icon.py), Discord's emoji names (make_emoji_aliases.py)
 docs/    roadmap and architecture
 ```
+
+## Privacy
+
+Silicord has no telemetry, analytics or crash reporting, and no server of its own. It only talks to the services needed to show your account:
+
+- Discord: `discord.com` (API), `gateway.discord.gg` (events), `remote-auth-gateway.discord.gg` (QR login), `cdn.discordapp.com` and `*.discordapp.net` (images and files), and the voice server Discord assigns when you join a voice channel, which receives your microphone while you are in the channel and not muted, and your camera or screen only while you share them
+- `media.tenor.com` and `static.klipy.com`: GIFs shown in messages and in the GIF picker
+- `raw.githubusercontent.com`: the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, when a profile uses a display name font not downloaded yet
+
+Every request carries a `Silicord/<version>` user agent with a link to this repository. Links in messages open in your default browser only when you click them.
+
+On your computer, Silicord keeps:
+
+- your token, in the Windows Credential Manager (`silicord/token`)
+- its settings, image cache and fonts, in `%LOCALAPPDATA%\Silicord`
+- pasted pictures waiting to be sent, in `%TEMP%\Silicord-paste`, and with `--debug` the log `%TEMP%\silicord-debug.log`
+
+It writes nothing to the registry, adds no startup entry, file association or shell extension, and installs no service. The tray icon only exists while Silicord runs.
+
+## Uninstalling
+
+1. Log out with the power button next to your name, which removes the token from the Credential Manager. Without logging in again, `cmdkey /delete:silicord/token` does the same.
+2. Close Silicord, including from the tray icon.
+3. Delete `silicord.exe`, the `%LOCALAPPDATA%\Silicord` folder, and if present `%TEMP%\Silicord-paste` and `%TEMP%\silicord-debug.log`.
+
+## Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Only `silicord.exe` is signed, as built by the [release workflow](.github/workflows/release.yml) on GitHub Actions from a tagged commit of this repository. It contains no third-party binaries.
+
+Team roles:
+
+- Committers and reviewers: [mikketa](https://github.com/mikketa)
+- Approvers: [mikketa](https://github.com/mikketa)
+
+Changes from anyone else come as pull requests and are reviewed by a committer before being merged. Every signing request is approved by hand.
+
+Privacy: see [Privacy](#privacy). Silicord sends nothing to other networked systems beyond the services listed there, which it needs to show your account.
+
+Third-party components, included as data in the source:
+
+- emoji short names from [gemoji](https://github.com/github/gemoji) (MIT License, Copyright (c) 2019 GitHub, Inc.), in `src/emoji_data.c`
+- Discord's emoji names from [discord-emoji](https://github.com/xCykrix/discord_emoji) (MIT License, Copyright (c) 2020 Samuel Voeller, Copyright (c) 2016-2020 Marek Kulik), in `src/emoji_alias.c`
+
+Display name fonts are not shipped: they are downloaded at run time from the Google Fonts repository and are under the SIL Open Font License.
 
 ## Contributing
 
