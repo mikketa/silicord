@@ -258,7 +258,7 @@ typedef struct {
     struct {
         RECT r;
         int id;
-    } set_hits[32];            /* what the settings screen drew, for clicks */
+    } set_hits[96];            /* what the settings screen drew, for clicks */
     int nset_hits;
     int pref_notify, pref_title; /* this computer's settings */
     voice_t *voices;           /* who is in the servers' voice channels */
@@ -12809,13 +12809,14 @@ static void qs_open(void)
 
 /* ---- User settings screen ---- */
 
-enum { SET_ACCOUNT, SET_VOICE, SET_NOTIFICATIONS, SET_ADVANCED, SET_ABOUT, SET_PAGES };
+enum { SET_ACCOUNT, SET_BLOCKED, SET_VOICE, SET_NOTIFICATIONS, SET_ADVANCED, SET_ABOUT, SET_PAGES };
 enum {
     SH_PAGE = 0,        /* + page */
     SH_CLOSE = 10, SH_LOGOUT, SH_SAVE, SH_CLEAR, SH_NOTIFY, SH_TITLE, SH_DEVELOPER, SH_SOURCE,
     SH_STATUS = 20,     /* + index in k_status_codes */
     SH_IN_VOL = 30, SH_OUT_VOL, SH_SENS, /* sliders */
     SH_IN_DEV, SH_OUT_DEV, SH_MIC_TEST, SH_MODE_VOICE, SH_MODE_PTT, SH_PTT_KEY,
+    SH_UNBLOCK = 1000,  /* + index in g_ui.rels */
 };
 #define SET_NAV_W 260
 #define SET_ROW 72
@@ -13097,7 +13098,7 @@ static int paint_toggle(int x, int y, int w, const char *title, const char *desc
 
 static void paint_settings(RECT rc)
 {
-    static const char *const pages[] = {"My Account", "Voice & Video", "Notifications", "Advanced", "About"};
+    static const char *const pages[] = {"My Account", "Blocked Users", "Voice & Video", "Notifications", "Advanced", "About"};
     int nav = S(SET_NAV_W), x = settings_content_x(), w = settings_content_w(rc), y;
 
     g_ui.nset_hits = 0;
@@ -13264,6 +13265,35 @@ static void paint_settings(RECT rc)
         paint_toggle(x, y, w, "Unread Count in the Title",
                      "The number of unread mentions in the window title and on the taskbar.", g_ui.pref_title, SH_TITLE);
         break;
+    case SET_BLOCKED: {
+        /* The people we blocked, each with Unblock: Discord keeps them in its settings, not among friends. */
+        int shown = 0;
+        for (int i = 0; i < g_ui.nrels && y < rc.bottom - S(60); i++) {
+            const relation_t *r = &g_ui.rels[i];
+            r_image_t *img;
+            int bw = S(96), bx = x + w - bw, hot = g_ui.settings_hover == SH_UNBLOCK + i;
+            if (r->type != REL_BLOCKED)
+                continue;
+            img = user_avatar(r->id, r->avatar);
+            if (img)
+                r_image(img, x, y + S(10), S(40), S(40), S(20));
+            else
+                r_circle(x, y + S(10), S(40), ARGB(C_ITEM));
+            text(g_ui.f_h, C_INK, rect(x + S(52), y + S(10), w - S(52) - bw - S(16), S(22)), r->name.data ? r->name.data : "",
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            text(g_ui.f_small, C_MUTED, rect(x + S(52), y + S(32), w - S(52) - bw - S(16), S(18)),
+                 r->username.data ? r->username.data : "", DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            r_round(bx, y + S(14), bw, S(32), S(8), hot ? 0xFF2E2E31u : 0xFF242426u);
+            text(g_ui.f_small_mid, C_INK, rect(bx, y + S(14), bw, S(32)), "Unblock", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            set_hit(bx, y + S(14), bw, S(32), SH_UNBLOCK + i);
+            fill(x, y + S(60), w, S(1) > 1 ? S(1) : 1, C_LINE);
+            y += S(61);
+            shown++;
+        }
+        if (!shown)
+            text(g_ui.f_body, C_MUTED, rect(x, y, w, S(24)), "You haven't blocked anyone.", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        break;
+    }
     case SET_ADVANCED:
         paint_toggle(x, y, w, "Developer Mode",
                      "Adds Copy ID to the menus of servers, channels, messages and users. Synced with your other Discord apps.",
@@ -13456,6 +13486,8 @@ static void settings_click(int x, int y)
             g_ui.mic_test = app_voice_mic_test(0);
             KillTimer(g_ui.wnd, TIMER_MIC);
         }
+    } else if (id >= SH_UNBLOCK && id - SH_UNBLOCK < g_ui.nrels) {
+        app_relationship(g_ui.rels[id - SH_UNBLOCK].id, "DELETE"); /* unblocking removes the relationship */
     } else if (id >= SH_STATUS && id < SH_STATUS + 4) {
         set_status(id - SH_STATUS);
     } else {
