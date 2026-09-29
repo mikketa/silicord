@@ -5914,6 +5914,18 @@ static void pop_close(void)
     SetFocus(g_ui.pop_focus && IsWindow(g_ui.pop_focus) ? g_ui.pop_focus : g_ui.wnd);
 }
 
+/* "Message @name" in the popout's empty message box. */
+static void pop_cue(const char *name)
+{
+    char hint[96];
+    wchar_t *w;
+
+    wsprintfA(hint, "Message @%.80s", name ? name : "");
+    w = utf8_to_wide(hint, lstrlenA(hint));
+    SendMessageW(g_ui.pop_edit, EM_SETCUEBANNER, TRUE, (LPARAM)w);
+    mem_free(w);
+}
+
 static void pop_set_profile(profile_t *p)
 {
     unsigned c = 0xFF1E1E1E;
@@ -5926,14 +5938,8 @@ static void pop_set_profile(profile_t *p)
     if (g_ui.pop_brush)
         DeleteObject(g_ui.pop_brush);
     g_ui.pop_brush = CreateSolidBrush(RGB(c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF));
-    if (g_ui.pop_edit && p) {
-        char hint[96];
-        wchar_t *w;
-        wsprintfA(hint, "Message @%.80s", p->name.data ? p->name.data : "");
-        w = utf8_to_wide(hint, lstrlenA(hint));
-        SendMessageW(g_ui.pop_edit, EM_SETCUEBANNER, TRUE, (LPARAM)w);
-        mem_free(w);
-    }
+    if (g_ui.pop_edit && p)
+        pop_cue(p->name.data);
     pop_place();
 }
 
@@ -6184,14 +6190,8 @@ static void pop_open(const char *user_id, const char *name, const char *avatar, 
     if (!p || !fresh)
         app_fetch_profile(user_id, guild);
     pop_set_profile(p);
-    if (!p && g_ui.pop_edit) {
-        char hint[96];
-        wchar_t *w;
-        wsprintfA(hint, "Message @%.80s", name ? name : "");
-        w = utf8_to_wide(hint, lstrlenA(hint));
-        SendMessageW(g_ui.pop_edit, EM_SETCUEBANNER, TRUE, (LPARAM)w);
-        mem_free(w);
-    }
+    if (!p && g_ui.pop_edit)
+        pop_cue(name);
     ShowWindow(g_ui.pop, SW_SHOWNA);
     g_ui.pop_focus = GetFocus(); /* given back on close, usually the composer */
     SetFocus(g_ui.pop);
