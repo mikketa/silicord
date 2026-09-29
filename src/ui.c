@@ -10373,6 +10373,7 @@ static struct {
     shop_item_t *items;
     int ncats, nitems, cap_items;
     unsigned hero, hero_logo;
+    int hero_cat; /* the collection the hero shows: its own banner is left out */
     int scroll, height, hover;
 } g_shop = {.hover = -1};
 
@@ -10556,6 +10557,7 @@ static int shop_parse(const sb_t *json)
         c->logo = shop_get_str(cat, "logo_url");
         shop_colors(cat, c->bg);
         if (!g_shop.hero) {
+            g_shop.hero_cat = g_shop.ncats;
             g_shop.hero = shop_get_str(cat, "hero_banner_url");
             g_shop.hero_logo = shop_get_str(cat, "hero_logo_url");
         }
@@ -10757,8 +10759,10 @@ static int shop_walk(int x0, int w, int draw, int hx, int hy)
     for (int c = 0; c < g_shop.ncats; c++) {
         const shop_cat_t *cat = &g_shop.cats[c];
         int rows = (cat->count + cols - 1) / cols;
-        /* The collection's banner with its logo. */
-        if (draw && r_visible(y, S(SHOP_BANNER_H))) {
+        /* The collection's banner with its logo; the featured one has the hero above it instead. */
+        if (g_shop.hero && c == g_shop.hero_cat) {
+            ;
+        } else if (draw && r_visible(y, S(SHOP_BANNER_H))) {
             r_image_t *banner = shop_image(shop_s(cat->banner), cw), *logo = shop_image(shop_s(cat->logo), cw / 3);
             r_round_gradient(x, y, cw, S(SHOP_BANNER_H), S(8), cat->bg[0] ? cat->bg[0] : 0xFF121214u,
                              cat->bg[1] ? cat->bg[1] : 0xFF121214u);
@@ -10781,7 +10785,8 @@ static int shop_walk(int x0, int w, int draw, int hx, int hy)
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
         }
-        y += S(SHOP_BANNER_H) + S(SHOP_GAP);
+        if (!(g_shop.hero && c == g_shop.hero_cat))
+            y += S(SHOP_BANNER_H) + S(SHOP_GAP);
         for (int k = 0; k < cat->count; k++) {
             int cx = x + (k % cols) * (cardw + S(SHOP_GAP)), cy = y + (k / cols) * (ph + S(SHOP_INFO_H) + S(SHOP_GAP));
             int index = cat->first + k;
