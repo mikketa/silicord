@@ -38,14 +38,15 @@ typedef struct {
     volatile LONG ready;   /* events created; gw_run() and gw_reset() run on one thread */
     int resuming;
     int *established;
-    char session_id[80];
+    char session_id[80];   /* written by gw_run()'s thread, under session_lock: gw_session_id() reads it from others */
+    SRWLOCK session_lock;
     wchar_t resume_host[128];
     inflate_t zlib;    /* one stream per connection */
     sb_t packed;       /* compressed bytes until the flush marker */
     sb_t json;         /* the message they inflate to */
 } gw_t;
 
-static gw_t g_gw;
+static gw_t g_gw = {.session_lock = SRWLOCK_INIT};
 
 static void status(gw_t *g, const char *text)
 {
@@ -123,7 +124,9 @@ static DWORD WINAPI heartbeat_main(LPVOID arg)
 
 static void forget_session(gw_t *g)
 {
+    AcquireSRWLockExclusive(&g->session_lock);
     g->session_id[0] = 0;
+    ReleaseSRWLockExclusive(&g->session_lock);
     g->resume_host[0] = 0;
     InterlockedExchange64(&g->seq, -1);
 }
@@ -136,8 +139,11 @@ static void remember_session(gw_t *g, json_t d)
     const char *host;
     int n = 0;
 
-    if (json_get(d, "session_id", &v))
+    if (json_get(d, "session_id", &v)) {
+        AcquireSRWLockExclusive(&g->session_lock);
         json_raw(v, g->session_id, sizeof g->session_id);
+        ReleaseSRWLockExclusive(&g->session_lock);
+    }
     g->resume_host[0] = 0;
     if (!json_get(d, "resume_gateway_url", &v))
         return;
@@ -325,8 +331,10 @@ void gw_session_id(char *out, size_t size)
 {
     size_t i = 0;
 
+    AcquireSRWLockShared(&g_gw.session_lock);
     for (; i + 1 < size && g_gw.session_id[i]; i++)
         out[i] = g_gw.session_id[i];
+    ReleaseSRWLockShared(&g_gw.session_lock);
     if (size)
         out[i] = 0;
 }
