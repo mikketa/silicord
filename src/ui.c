@@ -195,7 +195,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan, *f_welcome;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -4354,6 +4354,9 @@ static void on_batch(msg_batch_t *b)
     place_composer();
 }
 
+static r_image_t *shop_image(const char *url, int px);
+
+/* The start of a channel, as Discord's: its icon in a faint circle, "Welcome to #name!" in 32px bold, a line under it. */
 static void paint_welcome(int x0, int y, int w, const char *name, int voice)
 {
     char title[192]; /* the longest format, 58 bytes, and 120 of the name */
@@ -4365,25 +4368,31 @@ static void paint_welcome(int x0, int y, int w, const char *name, int voice)
             r_image(img, x0 + S(16), y, S(68), S(68), S(34));
         else
             r_circle(x0 + S(16), y, S(68), ARGB(C_ITEM));
-        text(g_ui.f_title, C_INK, rect(x0 + S(16), y + S(84), w - S(32), S(32)), name,
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_welcome, C_INK, rect(x0 + S(16), y + S(76), w - S(32), S(40)), name,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         wsprintfA(title, c->type == CH_DM ? "This is the beginning of your direct message history with %.120s."
                                           : "Welcome to the beginning of the %.120s group.", name);
-        text(g_ui.f_body, C_MUTED, rect(x0 + S(16), y + S(122), w - S(32), S(24)), title,
+        text(g_ui.f_body, C_TEXT, rect(x0 + S(16), y + S(122), w - S(32), S(24)), title,
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
-    r_circle(x0 + S(16), y, S(68), ARGB(C_ITEM));
-    if (voice)
-        text_w(g_ui.f_icon_big, C_INK, rect(x0 + S(16), y, S(68), S(68)), ICON_VOLUME, -1,
-               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    else
-        text(g_ui.f_title, C_INK, rect(x0 + S(16), y, S(68), S(68)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    wsprintfA(title, "Welcome to %s%.120s", voice ? "" : "#", name);
-    text(g_ui.f_title, C_INK, rect(x0 + S(16), y + S(84), w - S(32), S(32)), title,
-         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    r_circle(x0 + S(16), y, S(68), 0xFF0C0C0Du); /* background-mod-muted */
+    {
+        /* Discord's own pictures of the channel's kind, 44px, and ours until they come */
+        r_image_t *icon = shop_image(voice ? "https://discord.com/assets/f8169a374e27b270.svg"
+                                           : "https://discord.com/assets/4ab68153d28748ee.svg", S(44));
+        if (icon)
+            r_image(icon, x0 + S(16) + S(12), y + S(12), S(44), S(44), 0);
+        else if (voice)
+            text_w(g_ui.f_icon_big, C_INK, rect(x0 + S(16), y, S(68), S(68)), ICON_VOLUME, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        else
+            sicon(SI_HASH, x0 + S(16) + S(12), y + S(12), S(44), 0xFFFFFFFFu);
+    }
+    wsprintfA(title, "Welcome to %s%.120s!", voice ? "" : "#", name);
+    text(g_ui.f_welcome, C_INK, rect(x0 + S(16), y + S(76), w - S(32), S(40)), title,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     wsprintfA(title, voice ? "Voice channels are not supported yet." : "This is the start of the #%.120s channel.", name);
-    text(g_ui.f_body, C_MUTED, rect(x0 + S(16), y + S(122), w - S(32), S(24)), title,
+    text(g_ui.f_body, C_TEXT, rect(x0 + S(16), y + S(122), w - S(32), S(24)), title,
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -4688,7 +4697,7 @@ static void paint_chat_header(RECT rc, int x0, const channel_t *c, const char *n
             text_w(g_ui.f_icon_mid, C_FAINT, rect(x0 + S(12), 0, S(28), S(HEADER_H)), ICON_VOLUME, -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         else
-            text(g_ui.f_title, C_FAINT, rect(x0 + S(12), 0, S(28), S(HEADER_H)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            sicon(SI_HASH, x0 + S(14), (S(HEADER_H) - S(24)) / 2, S(24), ARGB(C_CHANNEL));
         tx = x0 + S(48);
     }
     {
@@ -5824,6 +5833,7 @@ static void make_fonts(void)
     g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
     g_ui.f_menu = r_font(L"Segoe UI", S(14), FW_MEDIUM, 0);
     g_ui.f_chan = r_font(L"Segoe UI", S(16), FW_MEDIUM, 0);
+    g_ui.f_welcome = r_font(L"Segoe UI", S(32), FW_BOLD, 0);
     g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
     /* Discord's marketing headings: heavy italic capitals (Segoe UI Black stands in for its own face). */
     g_ui.f_nitro = r_font(L"Segoe UI", S(64), FW_BLACK, 1);
@@ -10110,7 +10120,7 @@ static void paint_autocomplete(void)
             else
                 r_circle(x + S(8), y + S(7), S(24), ARGB(C_ITEM));
         } else if (g_ui.ac_kind == AC_CHANNEL) {
-            text(g_ui.f_h, C_FAINT, rect(x + S(8), y, S(24), S(AC_ROW)), "#", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            sicon(SI_HASH, x + S(10), y + (S(AC_ROW) - S(20)) / 2, S(20), ARGB(C_CHANNEL));
         } else if (g_ui.ac_kind == AC_COMMAND || g_ui.ac_kind == AC_OPTION) {
             r_image_t *img = NULL;
             int lw = text_width(g_ui.f_body, it->label), right = it->app[0] ? text_width(g_ui.f_small, it->app) + S(16) : 0;
