@@ -109,7 +109,6 @@ void app_send_files(const char *channel_id, const char *text, const char *reply_
 void app_delete_message(const char *channel_id, const char *message_id);
 /* Shows "typing..." to the others for about ten seconds. */
 void app_typing(const char *channel_id);
-/* Mutes or unmutes a server (channel_id NULL) or one of its channels; guild_id NULL for a DM. */
 /* Mutes (for `minutes`, 0 until unmuted) or unmutes a server, or a channel of it (guild_id NULL for DMs). */
 void app_mute(const char *guild_id, const char *channel_id, int muted, int minutes);
 /* Changes notification settings: `fields` are JSON members such as "\"message_notifications\":1". */
@@ -170,12 +169,11 @@ int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx
                    void *ctx);
 /* Someone's volume in calls, in percent (0 to 200; 0 mutes them for you). */
 void app_voice_user_volume(const char *user_id, int percent);
-/* Our status: "online", "idle", "dnd" or "invisible". */
-/* This session's presence: status and custom status text (NULL or empty for none). */
+/* This session's presence: "online", "idle", "dnd" or "invisible", and custom status text (NULL or empty for none). */
 void app_set_status(const char *status, const char *custom);
 /* Changes synced user settings: `fields` are JSON members such as "\"developer_mode\":true". */
 void app_user_settings(const char *fields);
-/* Same, also asking for the member list rows [start, start + 99]. */
+/* Like app_subscribe, also asking for the member list rows [start, start + 99]. */
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start);
 /* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
 void app_request_members(const char *guild_id, const char *const *user_ids, int n);
