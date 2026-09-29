@@ -658,15 +658,21 @@ static void predict_inter(vp8_decoder_t *d, const vp8_mb_t *m, int row, int col,
 /* ---- Loop filter (section 15) ---- */
 
 /*
- * Sixteen positions along an edge at a time (eight for chroma, in the low
- * lanes): each line across an edge is filtered on its own, so this is the
- * scalar filter's result. Pixels are biased to signed bytes (x ^ 0x80),
- * where clamping p + a to 0..255 is a saturating add, and the thresholds
- * (at most 193) fit the saturating unsigned compares.
+ * Sixteen positions along an edge at a time: each line across an edge is
+ * filtered on its own, so this is the scalar filter's result. An edge is
+ * eight registers, x[P3] .. x[Q3], one per pixel across it; a macroblock's
+ * vertical edges are filtered on its transpose, and chroma puts U in the
+ * low eight lanes and V in the high ones, as both take the same levels.
+ * The filters work on signed bytes (x ^ 0x80), where clamping p + a to
+ * 0..255 is a saturating add; the thresholds (at most 193) fit the
+ * saturating unsigned compares of the masks.
  */
-typedef struct {
-    __m128i p3, p2, p1, p0, q0, q1, q2, q3;
-} lf_px_t;
+enum { P3, P2, P1, P0, Q0, Q1, Q2, Q3 };
+
+static __m128i flip(__m128i a)
+{
+    return _mm_xor_si128(a, _mm_set1_epi8(-128));
+}
 
 static __m128i abs_diff(__m128i a, __m128i b)
 {
@@ -680,11 +686,11 @@ static __m128i at_most(__m128i a, __m128i limit)
 }
 
 /* |p0 - q0| * 2 + |p1 - q1| / 2 <= limit */
-static __m128i simple_mask(const lf_px_t *x, int limit)
+static __m128i simple_mask(const __m128i *x, int limit)
 {
     /* Halving bytes as 16-bit lanes, their low bits cleared first so nothing crosses into the next byte. */
-    __m128i d = abs_diff(x->p0, x->q0);
-    __m128i h = _mm_srli_epi16(_mm_and_si128(abs_diff(x->p1, x->q1), _mm_set1_epi8(-2)), 1);
+    __m128i d = abs_diff(x[P0], x[Q0]);
+    __m128i h = _mm_srli_epi16(_mm_and_si128(abs_diff(x[P1], x[Q1]), _mm_set1_epi8(-2)), 1);
 
     return at_most(_mm_adds_epu8(_mm_adds_epu8(d, d), h), _mm_set1_epi8((char)limit));
 }
@@ -699,177 +705,247 @@ static __m128i sra3_s8(__m128i a)
                            _mm_srai_epi16(_mm_unpackhi_epi8(zero, a), 11));
 }
 
-/* (w * k + 63) >> 7 for signed bytes w, as signed bytes. */
-static __m128i tap_s8(__m128i w, int k)
+/* s8(3 * (q0 - p0) + pq): the saturating adds all go the same way, so they clamp once in effect. */
+static __m128i base_value(__m128i pq, __m128i ps0, __m128i qs0)
 {
-    __m128i zero = _mm_setzero_si128(), m = _mm_set1_epi16((short)k), r = _mm_set1_epi16(63);
-    __m128i lo = _mm_srai_epi16(_mm_add_epi16(_mm_mullo_epi16(_mm_srai_epi16(_mm_unpacklo_epi8(zero, w), 8), m), r), 7);
-    __m128i hi = _mm_srai_epi16(_mm_add_epi16(_mm_mullo_epi16(_mm_srai_epi16(_mm_unpackhi_epi8(zero, w), 8), m), r), 7);
+    __m128i d = _mm_subs_epi8(qs0, ps0);
 
-    return _mm_packs_epi16(lo, hi);
+    return _mm_adds_epi8(_mm_adds_epi8(_mm_adds_epi8(pq, d), d), d);
 }
 
-static __m128i blend(__m128i mask, __m128i yes, __m128i no)
+/* p0 += (a + 3) >> 3 and q0 -= (a + 4) >> 3, a 0 where nothing moves; returns (a + 4) >> 3. */
+static __m128i adjust(__m128i *ps0, __m128i *qs0, __m128i a)
 {
-    return _mm_or_si128(_mm_and_si128(mask, yes), _mm_andnot_si128(mask, no));
+    __m128i f1 = sra3_s8(_mm_adds_epi8(a, _mm_set1_epi8(4))), f2 = sra3_s8(_mm_adds_epi8(a, _mm_set1_epi8(3)));
+
+    *qs0 = _mm_subs_epi8(*qs0, f1);
+    *ps0 = _mm_adds_epi8(*ps0, f2);
+    return f1;
+}
+
+/* (w * 9k + 63) >> 7 for k = 1, 2, 3: (w << 8) * (9 << 8) >> 16 is w * 9. */
+static void taps(__m128i w, __m128i *a9, __m128i *a18, __m128i *a27)
+{
+    __m128i zero = _mm_setzero_si128(), k9 = _mm_set1_epi16(9 << 8), r = _mm_set1_epi16(63);
+    __m128i lo = _mm_mulhi_epi16(_mm_unpacklo_epi8(zero, w), k9), hi = _mm_mulhi_epi16(_mm_unpackhi_epi8(zero, w), k9);
+    __m128i lo9 = _mm_add_epi16(lo, r), hi9 = _mm_add_epi16(hi, r);
+    __m128i lo18 = _mm_add_epi16(lo9, lo), hi18 = _mm_add_epi16(hi9, hi);
+
+    *a9 = _mm_packs_epi16(_mm_srai_epi16(lo9, 7), _mm_srai_epi16(hi9, 7));
+    *a18 = _mm_packs_epi16(_mm_srai_epi16(lo18, 7), _mm_srai_epi16(hi18, 7));
+    *a27 = _mm_packs_epi16(_mm_srai_epi16(_mm_add_epi16(lo18, lo), 7), _mm_srai_epi16(_mm_add_epi16(hi18, hi), 7));
+}
+
+/* The simple filter: p0 and q0 only, the base value always taking p1 - q1. */
+static void edge_simple(__m128i *x, int limit)
+{
+    __m128i ps0 = flip(x[P0]), qs0 = flip(x[Q0]);
+    __m128i a = base_value(_mm_subs_epi8(flip(x[P1]), flip(x[Q1])), ps0, qs0);
+
+    adjust(&ps0, &qs0, _mm_and_si128(simple_mask(x, limit), a));
+    x[P0] = flip(ps0);
+    x[Q0] = flip(qs0);
 }
 
 /*
- * Filters the lanes in `mask`. `outer` selects the lanes whose base value
- * takes p1 - q1 into account (the others move p1 and q1 too); `mb` those
- * filtered as a macroblock edge, over three pixels on each side.
+ * The normal filter: the edge test, then high edge variance picks the
+ * filter. Its lanes move p0 and q0 by a base value that takes p1 - q1; the
+ * others move p1 and q1 too inside a macroblock, three pixels on each side
+ * across a macroblock edge (mb).
  */
-static void lf_filter(lf_px_t *x, __m128i mask, __m128i outer, __m128i mb)
+static void edge_normal(__m128i *x, int edge, int interior, int threshold, int mb)
 {
-    const __m128i bias = _mm_set1_epi8(-128);
-    __m128i ps2 = _mm_xor_si128(x->p2, bias), ps1 = _mm_xor_si128(x->p1, bias), ps0 = _mm_xor_si128(x->p0, bias);
-    __m128i qs0 = _mm_xor_si128(x->q0, bias), qs1 = _mm_xor_si128(x->q1, bias), qs2 = _mm_xor_si128(x->q2, bias);
-    __m128i d = _mm_subs_epi8(qs0, ps0), pq = _mm_subs_epi8(ps1, qs1);
-    /* s8(3 * (q0 - p0) [+ s8(p1 - q1)]): the saturating adds all go d's way, so they clamp once in effect. */
-    __m128i a = _mm_adds_epi8(_mm_adds_epi8(_mm_adds_epi8(_mm_and_si128(_mm_or_si128(outer, mb), pq), d), d), d);
-    __m128i f1 = sra3_s8(_mm_adds_epi8(a, _mm_set1_epi8(4))), f2 = sra3_s8(_mm_adds_epi8(a, _mm_set1_epi8(3)));
-    /* (f1 + 1) >> 1, for p1 and q1 inside a block */
-    __m128i one = _mm_set1_epi16(1), zero = _mm_setzero_si128();
-    __m128i u = _mm_packs_epi16(_mm_srai_epi16(_mm_add_epi16(_mm_srai_epi16(_mm_unpacklo_epi8(zero, f1), 8), one), 1),
-                                _mm_srai_epi16(_mm_add_epi16(_mm_srai_epi16(_mm_unpackhi_epi8(zero, f1), 8), one), 1));
-    __m128i inner = _mm_andnot_si128(_mm_or_si128(outer, mb), mask), common = _mm_andnot_si128(mb, mask);
-    __m128i a27 = tap_s8(a, 27), a18 = tap_s8(a, 18), a9 = tap_s8(a, 9);
-    mb = _mm_and_si128(mb, mask);
-    /* The base filter moves p0 and q0 (and, inside, p1 and q1); the macroblock filter three pixels each side. */
-    ps0 = blend(common, _mm_adds_epi8(ps0, f2), blend(mb, _mm_adds_epi8(ps0, a27), ps0));
-    qs0 = blend(common, _mm_subs_epi8(qs0, f1), blend(mb, _mm_subs_epi8(qs0, a27), qs0));
-    ps1 = blend(inner, _mm_adds_epi8(ps1, u), blend(mb, _mm_adds_epi8(ps1, a18), ps1));
-    qs1 = blend(inner, _mm_subs_epi8(qs1, u), blend(mb, _mm_subs_epi8(qs1, a18), qs1));
-    ps2 = blend(mb, _mm_adds_epi8(ps2, a9), ps2);
-    qs2 = blend(mb, _mm_subs_epi8(qs2, a9), qs2);
-    x->p2 = _mm_xor_si128(ps2, bias);
-    x->p1 = _mm_xor_si128(ps1, bias);
-    x->p0 = _mm_xor_si128(ps0, bias);
-    x->q0 = _mm_xor_si128(qs0, bias);
-    x->q1 = _mm_xor_si128(qs1, bias);
-    x->q2 = _mm_xor_si128(qs2, bias);
+    __m128i m = _mm_max_epu8(_mm_max_epu8(abs_diff(x[P3], x[P2]), abs_diff(x[P2], x[P1])),
+                             _mm_max_epu8(abs_diff(x[Q3], x[Q2]), abs_diff(x[Q2], x[Q1])));
+    __m128i v = _mm_max_epu8(abs_diff(x[P1], x[P0]), abs_diff(x[Q1], x[Q0]));
+    __m128i mask = _mm_and_si128(simple_mask(x, 2 * edge + interior),
+                                 at_most(_mm_max_epu8(m, v), _mm_set1_epi8((char)interior)));
+    __m128i hev = _mm_xor_si128(at_most(v, _mm_set1_epi8((char)threshold)), _mm_set1_epi8(-1));
+    __m128i ps1 = flip(x[P1]), ps0 = flip(x[P0]), qs0 = flip(x[Q0]), qs1 = flip(x[Q1]), pq = _mm_subs_epi8(ps1, qs1);
+
+    if (mb) {
+        __m128i ps2 = flip(x[P2]), qs2 = flip(x[Q2]), a9, a18, a27;
+        __m128i w = _mm_and_si128(mask, base_value(pq, ps0, qs0));
+        adjust(&ps0, &qs0, _mm_and_si128(hev, w));
+        taps(_mm_andnot_si128(hev, w), &a9, &a18, &a27);
+        ps0 = _mm_adds_epi8(ps0, a27);
+        qs0 = _mm_subs_epi8(qs0, a27);
+        ps1 = _mm_adds_epi8(ps1, a18);
+        qs1 = _mm_subs_epi8(qs1, a18);
+        x[P2] = flip(_mm_adds_epi8(ps2, a9));
+        x[Q2] = flip(_mm_subs_epi8(qs2, a9));
+    } else {
+        __m128i f1 = adjust(&ps0, &qs0, _mm_and_si128(mask, base_value(_mm_and_si128(hev, pq), ps0, qs0)));
+        /* (f1 + 1) >> 1 as (f1 + 128 + 1) / 2 - 64, unsigned; 0 in the high variance lanes */
+        __m128i u = _mm_andnot_si128(hev, _mm_sub_epi8(_mm_avg_epu8(flip(f1), _mm_setzero_si128()), _mm_set1_epi8(64)));
+        ps1 = _mm_adds_epi8(ps1, u);
+        qs1 = _mm_subs_epi8(qs1, u);
+    }
+    x[P1] = flip(ps1);
+    x[P0] = flip(ps0);
+    x[Q0] = flip(qs0);
+    x[Q1] = flip(qs1);
 }
 
-/* The normal filter's lanes: the edge test, then high edge variance picks the filter. */
-static void lf_normal(lf_px_t *x, int edge, int interior, int threshold, int mb)
-{
-    __m128i lim = _mm_set1_epi8((char)interior), thr = _mm_set1_epi8((char)threshold);
-    __m128i m = _mm_max_epu8(_mm_max_epu8(abs_diff(x->p3, x->p2), abs_diff(x->p2, x->p1)),
-                             _mm_max_epu8(abs_diff(x->q3, x->q2), abs_diff(x->q2, x->q1)));
-    __m128i v = _mm_max_epu8(abs_diff(x->p1, x->p0), abs_diff(x->q1, x->q0));
-    __m128i mask = _mm_and_si128(simple_mask(x, 2 * edge + interior), at_most(_mm_max_epu8(m, v), lim));
-    __m128i hev = _mm_xor_si128(at_most(v, thr), _mm_set1_epi8(-1));
+/* Interleaves register i with register i + 8 into 2i and 2i + 1, by elements of w (epi8 .. epi64). */
+#define INTERLEAVE_PAIR(w, o, x, i) \
+    (o[2 * (i)] = _mm_unpacklo_##w(x[i], x[(i) + 8]), o[2 * (i) + 1] = _mm_unpackhi_##w(x[i], x[(i) + 8]))
+#define INTERLEAVE(w, o, x)                                                                 \
+    (INTERLEAVE_PAIR(w, o, x, 0), INTERLEAVE_PAIR(w, o, x, 1), INTERLEAVE_PAIR(w, o, x, 2), \
+     INTERLEAVE_PAIR(w, o, x, 3), INTERLEAVE_PAIR(w, o, x, 4), INTERLEAVE_PAIR(w, o, x, 5), \
+     INTERLEAVE_PAIR(w, o, x, 6), INTERLEAVE_PAIR(w, o, x, 7))
 
-    lf_filter(x, mask, hev, mb ? _mm_andnot_si128(hev, mask) : _mm_setzero_si128());
+/*
+ * Transposes 16 rows of 16 bytes in place: four rounds of interleaving
+ * register i with register i + 8, from the rows in bit-reversed order.
+ * Written out, as compilers keep the loops' arrays in memory.
+ */
+static void transpose16(__m128i *m)
+{
+    __m128i a[16] = {m[0], m[8], m[4], m[12], m[2], m[10], m[6], m[14],
+                     m[1], m[9], m[5], m[13], m[3], m[11], m[7], m[15]};
+    __m128i b[16];
+
+    INTERLEAVE(epi8, b, a);
+    INTERLEAVE(epi16, a, b);
+    INTERLEAVE(epi32, b, a);
+    INTERLEAVE(epi64, m, b);
 }
 
-/* 16 (or 8) rows of 8 pixels, p - 4 .. p + 3, into the eight columns' lanes. */
-static void lf_load_across(lf_px_t *x, const unsigned char *p, int stride, int n)
+/* The four columns left of a luma macroblock, p - 4 .. p - 1 of its 16 rows, into c[0..3]. */
+static void load_left(__m128i *c, const unsigned char *p, int s)
 {
-    __m128i r[16], b[8], lo[4], hi[4], c[8];
+    __m128i r[16], t[8], u[4];
 
     for (int i = 0; i < 16; i++)
-        r[i] = i < n ? _mm_loadl_epi64((const __m128i *)(p - 4 + i * stride)) : _mm_setzero_si128();
-    for (int k = 0; k < 8; k++)
-        b[k] = _mm_unpacklo_epi8(r[2 * k], r[2 * k + 1]);
-    for (int k = 0; k < 4; k++) {
-        lo[k] = _mm_unpacklo_epi16(b[2 * k], b[2 * k + 1]); /* columns 0-3 of rows 4k..4k+3 */
-        hi[k] = _mm_unpackhi_epi16(b[2 * k], b[2 * k + 1]); /* columns 4-7 */
-    }
-    for (int h = 0; h < 2; h++) {
-        __m128i *s = h ? hi : lo;
-        __m128i a0 = _mm_unpacklo_epi32(s[0], s[1]), a1 = _mm_unpackhi_epi32(s[0], s[1]);
-        __m128i b0 = _mm_unpacklo_epi32(s[2], s[3]), b1 = _mm_unpackhi_epi32(s[2], s[3]);
-        c[4 * h] = _mm_unpacklo_epi64(a0, b0);
-        c[4 * h + 1] = _mm_unpackhi_epi64(a0, b0);
-        c[4 * h + 2] = _mm_unpacklo_epi64(a1, b1);
-        c[4 * h + 3] = _mm_unpackhi_epi64(a1, b1);
-    }
-    x->p3 = c[0];
-    x->p2 = c[1];
-    x->p1 = c[2];
-    x->p0 = c[3];
-    x->q0 = c[4];
-    x->q1 = c[5];
-    x->q2 = c[6];
-    x->q3 = c[7];
+        r[i] = _mm_cvtsi32_si128(vp8i_load4(p - 4 + i * s));
+    for (int i = 0; i < 8; i++)
+        t[i] = _mm_unpacklo_epi8(r[2 * i], r[2 * i + 1]);
+    for (int i = 0; i < 4; i++)
+        u[i] = _mm_unpacklo_epi16(t[2 * i], t[2 * i + 1]); /* rows 4i..4i+3, four bytes per column */
+    t[0] = _mm_unpacklo_epi32(u[0], u[1]);
+    t[1] = _mm_unpackhi_epi32(u[0], u[1]);
+    t[2] = _mm_unpacklo_epi32(u[2], u[3]);
+    t[3] = _mm_unpackhi_epi32(u[2], u[3]);
+    c[0] = _mm_unpacklo_epi64(t[0], t[2]);
+    c[1] = _mm_unpackhi_epi64(t[0], t[2]);
+    c[2] = _mm_unpacklo_epi64(t[1], t[3]);
+    c[3] = _mm_unpackhi_epi64(t[1], t[3]);
 }
 
-/* The inverse of lf_load_across. */
-static void lf_store_across(const lf_px_t *x, unsigned char *p, int stride, int n)
+static void store4(unsigned char *p, __m128i v)
 {
-    __m128i c[8] = {x->p3, x->p2, x->p1, x->p0, x->q0, x->q1, x->q2, x->q3}, b[8], d[8];
+    int x = _mm_cvtsi128_si32(v);
 
-    for (int k = 0; k < 4; k++) {
-        b[2 * k] = _mm_unpacklo_epi8(c[2 * k], c[2 * k + 1]);     /* rows 0-7, columns 2k and 2k+1 */
-        b[2 * k + 1] = _mm_unpackhi_epi8(c[2 * k], c[2 * k + 1]); /* rows 8-15 */
-    }
-    for (int h = 0; h < 2; h++) {
-        __m128i a0 = _mm_unpacklo_epi16(b[h], b[2 + h]), a1 = _mm_unpackhi_epi16(b[h], b[2 + h]);
-        __m128i b0 = _mm_unpacklo_epi16(b[4 + h], b[6 + h]), b1 = _mm_unpackhi_epi16(b[4 + h], b[6 + h]);
-        d[4 * h] = _mm_unpacklo_epi32(a0, b0);     /* rows 8h, 8h+1: columns 0-7 each */
-        d[4 * h + 1] = _mm_unpackhi_epi32(a0, b0); /* rows 8h+2, 8h+3 */
-        d[4 * h + 2] = _mm_unpacklo_epi32(a1, b1);
-        d[4 * h + 3] = _mm_unpackhi_epi32(a1, b1);
-    }
-    for (int i = 0; i < n; i++) {
-        __m128i row = d[i >> 1];
-        _mm_storel_epi64((__m128i *)(p - 4 + i * stride), (i & 1) ? _mm_srli_si128(row, 8) : row);
+    memcpy(p, &x, 4);
+}
+
+/* The inverse of load_left. */
+static void store_left(const __m128i *c, unsigned char *p, int s)
+{
+    __m128i a0 = _mm_unpacklo_epi8(c[0], c[1]), a1 = _mm_unpackhi_epi8(c[0], c[1]);
+    __m128i b0 = _mm_unpacklo_epi8(c[2], c[3]), b1 = _mm_unpackhi_epi8(c[2], c[3]);
+    __m128i r[4] = {_mm_unpacklo_epi16(a0, b0), _mm_unpackhi_epi16(a0, b0), _mm_unpacklo_epi16(a1, b1),
+                    _mm_unpackhi_epi16(a1, b1)}; /* rows 4i..4i+3 */
+
+    for (int i = 0; i < 4; i++) {
+        unsigned char *q = p - 4 + 4 * i * s;
+        store4(q, r[i]);
+        store4(q + s, _mm_srli_si128(r[i], 4));
+        store4(q + 2 * s, _mm_srli_si128(r[i], 8));
+        store4(q + 3 * s, _mm_srli_si128(r[i], 12));
     }
 }
 
-static void lf_load_along(lf_px_t *x, const unsigned char *p, int stride, int n)
-{
-    __m128i *v = &x->p3;
+typedef struct {
+    int level, interior, threshold, simple;
+} lf_level_t;
 
-    for (int k = 0; k < 8; k++) {
-        const unsigned char *r = p + (k - 4) * stride;
-        v[k] = n == 16 ? _mm_loadu_si128((const __m128i *)r) : _mm_loadl_epi64((const __m128i *)r);
-    }
+/* One edge of a macroblock (mb) or inside it; the simple filter's limit is the normal filter's edge test's. */
+static void filter_edge(__m128i *x, const lf_level_t *l, int mb)
+{
+    int edge = mb ? l->level + 2 : l->level;
+
+    if (l->simple)
+        edge_simple(x, 2 * edge + l->interior);
+    else
+        edge_normal(x, edge, l->interior, l->threshold, mb);
 }
 
-static void lf_store_along(const lf_px_t *x, unsigned char *p, int stride, int n)
+/*
+ * A luma macroblock: its 16 rows, 4 above them for the top edge, in m[4..19]
+ * and m[0..3]; for the vertical edges its 16 columns and 4 to their left,
+ * the same way, and back.
+ */
+static void filter_luma(unsigned char *y, int s, const lf_level_t *l, int left, int top, int inner)
 {
-    const __m128i *v = &x->p3;
+    __m128i m[20];
 
-    for (int k = 1; k < 7; k++) {
-        unsigned char *r = p + (k - 4) * stride;
-        if (n == 16)
-            _mm_storeu_si128((__m128i *)r, v[k]);
-        else
-            _mm_storel_epi64((__m128i *)r, v[k]);
+    for (int i = 0; i < 16; i++)
+        m[4 + i] = _mm_loadu_si128((const __m128i *)(y + i * s));
+    if (left || inner) {
+        transpose16(m + 4);
+        if (left) {
+            load_left(m, y, s);
+            filter_edge(m, l, 1);
+        }
+        if (inner)
+            for (int k = 4; k < 16; k += 4)
+                filter_edge(m + k, l, 0);
+        if (left)
+            store_left(m, y, s);
+        transpose16(m + 4);
     }
+    if (top) {
+        for (int i = 0; i < 4; i++)
+            m[i] = _mm_loadu_si128((const __m128i *)(y + (i - 4) * s));
+        filter_edge(m, l, 1);
+        for (int i = 1; i < 4; i++)
+            _mm_storeu_si128((__m128i *)(y + (i - 4) * s), m[i]);
+    }
+    if (inner)
+        for (int k = 4; k < 16; k += 4)
+            filter_edge(m + k, l, 0);
+    for (int i = 0; i < 16; i++)
+        _mm_storeu_si128((__m128i *)(y + i * s), m[4 + i]);
 }
 
-/* An edge of n (16 or 8) pixels: `step` crosses it, 1 for a vertical edge, the stride for a horizontal one. */
-static void edge_normal(unsigned char *p, int step, int stride, int n, int edge, int interior, int threshold, int mb)
+/*
+ * The chroma macroblocks, U in the low lanes and V in the high ones. The
+ * vertical edges transpose 16 bytes from 4 left of each row, whose last
+ * four columns come back unchanged: the next macroblock's or the border's.
+ */
+static void filter_chroma(unsigned char *u, unsigned char *v, int s, const lf_level_t *l, int left, int top, int inner)
 {
-    lf_px_t x;
+    __m128i m[16];
 
-    if (step == 1) {
-        lf_load_across(&x, p, stride, n);
-        lf_normal(&x, edge, interior, threshold, mb);
-        lf_store_across(&x, p, stride, n);
-    } else {
-        lf_load_along(&x, p, stride, n);
-        lf_normal(&x, edge, interior, threshold, mb);
-        lf_store_along(&x, p, stride, n);
+    if (left || inner) {
+        for (int i = 0; i < 8; i++) {
+            m[i] = _mm_loadu_si128((const __m128i *)(u - 4 + i * s));
+            m[8 + i] = _mm_loadu_si128((const __m128i *)(v - 4 + i * s));
+        }
+        transpose16(m);
+        if (left)
+            filter_edge(m, l, 1);
+        if (inner)
+            filter_edge(m + 4, l, 0);
+        transpose16(m);
+        for (int i = 0; i < 8; i++) {
+            _mm_storeu_si128((__m128i *)(u - 4 + i * s), m[i]);
+            _mm_storeu_si128((__m128i *)(v - 4 + i * s), m[8 + i]);
+        }
     }
-}
-
-static void edge_simple(unsigned char *p, int step, int stride, int limit)
-{
-    lf_px_t x;
-    __m128i all = _mm_set1_epi8(-1), none = _mm_setzero_si128();
-
-    if (step == 1) {
-        lf_load_across(&x, p, stride, 16);
-        lf_filter(&x, simple_mask(&x, limit), all, none);
-        lf_store_across(&x, p, stride, 16);
-    } else {
-        lf_load_along(&x, p, stride, 16);
-        lf_filter(&x, simple_mask(&x, limit), all, none);
-        lf_store_along(&x, p, stride, 16);
+    for (int i = top ? -4 : 0; i < 8; i++) {
+        __m128i a = _mm_loadl_epi64((const __m128i *)(u + i * s)), b = _mm_loadl_epi64((const __m128i *)(v + i * s));
+        m[4 + i] = _mm_unpacklo_epi64(a, b);
+    }
+    if (top)
+        filter_edge(m, l, 1);
+    if (inner)
+        filter_edge(m + 4, l, 0);
+    for (int i = top ? -3 : 0; i < 8; i++) {
+        _mm_storel_epi64((__m128i *)(u + i * s), m[4 + i]);
+        _mm_storel_epi64((__m128i *)(v + i * s), _mm_unpackhi_epi64(m[4 + i], m[4 + i]));
     }
 }
 
@@ -880,68 +956,36 @@ static void loop_filter(vp8_decoder_t *d, const frame_t *f)
     for (int row = 0; row < d->mb_rows; row++)
         for (int col = 0; col < d->mb_cols; col++) {
             const vp8_mb_t *m = mb_at(d, row, col);
-            unsigned char *y = f->y + row * 16 * s + col * 16, *u = f->u + row * 8 * us + col * 8, *v = f->v + row * 8 * us + col * 8;
-            int level = d->lf.level, interior, threshold, inner;
+            lf_level_t l = {d->lf.level, 0, 0, d->lf.simple};
+            int inner;
             if (d->seg.enabled) {
-                level = d->seg.abs ? d->seg.lf[m->segment] : level + d->seg.lf[m->segment];
-                level = level < 0 ? 0 : level > 63 ? 63 : level;
+                l.level = d->seg.abs ? d->seg.lf[m->segment] : l.level + d->seg.lf[m->segment];
+                l.level = l.level < 0 ? 0 : l.level > 63 ? 63 : l.level;
             }
             if (d->lf.delta_enabled) {
-                level += d->lf.ref_delta[m->ref];
+                l.level += d->lf.ref_delta[m->ref];
                 if (m->ref == CURRENT)
-                    level += m->y_mode == B_PRED ? d->lf.mode_delta[0] : 0;
+                    l.level += m->y_mode == B_PRED ? d->lf.mode_delta[0] : 0;
                 else
-                    level += d->lf.mode_delta[m->y_mode == ZEROMV ? 1 : m->y_mode == SPLITMV ? 3 : 2];
-                level = level < 0 ? 0 : level > 63 ? 63 : level;
+                    l.level += d->lf.mode_delta[m->y_mode == ZEROMV ? 1 : m->y_mode == SPLITMV ? 3 : 2];
+                l.level = l.level < 0 ? 0 : l.level > 63 ? 63 : l.level;
             }
-            if (!level)
+            if (!l.level)
                 continue;
-            interior = level;
+            l.interior = l.level;
             if (d->lf.sharpness) {
-                interior >>= d->lf.sharpness > 4 ? 2 : 1;
-                if (interior > 9 - d->lf.sharpness)
-                    interior = 9 - d->lf.sharpness;
+                l.interior >>= d->lf.sharpness > 4 ? 2 : 1;
+                if (l.interior > 9 - d->lf.sharpness)
+                    l.interior = 9 - d->lf.sharpness;
             }
-            if (interior < 1)
-                interior = 1;
-            threshold = (level >= 40) + (level >= 15) + (level >= 20 && !d->key);
+            if (l.interior < 1)
+                l.interior = 1;
+            l.threshold = (l.level >= 40) + (l.level >= 15) + (l.level >= 20 && !d->key);
             inner = m->coded || m->y_mode == SPLITMV || m->y_mode == B_PRED;
-            if (d->lf.simple) {
-                int mb_limit = (level + 2) * 2 + interior, b_limit = level * 2 + interior;
-                if (col)
-                    edge_simple(y, 1, s, mb_limit);
-                if (inner)
-                    for (int k = 4; k < 16; k += 4)
-                        edge_simple(y + k, 1, s, b_limit);
-                if (row)
-                    edge_simple(y, s, s, mb_limit);
-                if (inner)
-                    for (int k = 4; k < 16; k += 4)
-                        edge_simple(y + k * s, s, s, b_limit);
-                continue;
-            }
-            if (col) {
-                edge_normal(y, 1, s, 16, level + 2, interior, threshold, 1);
-                edge_normal(u, 1, us, 8, level + 2, interior, threshold, 1);
-                edge_normal(v, 1, us, 8, level + 2, interior, threshold, 1);
-            }
-            if (inner) {
-                for (int k = 4; k < 16; k += 4)
-                    edge_normal(y + k, 1, s, 16, level, interior, threshold, 0);
-                edge_normal(u + 4, 1, us, 8, level, interior, threshold, 0);
-                edge_normal(v + 4, 1, us, 8, level, interior, threshold, 0);
-            }
-            if (row) {
-                edge_normal(y, s, s, 16, level + 2, interior, threshold, 1);
-                edge_normal(u, us, us, 8, level + 2, interior, threshold, 1);
-                edge_normal(v, us, us, 8, level + 2, interior, threshold, 1);
-            }
-            if (inner) {
-                for (int k = 4; k < 16; k += 4)
-                    edge_normal(y + k * s, s, s, 16, level, interior, threshold, 0);
-                edge_normal(u + 4 * us, us, us, 8, level, interior, threshold, 0);
-                edge_normal(v + 4 * us, us, us, 8, level, interior, threshold, 0);
-            }
+            filter_luma(f->y + row * 16 * s + col * 16, s, &l, col, row, inner);
+            /* The simple filter leaves chroma alone. */
+            if (!l.simple)
+                filter_chroma(f->u + row * 8 * us + col * 8, f->v + row * 8 * us + col * 8, us, &l, col, row, inner);
         }
 }
 

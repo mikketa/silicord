@@ -59,11 +59,6 @@ static __inline int vp8i_load4(const unsigned char *p)
     return v;
 }
 
-/* Inline: the loop filter and the predictions call it for every pixel. */
-static __inline unsigned char vp8i_clamp255(int v)
-{
-    return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
-}
 /* The Y2 block's inverse Walsh-Hadamard transform into the Y blocks' DC coefficients. */
 void vp8i_iwht(short *coeffs);
 /* Adds a block's inverse DCT to the prediction already at dst. */
