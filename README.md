@@ -16,7 +16,7 @@ A native Discord client for Windows, written in C and x64 assembly. No embedded 
 > - typing indicators, unread markers, the mentions inbox, notifications with Discord's per-server and per-channel settings, the member list with statuses and role colors, and user profiles with their (animated) banner, badges, roles, avatar decoration and display name style
 > - a settings screen: status and custom status, developer mode, notification preferences
 >
-> Voice is being built: joining channels with Discord's end-to-end encryption (DAVE, over MLS) and an Opus codec written from scratch are in, but not yet tested against Discord's servers. See the [roadmap](docs/ROADMAP.md).
+> Voice is being built: joining channels with Discord's end-to-end encryption (DAVE, over MLS) and an Opus codec written from scratch are in, and so are cameras and screen sharing (Go Live) with a VP8 codec of our own, but not yet tested against Discord's servers. See the [roadmap](docs/ROADMAP.md).
 
 ## Why
 

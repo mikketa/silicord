@@ -36,6 +36,7 @@ enum {
     UI_COMMANDS,        /* text = the guild or channel id, NUL, then the application-command-index (empty on failure) */
     UI_VOICE,           /* text = the VOICE_* state as a digit, NUL, then a status line */
     UI_VIDEO,           /* no payload: someone's video changed; see app_video_take() */
+    UI_STREAM,          /* no payload: our screen share or the stream we watch changed; see app_stream_status() */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -161,13 +162,23 @@ int app_voice_mic_level(void);
 /* Starts or stops hearing yourself (not during a call); returns whether the test runs. */
 int app_voice_mic_test(int on);
 /*
- * Someone's latest video picture in our call: calls take() with it (BGRA)
- * when it changed since *serial. Returns 0 without video from them, 1 when
- * unchanged, 2 when copied. The tile it is shown in (pixels) sets the size
- * of the next pictures: the one they are drawn at, by copying.
+ * Someone's latest video picture in our call (with `stream`, of their Go
+ * Live stream): calls take() with it (BGRA) when it changed since *serial.
+ * Returns 0 without video from them, 1 when unchanged, 2 when copied. The
+ * tile it is shown in (pixels) sets the size of the next pictures: the one
+ * they are drawn at, by copying.
  */
-int app_video_take(const char *user_id, int tile_w, int tile_h, unsigned *serial,
+int app_video_take(const char *user_id, int stream, int tile_w, int tile_h, unsigned *serial,
                    void (*take)(void *ctx, const unsigned *bgra, int w, int h), void *ctx);
+/* Shares the screen showing `wnd` in our call (Go Live), or stops; returns whether it is shared. */
+int app_screen_share(int on, HWND wnd);
+/* Watches someone's Go Live stream in our call (NULL stops); returns whether it was asked for. */
+int app_stream_watch(const char *user_id);
+/*
+ * Our share's connection state (VOICE_*, VOICE_OFF when not sharing); whom
+ * we watch (empty for nobody) and its connection's state.
+ */
+int app_stream_status(char *watch_user, size_t n, int *watch_state);
 /* Someone's volume in calls, in percent (0 to 200; 0 mutes them for you). */
 void app_voice_user_volume(const char *user_id, int percent);
 /* This session's presence: "online", "idle", "dnd" or "invisible", and custom status text (NULL or empty for none). */

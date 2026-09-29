@@ -89,6 +89,7 @@ add_executable(silicord
   src/render.cpp
   src/audio.c
   src/camera.c
+  src/screen.c
   src/ui.c
   src/voice.c
   src/ws.c
@@ -100,7 +101,7 @@ target_compile_definitions(silicord PRIVATE
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0>
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_ICON="${CMAKE_SOURCE_DIR}/assets/silicord.ico">)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid d3d11 dxgi dxguid)
 
 enable_testing()
 # tests/<name>_test.c, built like the client; extra arguments are libraries to link.

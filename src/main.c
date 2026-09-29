@@ -21,6 +21,7 @@
 #include "vp8.h"
 #include "vp8_enc.h"
 #include "camera.h"
+#include "screen.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -557,6 +558,12 @@ static void voice_state_changed(void *ctx, int state, const char *text)
 /* ---- Video from the call: one decoder per person, the latest picture kept as BGRA for the UI ---- */
 
 #define MAX_VIEWS 16
+/*
+ * A Go Live stream's picture and sound are kept apart from its sender's
+ * camera and microphone: under their id with the top bit set, which
+ * snowflakes never use.
+ */
+#define STREAM_BIT (1ull << 63)
 
 static struct {
     unsigned long long user;
@@ -671,6 +678,10 @@ static void voice_left(void *ctx, unsigned long long user)
 #define CAMERA_H 360
 #define CAMERA_FPS 15
 #define CAMERA_KBPS 800
+/* What the camera announces it may send (the server sizes its forwarding by it). */
+#define CAMERA_MAX_W 1280
+#define CAMERA_MAX_H 720
+#define CAMERA_MAX_FPS 30
 
 static vp8_encoder_t *g_venc;    /* the capture thread's */
 static volatile LONG g_want_key, g_camera_on;
@@ -686,7 +697,7 @@ static void camera_frame(void *ctx, const vp8_image_t *img, unsigned long long m
         key = 1;
     }
     if (g_venc && vp8_encode(g_venc, img, key, &g_vframe))
-        voice_video_send((const unsigned char *)g_vframe.data, g_vframe.len, (unsigned)(ms * 90));
+        voice_video_send(VOICE_LINK_CALL, (const unsigned char *)g_vframe.data, g_vframe.len, (unsigned)(ms * 90));
     /* Our own tile shows what we send. */
     EnterCriticalSection(&g_video_lock);
     i = view_get(g_vc.p.user_id);
@@ -708,7 +719,7 @@ static void camera_off(void)
     if (!InterlockedExchange(&g_camera_on, 0))
         return;
     camera_stop();
-    voice_video_active(0);
+    voice_video_active(VOICE_LINK_CALL, 0, 0, 0, 0);
     vp8_encoder_free(g_venc);
     g_venc = NULL;
     sb_free(&g_vframe);
@@ -725,10 +736,10 @@ static void views_clear(void)
     LeaveCriticalSection(&g_video_lock);
 }
 
-int app_video_take(const char *user_id, int tile_w, int tile_h, unsigned *serial,
+int app_video_take(const char *user_id, int stream, int tile_w, int tile_h, unsigned *serial,
                    void (*take)(void *ctx, const unsigned *bgra, int w, int h), void *ctx)
 {
-    unsigned long long u = parse_id(user_id);
+    unsigned long long u = parse_id(user_id) | (stream ? STREAM_BIT : 0);
     int i, fresh = 0;
 
     InterlockedExchange(&g_video_posted, 0);
@@ -793,8 +804,430 @@ static void voice_try_start(void)
     ev.key_frame = voice_key_frame;
     if (g_vc.active && g_vc.have_state && g_vc.have_server) {
         g_vc.have_server = 0;
-        voice_start(&g_vc.p, &ev);
+        voice_start(VOICE_LINK_CALL, &g_vc.p, &ev);
     }
+}
+
+/* ---- Go Live: our screen shared, and someone's watched, each over a voice connection of its own ---- */
+
+#define SHARE_MAX_W 1280
+#define SHARE_MAX_H 720
+#define SHARE_FPS 15
+#define SHARE_KBPS 2500
+
+/*
+ * A stream we created (op 18) or watch (op 20). The gateway answers with
+ * STREAM_CREATE (its voice server's id) and STREAM_SERVER_UPDATE (where and
+ * with which token), as it does for the call with its two voice events.
+ */
+typedef struct {
+    int on;
+    int have_create, have_server;
+    char key[96];               /* guild:<guild>:<channel>:<user>, or call:<channel>:<user> in a direct message */
+    unsigned long long user;    /* whose stream */
+    voice_params_t p;
+} live_t;
+
+static live_t g_share, g_watch; /* under g_voice_lock */
+/* Held while a stream's connection starts or stops, so a stop never runs between the check and the start. */
+static CRITICAL_SECTION g_live_lock;
+static volatile LONG g_share_state, g_share_active, g_share_want_key, g_watch_state;
+
+/* What the capture thread keeps between pictures of our screen. */
+static struct {
+    vp8_encoder_t *enc;
+    int w, h;                   /* what we send */
+    unsigned *scaled;
+    unsigned char *yuv;
+    picture_scratch_t scratch;
+    sb_t frame;
+} g_sh;
+
+static void stream_key(char *out, size_t n, const char *guild, const char *channel, unsigned long long user)
+{
+    sb_t k = {0};
+
+    if (guild[0]) {
+        sb_add(&k, "guild:");
+        sb_add(&k, guild);
+        sb_add(&k, ":");
+    } else {
+        sb_add(&k, "call:");
+    }
+    sb_add(&k, channel);
+    sb_add(&k, ":");
+    sb_u64(&k, user);
+    lstrcpynA(out, k.data, (int)n);
+    sb_free(&k);
+}
+
+/* Op 19 (stop sharing or watching), 20 (watch) or 22 (not paused) about a stream. */
+static void send_stream_op(int op, const char *key)
+{
+    sb_t m = {0};
+
+    sb_add(&m, "{\"op\":");
+    sb_i64(&m, op);
+    sb_add(&m, ",\"d\":{\"stream_key\":");
+    sb_json_str(&m, key, (size_t)lstrlenA(key));
+    sb_add(&m, op == 22 ? ",\"paused\":false}}" : "}}");
+    gw_send(&m);
+    sb_free(&m);
+}
+
+/* Op 18: a stream of ours in the call's channel. */
+static void send_stream_create(const char *guild, const char *channel)
+{
+    sb_t m = {0};
+
+    if (guild[0]) {
+        sb_add(&m, "{\"op\":18,\"d\":{\"type\":\"guild\",\"guild_id\":\"");
+        sb_add(&m, guild);
+        sb_add(&m, "\"");
+    } else {
+        sb_add(&m, "{\"op\":18,\"d\":{\"type\":\"call\",\"guild_id\":null");
+    }
+    sb_add(&m, ",\"channel_id\":\"");
+    sb_add(&m, channel);
+    sb_add(&m, "\",\"preferred_region\":null}}");
+    gw_send(&m);
+    sb_free(&m);
+}
+
+/* Our screen, captured: scaled to what we send, to I420, encoded and sent; our own tile shows it too. */
+static void share_frame(void *ctx, const unsigned *bgra, int w, int h, int stride, unsigned long long ms)
+{
+    int ow, oh, cw, i, key;
+    unsigned char *u, *v;
+    vp8_image_t img;
+
+    (void)ctx;
+    picture_fit(w, h, w < SHARE_MAX_W ? w : SHARE_MAX_W, h < SHARE_MAX_H ? h : SHARE_MAX_H, &ow, &oh);
+    ow = ow > 2 ? ow & ~1 : 2;
+    oh = oh > 2 ? oh & ~1 : 2;
+    cw = ow / 2;
+    if (ow != g_sh.w || oh != g_sh.h) {
+        /* A new size (the first picture, or the monitor's mode changed): announced again, from a key frame. */
+        if (InterlockedExchange(&g_share_active, 0))
+            voice_video_active(VOICE_LINK_SHARE, 0, 0, 0, 0);
+        vp8_encoder_free(g_sh.enc);
+        g_sh.enc = NULL;
+        mem_free(g_sh.scaled);
+        mem_free(g_sh.yuv);
+        g_sh.scaled = mem_alloc((size_t)ow * oh * 4);
+        g_sh.yuv = mem_alloc((size_t)ow * oh * 3 / 2);
+        g_sh.w = ow;
+        g_sh.h = oh;
+    }
+    u = g_sh.yuv + ow * oh;
+    v = u + cw * (oh / 2);
+    if (ow == w && oh == h) {
+        picture_bgra_to_i420(bgra, w, h, stride, g_sh.yuv, u, v, ow, cw);
+    } else {
+        picture_scale_bgra(bgra, w, h, stride, ow, oh, g_sh.scaled, &g_sh.scratch);
+        picture_bgra_to_i420(g_sh.scaled, ow, oh, ow, g_sh.yuv, u, v, ow, cw);
+    }
+    img.w = ow;
+    img.h = oh;
+    img.y = g_sh.yuv;
+    img.u = u;
+    img.v = v;
+    img.y_stride = ow;
+    img.uv_stride = cw;
+    /* Video goes out once the stream's connection is up, announced with its size. */
+    if (g_share_state == VOICE_CONNECTED && !g_share_active &&
+        voice_video_active(VOICE_LINK_SHARE, 1, ow, oh, SHARE_FPS)) {
+        InterlockedExchange(&g_share_active, 1);
+        InterlockedExchange(&g_share_want_key, 1);
+    }
+    if (g_share_active) {
+        key = (int)InterlockedExchange(&g_share_want_key, 0);
+        if (!g_sh.enc) {
+            g_sh.enc = vp8_encoder_new(ow, oh, SHARE_KBPS, SHARE_FPS);
+            key = 1;
+        }
+        if (g_sh.enc && vp8_encode(g_sh.enc, &img, key, &g_sh.frame))
+            voice_video_send(VOICE_LINK_SHARE, (const unsigned char *)g_sh.frame.data, g_sh.frame.len,
+                             (unsigned)(ms * 90));
+    }
+    EnterCriticalSection(&g_video_lock);
+    i = view_get(g_vc.p.user_id | STREAM_BIT);
+    if (i >= 0)
+        view_store(i, &img);
+    LeaveCriticalSection(&g_video_lock);
+    if (!InterlockedExchange(&g_video_posted, 1))
+        ui_post(UI_VIDEO, NULL);
+}
+
+static void share_state_changed(void *ctx, int state, const char *text)
+{
+    (void)ctx;
+    voice_log(NULL, text);
+    InterlockedExchange(&g_share_state, state);
+    ui_post(UI_STREAM, NULL);
+}
+
+static void share_key_frame(void *ctx)
+{
+    (void)ctx;
+    InterlockedExchange(&g_share_want_key, 1);
+}
+
+static void watch_state_changed(void *ctx, int state, const char *text)
+{
+    (void)ctx;
+    voice_log(NULL, text);
+    InterlockedExchange(&g_watch_state, state);
+    ui_post(UI_STREAM, NULL);
+}
+
+/* The watched stream's sound, mixed at its sender's volume. */
+static void watch_frame(void *ctx, unsigned long long user, unsigned seq, const unsigned char *opus, size_t n)
+{
+    (void)ctx;
+    EnterCriticalSection(&g_mix_lock);
+    mixer_set_volume(&g_mixer, user | STREAM_BIT, user_volume(user));
+    mixer_push(&g_mixer, user | STREAM_BIT, seq, opus, n);
+    LeaveCriticalSection(&g_mix_lock);
+}
+
+static void watch_video(void *ctx, unsigned long long user, const unsigned char *vp8, size_t n)
+{
+    voice_video(ctx, user | STREAM_BIT, vp8, n);
+}
+
+static void watch_video_state(void *ctx, unsigned long long user, int on)
+{
+    voice_video_state(ctx, user | STREAM_BIT, on);
+}
+
+static void watch_left(void *ctx, unsigned long long user)
+{
+    voice_left(ctx, user | STREAM_BIT);
+}
+
+/* Stops sharing our screen; `tell` sends op 19 (not when the gateway ended the stream itself). */
+static void share_stop(int tell)
+{
+    char key[96];
+    int on;
+
+    EnterCriticalSection(&g_live_lock);
+    EnterCriticalSection(&g_voice_lock);
+    on = g_share.on;
+    lstrcpynA(key, g_share.key, sizeof key);
+    g_share.on = 0;
+    LeaveCriticalSection(&g_voice_lock);
+    if (!on) {
+        LeaveCriticalSection(&g_live_lock);
+        return;
+    }
+    screen_stop();
+    if (InterlockedExchange(&g_share_active, 0))
+        voice_video_active(VOICE_LINK_SHARE, 0, 0, 0, 0);
+    voice_stop(VOICE_LINK_SHARE);
+    vp8_encoder_free(g_sh.enc);
+    mem_free(g_sh.scaled);
+    mem_free(g_sh.yuv);
+    picture_scratch_free(&g_sh.scratch);
+    sb_free(&g_sh.frame);
+    g_sh.enc = NULL;
+    g_sh.scaled = NULL;
+    g_sh.yuv = NULL;
+    g_sh.w = g_sh.h = 0;
+    view_remove(g_vc.p.user_id | STREAM_BIT);
+    LeaveCriticalSection(&g_live_lock);
+    if (tell)
+        send_stream_op(19, key);
+    InterlockedExchange(&g_share_state, VOICE_OFF);
+    ui_post(UI_STREAM, NULL);
+    ui_post(UI_VIDEO, NULL);
+}
+
+/* Stops watching; `tell` sends op 19, which leaves the stream. */
+static void watch_stop(int tell)
+{
+    char key[96];
+    unsigned long long user;
+    int on;
+
+    EnterCriticalSection(&g_live_lock);
+    EnterCriticalSection(&g_voice_lock);
+    on = g_watch.on;
+    user = g_watch.user;
+    lstrcpynA(key, g_watch.key, sizeof key);
+    g_watch.on = 0;
+    LeaveCriticalSection(&g_voice_lock);
+    if (!on) {
+        LeaveCriticalSection(&g_live_lock);
+        return;
+    }
+    voice_stop(VOICE_LINK_WATCH);
+    LeaveCriticalSection(&g_live_lock);
+    voice_left(NULL, user | STREAM_BIT);
+    if (tell)
+        send_stream_op(19, key);
+    InterlockedExchange(&g_watch_state, VOICE_OFF);
+    ui_post(UI_STREAM, NULL);
+}
+
+int app_screen_share(int on, HWND wnd)
+{
+    char guild[24], channel[24];
+    int ok;
+
+    if (!on) {
+        share_stop(1);
+        return 0;
+    }
+    EnterCriticalSection(&g_voice_lock);
+    ok = g_vc.active && g_vc.have_state && !g_share.on;
+    if (ok) {
+        lstrcpynA(guild, g_vc.guild, sizeof guild);
+        lstrcpynA(channel, g_vc.channel, sizeof channel);
+        memset(&g_share, 0, sizeof g_share);
+        g_share.on = 1;
+        g_share.user = g_vc.p.user_id;
+        stream_key(g_share.key, sizeof g_share.key, guild, channel, g_share.user);
+    }
+    LeaveCriticalSection(&g_voice_lock);
+    if (!ok)
+        return g_share.on;
+    InterlockedExchange(&g_share_state, VOICE_CONNECTING);
+    InterlockedExchange(&g_share_active, 0);
+    if (!screen_start(wnd, SHARE_FPS, share_frame, NULL)) {
+        EnterCriticalSection(&g_voice_lock);
+        g_share.on = 0;
+        LeaveCriticalSection(&g_voice_lock);
+        InterlockedExchange(&g_share_state, VOICE_OFF);
+        return 0;
+    }
+    send_stream_create(guild, channel);
+    send_stream_op(22, g_share.key);
+    ui_post(UI_STREAM, NULL);
+    return 1;
+}
+
+int app_stream_watch(const char *user_id)
+{
+    char guild[24], channel[24], key[96];
+    unsigned long long user = user_id ? parse_id(user_id) : 0;
+    int ok;
+
+    watch_stop(1);
+    if (!user)
+        return 0;
+    EnterCriticalSection(&g_voice_lock);
+    ok = g_vc.active && g_vc.have_state && user != g_vc.p.user_id;
+    if (ok) {
+        lstrcpynA(guild, g_vc.guild, sizeof guild);
+        lstrcpynA(channel, g_vc.channel, sizeof channel);
+        memset(&g_watch, 0, sizeof g_watch);
+        g_watch.on = 1;
+        g_watch.user = user;
+        stream_key(g_watch.key, sizeof g_watch.key, guild, channel, user);
+        lstrcpynA(key, g_watch.key, sizeof key);
+    }
+    LeaveCriticalSection(&g_voice_lock);
+    if (!ok)
+        return 0;
+    InterlockedExchange(&g_watch_state, VOICE_CONNECTING);
+    send_stream_op(20, key);
+    ui_post(UI_STREAM, NULL);
+    return 1;
+}
+
+int app_stream_status(char *watch_user, size_t n, int *watch_state)
+{
+    unsigned long long user = 0;
+    int sharing;
+
+    EnterCriticalSection(&g_voice_lock);
+    sharing = g_share.on;
+    if (g_watch.on)
+        user = g_watch.user;
+    LeaveCriticalSection(&g_voice_lock);
+    if (watch_user && n) {
+        sb_t u = {0};
+        if (user)
+            sb_u64(&u, user);
+        lstrcpynA(watch_user, u.data ? u.data : "", (int)n);
+        sb_free(&u);
+    }
+    if (watch_state)
+        *watch_state = user ? (int)g_watch_state : VOICE_OFF;
+    return sharing ? (int)g_share_state : VOICE_OFF;
+}
+
+/* STREAM_CREATE, STREAM_SERVER_UPDATE and STREAM_DELETE about the stream we share or the one we watch. */
+static void live_dispatch(json_t t, json_t d)
+{
+    live_t *streams[2] = {&g_share, &g_watch};
+    voice_params_t start[2];
+    int starting[2] = {0, 0}, ended[2] = {0, 0};
+    char key[96] = "";
+    json_t v;
+
+    if (json_get(d, "stream_key", &v))
+        json_raw(v, key, sizeof key);
+    EnterCriticalSection(&g_live_lock);
+    EnterCriticalSection(&g_voice_lock);
+    for (int k = 0; k < 2; k++) {
+        live_t *l = streams[k];
+        if (!key[0] || !l->on || lstrcmpA(l->key, key) != 0)
+            continue;
+        if (json_str_eq(t, "STREAM_DELETE")) {
+            ended[k] = 1;
+            continue;
+        }
+        if (json_str_eq(t, "STREAM_CREATE") && json_get(d, "rtc_server_id", &v)) {
+            char id[24];
+            json_raw(v, id, sizeof id);
+            l->p.server_id = parse_id(id);
+            /* DAVE's group for a stream is the id before its server's */
+            l->p.channel_id = l->p.server_id - 1;
+            l->have_create = 1;
+        } else if (json_str_eq(t, "STREAM_SERVER_UPDATE") && json_get(d, "endpoint", &v) &&
+                   json_type(v) == JSON_STRING) {
+            json_raw(v, l->p.endpoint, sizeof l->p.endpoint);
+            if (json_get(d, "token", &v))
+                json_raw(v, l->p.token, sizeof l->p.token);
+            l->have_server = 1;
+        }
+        if (l->have_create && l->have_server) {
+            /* Our call's voice session, with the stream's server and token. */
+            lstrcpynA(l->p.session_id, g_vc.p.session_id, sizeof l->p.session_id);
+            l->p.user_id = g_vc.p.user_id;
+            l->p.screen = 1;
+            l->have_server = 0;
+            start[k] = l->p;
+            starting[k] = 1;
+        }
+    }
+    LeaveCriticalSection(&g_voice_lock);
+    if (starting[0]) {
+        voice_events_t ev = {0};
+        ev.state = share_state_changed;
+        ev.log = voice_log;
+        ev.key_frame = share_key_frame;
+        InterlockedExchange(&g_share_active, 0);
+        voice_start(VOICE_LINK_SHARE, &start[0], &ev);
+    }
+    if (starting[1]) {
+        voice_events_t ev = {0};
+        ev.state = watch_state_changed;
+        ev.log = voice_log;
+        ev.frame = watch_frame;
+        ev.video = watch_video;
+        ev.video_state = watch_video_state;
+        ev.left = watch_left;
+        voice_start(VOICE_LINK_WATCH, &start[1], &ev);
+    }
+    LeaveCriticalSection(&g_live_lock);
+    if (ended[0])
+        share_stop(0);
+    if (ended[1])
+        watch_stop(0);
 }
 
 void app_voice_join(const char *guild_id, const char *channel_id)
@@ -810,7 +1243,10 @@ void app_voice_join(const char *guild_id, const char *channel_id)
     lstrcpynA(g_vc.guild, guild_id, sizeof g_vc.guild);
     lstrcpynA(g_vc.channel, channel_id, sizeof g_vc.channel);
     LeaveCriticalSection(&g_voice_lock);
-    voice_stop();
+    /* Streams belong to the call's channel. */
+    share_stop(1);
+    watch_stop(1);
+    voice_stop(VOICE_LINK_CALL);
     app_voice_mic_test(0);
     if (was && lstrcmpA(old, guild_id) != 0)
         send_voice_state(old, NULL);
@@ -837,13 +1273,13 @@ int app_video_camera(int on)
     if (!on) {
         camera_off();
     } else if (!g_camera_on) {
-        if (!voice_video_active(1))
+        if (!voice_video_active(VOICE_LINK_CALL, 1, CAMERA_MAX_W, CAMERA_MAX_H, CAMERA_MAX_FPS))
             return 0;
         InterlockedExchange(&g_want_key, 1);
         InterlockedExchange(&g_camera_on, 1);
         if (!camera_start(0, CAMERA_W, CAMERA_H, CAMERA_FPS, camera_frame, NULL)) {
             InterlockedExchange(&g_camera_on, 0);
-            voice_video_active(0);
+            voice_video_active(VOICE_LINK_CALL, 0, 0, 0, 0);
             return 0;
         }
     }
@@ -866,13 +1302,15 @@ void app_voice_leave(void)
     char guild[24];
     int was;
 
+    share_stop(1);
+    watch_stop(1);
     EnterCriticalSection(&g_voice_lock);
     was = g_vc.active;
     lstrcpynA(guild, g_vc.guild, sizeof guild);
     g_vc.active = 0;
     LeaveCriticalSection(&g_voice_lock);
     camera_off();
-    voice_stop();
+    voice_stop(VOICE_LINK_CALL);
     audio_mode(AUDIO_OFF);
     views_clear();
     EnterCriticalSection(&g_mix_lock);
@@ -923,6 +1361,12 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
     int kind;
     msg_batch_t *b;
 
+    if (json_str_eq(t, "STREAM_CREATE") || json_str_eq(t, "STREAM_SERVER_UPDATE") || json_str_eq(t, "STREAM_DELETE") ||
+        json_str_eq(t, "STREAM_UPDATE")) {
+        if (current(s))
+            live_dispatch(t, d);
+        return;
+    }
     if (current(s) && (json_str_eq(t, "VOICE_STATE_UPDATE") || json_str_eq(t, "VOICE_SERVER_UPDATE"))) {
         voice_dispatch(s, t, d);
         if (json_str_eq(t, "VOICE_SERVER_UPDATE"))
@@ -2606,6 +3050,7 @@ void entry(void)
     InitializeCriticalSection(&g_open_lock);
     InitializeCriticalSection(&g_session_lock);
     InitializeCriticalSection(&g_voice_lock);
+    InitializeCriticalSection(&g_live_lock);
     InitializeCriticalSection(&g_mix_lock);
     InitializeCriticalSection(&g_audio_lock);
     InitializeCriticalSection(&g_video_lock);

@@ -69,12 +69,13 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define SIDE_W 240
 #define HEADER_H 48
 #define PANEL_H 56
-#define VOICE_BAR_H 52 /* above the user panel while in voice */
+#define VOICE_BAR_H 92 /* above the user panel while in voice: its state, then a row of buttons */
+#define VOICE_ROW1_H 52
 #define CAT_H 40
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF, HIT_VOICE_CAMERA };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF, HIT_VOICE_CAMERA, HIT_VOICE_SHARE };
 
 typedef struct {
     char key[96];
@@ -239,6 +240,15 @@ typedef struct {
     char voice_name[100];      /* its channel name */
     unsigned voice_speaking;   /* who spoke at the last check, one bit per member of our call */
     int voice_muted, voice_deafened, voice_camera;
+    int share_state;           /* our Go Live stream's connection, VOICE_* (VOICE_OFF when not sharing) */
+    char watch_user[24];       /* whose stream we watch, empty for nobody */
+    int watch_state;           /* its connection, VOICE_* */
+    struct {
+        RECT r;
+        char user[24];
+    } live_hits[16];           /* the streams' tiles drawn with a button to watch them */
+    int nlive_hits;
+    RECT stream_close;         /* the watched stream's close button */
     struct {
         char channel[24];
         int ringing;           /* we are being rung */
@@ -246,6 +256,7 @@ typedef struct {
     int ncalls, ring_sound;
     struct {
         char user[24];
+        int stream;            /* their Go Live stream rather than their camera */
         r_image_t *img;
         unsigned serial;
     } video[16];               /* the latest picture of each video in our call */
@@ -1129,6 +1140,7 @@ static void voice_request_names(void)
 /* ---- Calls in direct messages ---- */
 
 #define CALL_H 200
+#define CALL_STREAM_H 420 /* the watched stream above the call's tiles */
 #define CALL_RED 0xFFE5484Du
 
 static void clamp_scroll(void);
@@ -1237,6 +1249,8 @@ static void voice_join(const char *guild_id, const char *channel_id, const char 
 static void voice_leave(void)
 {
     g_ui.voice_camera = 0;
+    g_ui.share_state = g_ui.watch_state = VOICE_OFF;
+    g_ui.watch_user[0] = 0;
     KillTimer(g_ui.wnd, TIMER_VOICE);
     app_voice_leave();
     g_ui.voice_state = VOICE_OFF;
@@ -1296,12 +1310,27 @@ static const char *call_user(const char *user, const char *channel, const char *
 }
 
 /* The open direct message's call, above its messages: who is in it, and the buttons. */
+/* The member of voice channel `channel` whose Go Live stream we watch, if any. */
+static const voice_t *watched_in(const char *channel)
+{
+    if (!g_ui.watch_user[0] || !in_call(channel))
+        return NULL;
+    for (int i = 0; i < g_ui.nvoices; i++)
+        if (lstrcmpA(g_ui.voices[i].channel, channel) == 0 && lstrcmpA(g_ui.voices[i].user, g_ui.watch_user) == 0 &&
+            (g_ui.voices[i].flags & VOICE_STREAM))
+            return &g_ui.voices[i];
+    return NULL;
+}
+
+/* A direct message's call panel: taller while it shows a stream we watch. */
 static int call_h(void)
 {
-    return g_ui.model && g_ui.channel >= 0 && is_dm_type(chan(g_ui.channel)->type) &&
-                   (call_find(chan(g_ui.channel)->id) >= 0 || in_call(chan(g_ui.channel)->id))
-               ? S(CALL_H)
-               : 0;
+    const channel_t *c;
+
+    if (!g_ui.model || g_ui.channel < 0 || !is_dm_type((c = chan(g_ui.channel))->type) ||
+        (call_find(c->id) < 0 && !in_call(c->id)))
+        return 0;
+    return S(CALL_H) + (watched_in(c->id) ? S(CALL_STREAM_H) : 0);
 }
 
 /* ---- Video tiles ---- */
@@ -1345,13 +1374,16 @@ static void copy_picture(void *ctx, const unsigned *bgra, int w, int h)
         memcpy(r_image_bits(*img), bgra, (size_t)w * (size_t)h * 4);
 }
 
-/* Someone's current video picture, or NULL when they show none; tile_w x tile_h is where it goes. */
-static r_image_t *video_picture(const char *user, int tile_w, int tile_h)
+/*
+ * Someone's current video picture (with `stream`, their Go Live stream's),
+ * or NULL when they show none; tile_w x tile_h is where it goes.
+ */
+static r_image_t *video_picture(const char *user, int stream, int tile_w, int tile_h)
 {
     int i, free_slot = -1;
 
     for (i = 0; i < (int)ARRAYSIZE(g_ui.video); i++) {
-        if (lstrcmpA(g_ui.video[i].user, user) == 0)
+        if (g_ui.video[i].stream == stream && lstrcmpA(g_ui.video[i].user, user) == 0)
             break;
         if (!g_ui.video[i].user[0] && free_slot < 0)
             free_slot = i;
@@ -1361,9 +1393,10 @@ static r_image_t *video_picture(const char *user, int tile_w, int tile_h)
             return NULL;
         i = free_slot;
         lstrcpynA(g_ui.video[i].user, user, sizeof g_ui.video[i].user);
+        g_ui.video[i].stream = stream;
         g_ui.video[i].serial = 0;
     }
-    if (!app_video_take(user, tile_w, tile_h, &g_ui.video[i].serial, copy_picture, &g_ui.video[i].img)) {
+    if (!app_video_take(user, stream, tile_w, tile_h, &g_ui.video[i].serial, copy_picture, &g_ui.video[i].img)) {
         r_image_free(g_ui.video[i].img);
         g_ui.video[i].img = NULL;
         g_ui.video[i].user[0] = 0;
@@ -1372,10 +1405,17 @@ static r_image_t *video_picture(const char *user, int tile_w, int tile_h)
     return g_ui.video[i].img;
 }
 
+/* The red LIVE of someone streaming. */
+static void live_badge(int x, int y)
+{
+    r_round(x, y, S(34), S(16), S(8), CALL_RED);
+    text(g_ui.f_cat, C_INK, rect(x, y, S(34), S(16)), "LIVE", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
 /* A participant: their video letterboxed in the tile, or their avatar; name, mute state and speaking ring. */
 static void paint_tile(const voice_t *v, const char *name, const char *avatar, int x, int y, int w, int h, int speaking)
 {
-    r_image_t *pic = video_picture(v->user, w, h);
+    r_image_t *pic = video_picture(v->user, 0, w, h);
     int d = (w < h ? w : h) / 2;
 
     r_round(x, y, w, h, S(8), 0xFF111111);
@@ -1401,8 +1441,63 @@ static void paint_tile(const voice_t *v, const char *name, const char *avatar, i
             text_w(g_ui.f_icon, C_MUTED, rect(x + S(8) + tw, iy, S(18), S(20)), v->flags & VOICE_DEAF ? L"\xE74F" : L"\xEC54", -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
+    if (v->flags & VOICE_STREAM)
+        live_badge(x + S(8), y + S(8));
     if (speaking)
         r_round_outline(x, y, w, h, S(8), S(2), ARGB(C_GREEN));
+}
+
+/*
+ * Someone's Go Live stream in a tile: ours shows what we send, the watched
+ * one its picture (big, with a button to stop watching), the others a
+ * button to watch them, which clicks anywhere on the tile press.
+ */
+static void paint_stream_tile(const voice_t *v, const char *name, int x, int y, int w, int h)
+{
+    int mine = g_ui.model && lstrcmpA(v->user, g_ui.model->user_id) == 0;
+    int watched = !mine && lstrcmpA(g_ui.watch_user, v->user) == 0;
+    r_image_t *pic = mine || watched ? video_picture(v->user, 1, w, h) : NULL;
+    char label[140];
+
+    r_round(x, y, w, h, S(8), 0xFF0B0B0B);
+    if (pic) {
+        int pw, ph, fw, fh;
+        r_image_size(pic, &pw, &ph);
+        picture_fit(pw, ph, w, h, &fw, &fh);
+        r_image(pic, x + (w - fw) / 2, y + (h - fh) / 2, fw, fh, S(8));
+    } else if (watched) {
+        text(g_ui.f_body, C_MUTED, rect(x, y, w, h),
+             g_ui.watch_state == VOICE_CONNECTED ? "Waiting for the stream\xE2\x80\xA6" : "Joining the stream\xE2\x80\xA6",
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else if (!mine) {
+        int bw = S(140), bh = S(36), bx = x + (w - bw) / 2, by = y + (h - bh) / 2;
+        r_round(bx, by, bw, bh, S(18), 0xFF4E5058u);
+        text(g_ui.f_h, C_INK, rect(bx, by, bw, bh), "Watch Stream", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (g_ui.nlive_hits < (int)ARRAYSIZE(g_ui.live_hits)) {
+            g_ui.live_hits[g_ui.nlive_hits].r = rect(x, y, w, h);
+            lstrcpynA(g_ui.live_hits[g_ui.nlive_hits].user, v->user, sizeof g_ui.live_hits[0].user);
+            g_ui.nlive_hits++;
+        }
+    }
+    live_badge(x + S(8), y + S(8));
+    if (mine)
+        lstrcpynA(label, "Your screen", sizeof label);
+    else
+        wsprintfA(label, "%.100s\xE2\x80\x99s screen", name);
+    {
+        int tw = text_width(g_ui.f_small, label) + S(16), iy = y + h - S(28);
+        if (tw > w - S(16))
+            tw = w - S(16);
+        r_round(x + S(8), iy, tw, S(20), S(4), 0xB0000000u);
+        text(g_ui.f_small, C_INK, rect(x + S(16), iy, tw - S(16), S(20)), label,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    if (watched) {
+        int cx = x + w - S(40), cy = y + S(8);
+        r_round(cx, cy, S(32), S(32), S(16), 0xB0000000u);
+        text_w(g_ui.f_icon, C_INK, rect(cx, cy, S(32), S(32)), L"\xE711", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        g_ui.stream_close = rect(cx, cy, S(32), S(32));
+    }
 }
 
 static RECT call_button(int x, int y, int w, const char *label, unsigned color)
@@ -1415,7 +1510,8 @@ static RECT call_button(int x, int y, int w, const char *label, unsigned color)
 static void paint_call(int x0, int w)
 {
     const channel_t *c;
-    int h = call_h(), n = 0, k, x, y = S(HEADER_H), ring;
+    const voice_t *watched;
+    int h = call_h(), n = 0, k, x, y = S(HEADER_H), ty, ring, streams;
 
     SetRectEmpty(&g_ui.call_join);
     SetRectEmpty(&g_ui.call_decline);
@@ -1425,9 +1521,23 @@ static void paint_call(int x0, int w)
     c = chan(g_ui.channel);
     k = call_find(c->id);
     ring = k >= 0 && g_ui.calls[k].ringing && !in_call(c->id);
+    watched = watched_in(c->id);
+    /* Streams show once we are in the call: the one we watch above everyone, the others as tiles. */
+    streams = in_call(c->id);
     fill(x0, y, w, h, C_RAIL);
-    for (int i = 0; i < g_ui.nvoices; i++)
-        n += !g_ui.voices[i].guild[0] && lstrcmpA(g_ui.voices[i].channel, c->id) == 0;
+    if (watched) {
+        const char *avatar;
+        paint_stream_tile(watched, call_user(watched->user, c->id, &avatar), x0 + S(16), y + S(16), w - S(32),
+                          S(CALL_STREAM_H) - S(16));
+        ty = y + S(CALL_STREAM_H);
+    } else {
+        ty = y;
+    }
+    for (int i = 0; i < g_ui.nvoices; i++) {
+        const voice_t *v = &g_ui.voices[i];
+        if (!v->guild[0] && lstrcmpA(v->channel, c->id) == 0)
+            n += 1 + (streams && (v->flags & VOICE_STREAM) && v != watched);
+    }
     x = x0 + (w - (n ? n * S(196) - S(12) : 0)) / 2;
     for (int i = 0; i < g_ui.nvoices; i++) {
         voice_t *v = &g_ui.voices[i];
@@ -1435,12 +1545,16 @@ static void paint_call(int x0, int w)
         if (v->guild[0] || lstrcmpA(v->channel, c->id) != 0)
             continue;
         name = call_user(v->user, c->id, &avatar);
-        paint_tile(v, name, avatar, x, y + S(16), S(184), S(112),
+        paint_tile(v, name, avatar, x, ty + S(16), S(184), S(112),
                    in_call(c->id) && g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user));
         x += S(196);
+        if (streams && (v->flags & VOICE_STREAM) && v != watched) {
+            paint_stream_tile(v, name, x, ty + S(16), S(184), S(112));
+            x += S(196);
+        }
     }
     if (!n)
-        text(g_ui.f_body, C_MUTED, rect(x0, y + S(40), w, S(60)), ring ? "Incoming call" : "Calling\xE2\x80\xA6",
+        text(g_ui.f_body, C_MUTED, rect(x0, ty + S(40), w, S(60)), ring ? "Incoming call" : "Calling\xE2\x80\xA6",
              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     y += h - S(56);
     if (in_call(c->id)) {
@@ -1479,10 +1593,41 @@ static void paint_call_card(void)
     }
 }
 
-/* Clicks on the call panel or card; returns whether one was used. */
+/* Asks for our stream state again (after UI_STREAM): a connection that failed is closed. */
+static void stream_refresh(void)
+{
+    g_ui.share_state = app_stream_status(g_ui.watch_user, sizeof g_ui.watch_user, &g_ui.watch_state);
+    if (g_ui.share_state == VOICE_FAILED) {
+        app_screen_share(0, g_ui.wnd);
+        g_ui.share_state = VOICE_OFF;
+    }
+    if (g_ui.watch_state == VOICE_FAILED) {
+        app_stream_watch(NULL);
+        g_ui.watch_user[0] = 0;
+        g_ui.watch_state = VOICE_OFF;
+    }
+    clamp_scroll();
+    redraw();
+}
+
+/* Clicks on the call panel or card, or on a stream's tile; returns whether one was used. */
 static int click_call(int x, int y)
 {
     POINT pt = {x, y};
+
+    if (PtInRect(&g_ui.stream_close, pt)) {
+        app_stream_watch(NULL);
+        stream_refresh();
+        return 1;
+    }
+    for (int i = 0; i < g_ui.nlive_hits; i++)
+        if (PtInRect(&g_ui.live_hits[i].r, pt)) {
+            char user[24];
+            lstrcpynA(user, g_ui.live_hits[i].user, sizeof user);
+            app_stream_watch(user);
+            stream_refresh();
+            return 1;
+        }
 
     if (PtInRect(&g_ui.card_join, pt) || PtInRect(&g_ui.card_decline, pt)) {
         char channel[24];
@@ -1584,6 +1729,14 @@ static int voice_bar_h(void)
     return g_ui.voice_state != VOICE_OFF ? S(VOICE_BAR_H) : 0;
 }
 
+/* The voice bar's row of buttons, left to right, each this wide. */
+static const int k_voice_buttons[4] = {HIT_VOICE_SHARE, HIT_VOICE_CAMERA, HIT_VOICE_MUTE, HIT_VOICE_DEAF};
+
+static int voice_button_w(void)
+{
+    return (S(SIDE_W) - S(16) - 3 * S(8)) / 4;
+}
+
 static int side_view(RECT rc)
 {
     return rc.bottom - S(HEADER_H) - S(PANEL_H) - voice_bar_h();
@@ -1629,15 +1782,13 @@ static void hit_test(int x, int y, int *kind, int *index)
         int top = rc.bottom - S(PANEL_H) + (S(PANEL_H) - S(32)) / 2;
         int right = S(RAIL_W + SIDE_W) - S(8);
         if (voice_bar_h() && y >= rc.bottom - S(PANEL_H) - voice_bar_h() && y < rc.bottom - S(PANEL_H)) {
-            int vy = rc.bottom - S(PANEL_H) - voice_bar_h() + (voice_bar_h() - S(32)) / 2;
+            int top_y = rc.bottom - S(PANEL_H) - voice_bar_h(), vy = top_y + (S(VOICE_ROW1_H) - S(32)) / 2;
+            int by = top_y + S(VOICE_ROW1_H), bw = voice_button_w();
+            int bx = x - S(RAIL_W) - S(8), k = bx >= 0 ? bx / (bw + S(8)) : 4;
             if (y >= vy && y < vy + S(32) && x >= right - S(32) && x < right)
                 *kind = HIT_VOICE_LEAVE;
-            else if (y >= vy && y < vy + S(32) && x >= right - S(68) && x < right - S(36))
-                *kind = HIT_VOICE_DEAF;
-            else if (y >= vy && y < vy + S(32) && x >= right - S(104) && x < right - S(72))
-                *kind = HIT_VOICE_MUTE;
-            else if (y >= vy && y < vy + S(32) && x >= right - S(140) && x < right - S(108))
-                *kind = HIT_VOICE_CAMERA;
+            else if (y >= by && y < by + S(32) && k < 4 && bx % (bw + S(8)) < bw)
+                *kind = k_voice_buttons[k];
             return;
         }
         if (y >= rc.bottom - S(PANEL_H)) {
@@ -2045,17 +2196,18 @@ static void paint_user_panel(RECT rc)
 /* Our voice connection: its state, the channel, and a button to leave. */
 static void paint_voice_bar(RECT rc)
 {
-    int h = voice_bar_h(), x0 = S(RAIL_W), right = S(RAIL_W + SIDE_W) - S(8), y, cy;
+    int h = voice_bar_h(), x0 = S(RAIL_W), right = S(RAIL_W + SIDE_W) - S(8), y, cy, by, bw = voice_button_w();
     int color = g_ui.voice_state == VOICE_CONNECTED ? C_GREEN : g_ui.voice_state == VOICE_FAILED ? C_FAINT : C_AMBER;
     char code[40], line[160];
 
     if (!h)
         return;
     y = rc.bottom - S(PANEL_H) - h;
-    cy = y + (h - S(32)) / 2;
+    cy = y + (S(VOICE_ROW1_H) - S(32)) / 2;
+    by = y + S(VOICE_ROW1_H);
     fill(x0, y, S(SIDE_W), h, C_PANEL);
     fill(x0 + S(8), y, S(SIDE_W) - S(16), 1, C_LINE);
-    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(160), S(20)),
+    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(52), S(20)),
          g_ui.voice_state == VOICE_CONNECTED ? "Voice Connected" : str_or_empty(&g_ui.voice_status),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     /* The channel, and the end-to-end encryption code others can compare. */
@@ -2066,20 +2218,22 @@ static void paint_voice_bar(RECT rc)
         lstrcatA(line, code);
         lstrcatA(line, "\xE2\x80\xA6");
     }
-    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(160), S(18)), line,
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(52), S(18)), line,
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    /* Mute and deafen: the icon shows the state, red when on. */
+    /* Screen share, camera, mute and deafen, under it: the icon shows the state, red when on. */
     {
         struct {
-            int hit, on, dx;
+            int on;
             const wchar_t *icon;
-        } b[3] = {{HIT_VOICE_CAMERA, g_ui.voice_camera, 140, L"\xE714"},{HIT_VOICE_MUTE, g_ui.voice_muted || g_ui.voice_deafened, 104, g_ui.voice_muted || g_ui.voice_deafened ? L"\xEC54" : L"\xE720"},
-                  {HIT_VOICE_DEAF, g_ui.voice_deafened, 68, g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6"}};
-        for (int k = 0; k < 3; k++) {
-            if (g_ui.hover_kind == b[k].hit)
-                r_round(right - S(b[k].dx), cy, S(32), S(32), S(6), ARGB(C_SELECT));
-            r_text(g_ui.f_icon, b[k].on ? C_BADGE : ARGB(g_ui.hover_kind == b[k].hit ? C_INK : C_MUTED),
-                   right - S(b[k].dx), cy, S(32), S(32), b[k].icon, -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
+        } b[4] = {{g_ui.share_state != VOICE_OFF, L"\xE7F4"},
+                  {g_ui.voice_camera, L"\xE714"},
+                  {g_ui.voice_muted || g_ui.voice_deafened, g_ui.voice_muted || g_ui.voice_deafened ? L"\xEC54" : L"\xE720"},
+                  {g_ui.voice_deafened, g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6"}};
+        for (int k = 0; k < 4; k++) {
+            int bx = x0 + S(8) + k * (bw + S(8)), hover = g_ui.hover_kind == k_voice_buttons[k];
+            r_round(bx, by, bw, S(32), S(6), ARGB(hover ? C_SELECT : C_ITEM));
+            r_text(g_ui.f_icon, b[k].on ? C_BADGE : ARGB(hover ? C_INK : C_MUTED), bx, by, bw, S(32), b[k].icon, -1,
+                   rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
         }
     }
     if (g_ui.hover_kind == HIT_VOICE_LEAVE)
@@ -3845,14 +3999,53 @@ static void paint_messages(const char *name)
     }
 }
 
-/* The members of the voice channel we are in, as tiles of 16:9 filling the view. */
+/* One tile of the voice grid: someone, or their Go Live stream. */
+static void grid_tile(const voice_t *v, int stream, int x, int y, int w, int h)
+{
+    const char *name = v->name.len ? v->name.data : "\xE2\x80\xA6";
+
+    if (stream)
+        paint_stream_tile(v, name, x, y, w, h);
+    else
+        paint_tile(v, name, v->avatar, x, y, w, h, g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user));
+}
+
+/*
+ * The members of the voice channel we are in, and the streams going on, as
+ * tiles of 16:9 filling the view; a stream we watch fills it instead, the
+ * others in a row under it.
+ */
 static void paint_voice_grid(RECT rc, int x0, int w, const char *channel)
 {
-    int n = 0, cols = 1, rows, tw, th, top = S(HEADER_H) + S(16), avail_h = rc.bottom - top - S(16), k = 0;
+    struct {
+        const voice_t *v;
+        int stream;
+    } tiles[64];
+    const voice_t *watched = watched_in(channel);
+    int n = 0, cols = 1, rows, tw, th, top = S(HEADER_H) + S(16), avail_h = rc.bottom - top - S(16);
 
     fill(x0, S(HEADER_H), w, rc.bottom - S(HEADER_H), C_RAIL);
-    for (int i = 0; i < g_ui.nvoices; i++)
-        n += lstrcmpA(g_ui.voices[i].channel, channel) == 0;
+    for (int i = 0; i < g_ui.nvoices && n < (int)ARRAYSIZE(tiles) - 1; i++) {
+        const voice_t *v = &g_ui.voices[i];
+        if (lstrcmpA(v->channel, channel) != 0)
+            continue;
+        tiles[n].v = v;
+        tiles[n++].stream = 0;
+        if ((v->flags & VOICE_STREAM) && v != watched) {
+            tiles[n].v = v;
+            tiles[n++].stream = 1;
+        }
+    }
+    if (watched) {
+        /* The stream above, everyone else in a row as wide as fits. */
+        int rh = S(104), rw = rh * 16 / 9, fit = (w - S(32) + S(8)) / (rw + S(8)), shown = n < fit ? n : fit;
+        int sh = avail_h - (shown ? rh + S(12) : 0), x = x0 + (w - (shown * (rw + S(8)) - S(8))) / 2;
+        paint_stream_tile(watched, watched->name.len ? watched->name.data : "\xE2\x80\xA6", x0 + S(16), top,
+                          w - S(32), sh);
+        for (int k = 0; k < shown; k++, x += rw + S(8))
+            grid_tile(tiles[k].v, tiles[k].stream, x, top + sh + S(12), rw, rh);
+        return;
+    }
     if (!n)
         return;
     while (cols * cols < n)
@@ -3864,23 +4057,21 @@ static void paint_voice_grid(RECT rc, int x0, int w, const char *channel)
         th = (avail_h - (rows - 1) * S(8)) / rows;
         tw = th * 16 / 9;
     }
-    for (int i = 0; i < g_ui.nvoices; i++) {
-        voice_t *v = &g_ui.voices[i];
+    for (int k = 0; k < n; k++) {
         int r = k / cols, col = k % cols, in_row = r == rows - 1 ? n - r * cols : cols;
-        int row_w = in_row * tw + (in_row - 1) * S(8), x, y;
-        if (lstrcmpA(v->channel, channel) != 0)
-            continue;
-        x = x0 + (w - row_w) / 2 + col * (tw + S(8));
-        y = top + (avail_h - (rows * th + (rows - 1) * S(8))) / 2 + r * (th + S(8));
-        paint_tile(v, v->name.len ? v->name.data : "\xE2\x80\xA6", v->avatar, x, y, tw, th,
-                   g_ui.voice_state == VOICE_CONNECTED && app_voice_speaking(v->user));
-        k++;
+        int row_w = in_row * tw + (in_row - 1) * S(8);
+        grid_tile(tiles[k].v, tiles[k].stream, x0 + (w - row_w) / 2 + col * (tw + S(8)),
+                  top + (avail_h - (rows * th + (rows - 1) * S(8))) / 2 + r * (th + S(8)), tw, th);
     }
 }
 
 static void paint_main(RECT rc)
 {
     int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0;
+
+    /* The streams' buttons are drawn again below, wherever they are now. */
+    g_ui.nlive_hits = 0;
+    SetRectEmpty(&g_ui.stream_close);
 
     fill(x0, 0, w, rc.bottom, C_MAIN);
     fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
@@ -4682,6 +4873,10 @@ static void on_click(int kind, int index)
         g_ui.voice_camera = app_video_camera(!g_ui.voice_camera);
         redraw();
         break;
+    case HIT_VOICE_SHARE:
+        app_screen_share(g_ui.share_state == VOICE_OFF, g_ui.wnd);
+        stream_refresh();
+        break;
     case HIT_VOICE_MUTE:
         g_ui.voice_muted = !(g_ui.voice_muted || g_ui.voice_deafened);
         if (!g_ui.voice_muted)
@@ -5015,6 +5210,10 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == UI_VIDEO) {
         invalidate_video();
+        return;
+    }
+    if (msg == UI_STREAM) {
+        stream_refresh();
         return;
     }
     if (msg == UI_GIFS) {
@@ -11656,7 +11855,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_VIDEO) {
+        if (msg >= UI_QR && msg <= UI_STREAM) {
             on_worker(msg, wp, lp);
             return 0;
         }

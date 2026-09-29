@@ -71,10 +71,12 @@ typedef struct {
     int nvideos;
     unsigned video_ssrc, rtx_ssrc; /* ours, from READY */
     unsigned video_seq, picture_id;
-    int video_on;
+    int video_on, video_w, video_h, video_fps;
+    int dave_last; /* the DAVE state last logged */
 } voice_t;
 
-static voice_t g_voice;
+static voice_t g_links[VOICE_LINKS];
+static int g_wsa;
 
 static void state(voice_t *v, int s, const char *text)
 {
@@ -89,7 +91,7 @@ static void vlog(voice_t *v, const char *what, long long a, long long b)
 
     if (!v->ev.log)
         return;
-    sb_add(&m, "voice: ");
+    sb_add(&m, v->p.screen ? "stream: " : "voice: ");
     sb_add(&m, what);
     if (a != -1) {
         sb_add(&m, " ");
@@ -106,14 +108,13 @@ static void vlog(voice_t *v, const char *what, long long a, long long b)
 /* Logs the DAVE session's state when it changes. */
 static void dave_trace(voice_t *v)
 {
-    static int last = -1;
     int now = v->dave.has_group | v->dave.established << 1 | v->dave.has_pending << 2 | (v->dave.version & 15) << 3 |
               (v->dave.protocol & 15) << 7;
 
-    if (now != last) {
+    if (now != v->dave_last) {
         vlog(v, "dave group/established/pending", v->dave.has_group, v->dave.established * 10 + v->dave.has_pending);
         vlog(v, "dave protocol/media version", v->dave.protocol, v->dave.version);
-        last = now;
+        v->dave_last = now;
     }
 }
 
@@ -199,7 +200,9 @@ static void send_identify(voice_t *v)
     sb_json_str(&m, v->p.session_id, sc_strlen(v->p.session_id));
     sb_add(&m, ",\"token\":");
     sb_json_str(&m, v->p.token, sc_strlen(v->p.token));
-    sb_add(&m, ",\"video\":true,\"streams\":[{\"type\":\"video\",\"rid\":\"100\",\"quality\":100}]");
+    /* A Go Live stream's connection carries a screen. */
+    sb_add(&m, v->p.screen ? ",\"video\":true,\"streams\":[{\"type\":\"screen\",\"rid\":\"100\",\"quality\":100}]"
+                           : ",\"video\":true,\"streams\":[{\"type\":\"video\",\"rid\":\"100\",\"quality\":100}]");
     sb_add(&m, ",\"max_dave_protocol_version\":1}}");
     send_text(v, &m);
 }
@@ -221,8 +224,14 @@ static void send_our_video(voice_t *v, int on)
         sb_u64(&m, v->video_ssrc);
         sb_add(&m, ",\"rtx_ssrc\":");
         sb_u64(&m, v->rtx_ssrc);
-        sb_add(&m, ",\"active\":true,\"quality\":100,\"max_bitrate\":2500000,\"max_framerate\":30,"
-                   "\"max_resolution\":{\"type\":\"fixed\",\"width\":1280,\"height\":720}}");
+        sb_add(&m, v->p.screen ? ",\"active\":true,\"quality\":100,\"max_bitrate\":4000000,\"max_framerate\":"
+                               : ",\"active\":true,\"quality\":100,\"max_bitrate\":2500000,\"max_framerate\":");
+        sb_u64(&m, (unsigned)v->video_fps);
+        sb_add(&m, ",\"max_resolution\":{\"type\":\"fixed\",\"width\":");
+        sb_u64(&m, (unsigned)v->video_w);
+        sb_add(&m, ",\"height\":");
+        sb_u64(&m, (unsigned)v->video_h);
+        sb_add(&m, "}}");
     }
     sb_add(&m, "]}}");
     send_text(v, &m);
@@ -239,12 +248,13 @@ static void send_video_state(voice_t *v)
     send_text(v, &m);
 }
 
-static void send_speaking(voice_t *v, int on)
+/* Speaking flags: 1 for the microphone, 2 for a stream's sound (sent when a stream starts), 0 when quiet. */
+static void send_speaking(voice_t *v, int flags)
 {
     sb_t m = {0};
 
     sb_add(&m, "{\"op\":5,\"d\":{\"speaking\":");
-    sb_i64(&m, on ? 1 : 0);
+    sb_i64(&m, flags);
     sb_add(&m, ",\"delay\":0,\"ssrc\":");
     sb_u64(&m, v->ssrc);
     sb_add(&m, "}}");
@@ -688,24 +698,28 @@ static void cleanup(voice_t *v)
     LeaveCriticalSection(&v->lock);
 }
 
-int voice_start(const voice_params_t *p, const voice_events_t *ev)
+int voice_start(voice_link_t link, const voice_params_t *p, const voice_events_t *ev)
 {
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[link];
     unsigned char r[6];
 
-    if (!v->init) {
+    if (!g_wsa) {
         WSADATA wsa;
         if (WSAStartup(MAKEWORD(2, 2), &wsa))
             return 0;
+        g_wsa = 1;
+    }
+    if (!v->init) {
         ws_init(&v->ws);
         InitializeCriticalSection(&v->lock);
         v->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
         v->udp = INVALID_SOCKET;
         v->init = 1;
     }
-    voice_stop();
+    voice_stop(link);
     ResetEvent(v->stop);
     v->p = *p;
+    v->dave_last = -1;
     v->ev = *ev;
     v->seq = 0;
     v->timestamp = 0;
@@ -721,9 +735,9 @@ int voice_start(const voice_params_t *p, const voice_events_t *ev)
     return v->thread != NULL;
 }
 
-void voice_stop(void)
+void voice_stop(voice_link_t link)
 {
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[link];
 
     if (!v->init || !v->thread)
         return;
@@ -757,7 +771,7 @@ static int send_frame(voice_t *v, const unsigned char *opus, size_t n)
 
 int voice_send(const unsigned char *opus, size_t n)
 {
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[VOICE_LINK_CALL];
     int ok = 0;
 
     if (!v->init)
@@ -777,7 +791,7 @@ int voice_send(const unsigned char *opus, size_t n)
 void voice_quiet(void)
 {
     static const unsigned char silence[3] = {0xF8, 0xFF, 0xFE};
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[VOICE_LINK_CALL];
 
     if (!v->init)
         return;
@@ -791,9 +805,9 @@ void voice_quiet(void)
     LeaveCriticalSection(&v->lock);
 }
 
-int voice_video_active(int on)
+int voice_video_active(voice_link_t link, int on, int w, int h, int fps)
 {
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[link];
     int ok;
 
     if (!v->init)
@@ -802,7 +816,15 @@ int voice_video_active(int on)
     ok = v->have_key && v->video_ssrc;
     if (ok && v->video_on != on) {
         v->video_on = on;
+        v->video_w = w;
+        v->video_h = h;
+        v->video_fps = fps;
+        /* A stream announces itself as speaking (its sound) before its video, as Discord's clients do. */
+        if (v->p.screen && on)
+            send_speaking(v, 2);
         send_our_video(v, on);
+        if (v->p.screen && !on)
+            send_speaking(v, 0);
     }
     LeaveCriticalSection(&v->lock);
     return ok;
@@ -835,9 +857,9 @@ static void send_video_packet(void *ctx, const unsigned char *payload, size_t n,
     sb_free(&pkt);
 }
 
-int voice_video_send(const unsigned char *vp8, size_t n, unsigned timestamp)
+int voice_video_send(voice_link_t link, const unsigned char *vp8, size_t n, unsigned timestamp)
 {
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[link];
     video_out_t o = {v, timestamp, 1};
     sb_t frame = {0};
 
@@ -856,7 +878,7 @@ int voice_video_send(const unsigned char *vp8, size_t n, unsigned timestamp)
 
 int voice_privacy_code(char *out, size_t size)
 {
-    voice_t *v = &g_voice;
+    voice_t *v = &g_links[VOICE_LINK_CALL];
     int ok;
 
     if (!v->init)
