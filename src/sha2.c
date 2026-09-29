@@ -17,20 +17,21 @@ static unsigned ror(unsigned x, int n)
     return x >> n | x << (32 - n);
 }
 
+/* The message schedule is kept as its last 16 words. */
 static void compress(unsigned s[8], const unsigned char *p)
 {
-    unsigned w[64], a = s[0], b = s[1], c = s[2], d = s[3], e = s[4], f = s[5], g = s[6], h = s[7];
+    unsigned w[16], a = s[0], b = s[1], c = s[2], d = s[3], e = s[4], f = s[5], g = s[6], h = s[7];
 
     for (int i = 0; i < 16; i++)
         w[i] = (unsigned)p[i * 4] << 24 | (unsigned)p[i * 4 + 1] << 16 | (unsigned)p[i * 4 + 2] << 8 | p[i * 4 + 3];
-    for (int i = 16; i < 64; i++) {
-        unsigned s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        unsigned s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-    }
     for (int i = 0; i < 64; i++) {
-        unsigned t1 = h + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + k_round[i] + w[i];
-        unsigned t2 = (ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        unsigned t1, t2;
+        if (i >= 16) {
+            unsigned x = w[(i - 15) & 15], y = w[(i - 2) & 15];
+            w[i & 15] += (ror(x, 7) ^ ror(x, 18) ^ (x >> 3)) + w[(i - 7) & 15] + (ror(y, 17) ^ ror(y, 19) ^ (y >> 10));
+        }
+        t1 = h + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + k_round[i] + w[i & 15];
+        t2 = (ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
         h = g, g = f, f = e, e = d + t1, d = c, c = b, b = a, a = t1 + t2;
     }
     s[0] += a, s[1] += b, s[2] += c, s[3] += d, s[4] += e, s[5] += f, s[6] += g, s[7] += h;
@@ -54,27 +55,30 @@ void sha256_update(sha256_t *h, const void *data, size_t n)
     h->total += n;
     while (n) {
         size_t take = 64 - h->used < n ? 64 - h->used : n;
-        memcpy(h->block + h->used, p, take);
-        h->used += take;
+        if (take == 64) { /* a whole block, straight from the input */
+            compress(h->state, p);
+        } else {
+            memcpy(h->block + h->used, p, take);
+            h->used += take;
+            if (h->used == 64) {
+                compress(h->state, h->block);
+                h->used = 0;
+            }
+        }
         p += take;
         n -= take;
-        if (h->used == 64) {
-            compress(h->state, h->block);
-            h->used = 0;
-        }
     }
 }
 
 void sha256_final(sha256_t *h, unsigned char out[32])
 {
+    static const unsigned char pad[64] = {0x80};
     unsigned long long bits = h->total * 8;
     unsigned char len[8];
 
     for (int i = 0; i < 8; i++)
         len[i] = (unsigned char)(bits >> (56 - 8 * i));
-    sha256_update(h, "\x80", 1);
-    while (h->used != 56)
-        sha256_update(h, "", 1);
+    sha256_update(h, pad, (119 - h->used) % 64 + 1); /* 0x80, then zeros up to 56 bytes into a block */
     sha256_update(h, len, 8);
     for (int i = 0; i < 8; i++) {
         out[i * 4] = (unsigned char)(h->state[i] >> 24);
