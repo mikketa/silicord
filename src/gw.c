@@ -278,7 +278,7 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
     while (!cancelled(g) && ws_recv(&g->ws, &msg)) {
         /* A message may come in several frames: inflate once the flush marker arrives. */
         stats_add(STAT_GATEWAY, msg.len);
-        sb_addn(&g->packed, msg.data ? msg.data : "", msg.len);
+        sb_addn(&g->packed, msg.data, msg.len);
         if (!inflate_complete((const unsigned char *)g->packed.data, g->packed.len))
             continue;
         sb_clear(&g->json);
