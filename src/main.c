@@ -314,11 +314,8 @@ static int is_structure_event(json_t t)
 /* Hands the raw event to the UI thread, which owns the model. */
 static void forward_event(session_t *s, json_t t, json_t d)
 {
-    json_t user, v;
     sb_t *p;
 
-    (void)user;
-    (void)v;
     if (!current(s))
         return;
     p = mem_alloc(sizeof *p);
