@@ -99,7 +99,7 @@ docs/    roadmap and architecture
 
 Silicord has no telemetry, analytics or crash reporting, and no server of its own. It only talks to the services needed to show your account:
 
-- Discord: `discord.com` (API), `gateway.discord.gg` (events), `remote-auth-gateway.discord.gg` (QR login), `cdn.discordapp.com` and `*.discordapp.net` (images and files), and the voice server Discord assigns when you join a voice channel, which receives your microphone while you are in the channel and not muted, and your camera or screen only while you share them
+- Discord: `discord.com` (API), `gateway.discord.gg` (events), `remote-auth-gateway.discord.gg` (QR login), `cdn.discordapp.com` and `*.discordapp.net` (images and files), and the voice servers Discord assigns when you join a voice channel or a screen share, which receive your microphone while you are in the channel and not muted, your camera or screen only while you share them, and the sound other programs play only while you share your screen with "Share sound" on (Silicord's own sound is left out)
 - `media.tenor.com` and `static.klipy.com`: GIFs shown in messages and in the GIF picker
 - `raw.githubusercontent.com`: the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, when a profile uses a display name font not downloaded yet
 
