@@ -58,8 +58,8 @@ void dave_session_free(dave_session_t *s);
 void dave_on_select_protocol_ack(dave_session_t *s, int version);
 void dave_on_clients_connect(dave_session_t *s, const unsigned long long *users, int n);
 void dave_on_client_disconnect(dave_session_t *s, unsigned long long user);
-void dave_on_prepare_transition(dave_session_t *s, int transition_id, int version, unsigned long long now_ms);
-void dave_on_execute_transition(dave_session_t *s, int transition_id, unsigned long long now_ms);
+void dave_on_prepare_transition(dave_session_t *s, int transition_id, int version);
+void dave_on_execute_transition(dave_session_t *s, int transition_id);
 void dave_on_prepare_epoch(dave_session_t *s, unsigned long long epoch, int version);
 /* A binary gateway message: sequence number, opcode (25, 27, 29 or 30), payload. */
 void dave_on_binary(dave_session_t *s, const void *data, size_t n, unsigned long long now_ms);

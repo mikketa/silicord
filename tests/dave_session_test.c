@@ -203,8 +203,8 @@ void entry(void)
     announce(&b, 5, &commit);
     welcome_to(&b, 5, &welcome);
     check(ok && a.established && b.established && oa.ready == 1 && ob.ready == 1, "A's group, B welcomed, both ready");
-    dave_on_execute_transition(&a, 5, 1500);
-    dave_on_execute_transition(&b, 5, 1500);
+    dave_on_execute_transition(&a, 5);
+    dave_on_execute_transition(&b, 5);
     check(same_code(&a, &b) && dave_authenticator(&a, code, sizeof code) && code[29] && !code[30],
           "same epoch authenticator");
     check(media(&a, &b) && media(&b, &a), "media both ways");
@@ -222,9 +222,9 @@ void entry(void)
     announce(&b, 6, &commit);
     welcome_to(&c, 6, &welcome);
     check(ok && c.established && oa.invalid == 0 && same_code(&a, &b) && same_code(&b, &c), "C joins");
-    dave_on_execute_transition(&a, 6, 1600);
-    dave_on_execute_transition(&b, 6, 1600);
-    dave_on_execute_transition(&c, 6, 1600);
+    dave_on_execute_transition(&a, 6);
+    dave_on_execute_transition(&b, 6);
+    dave_on_execute_transition(&c, 6);
     check(media(&c, &a) && media(&a, &c) && media(&b, &c), "media with C");
 
     /* B leaves: A commits the removal, C follows. */
@@ -238,8 +238,8 @@ void entry(void)
     announce(&a, 7, &commit);
     announce(&c, 7, &commit);
     check(ok && same_code(&a, &c) && a.group.tree.nodes[2].present == 0, "B removed");
-    dave_on_execute_transition(&a, 7, 1700);
-    dave_on_execute_transition(&c, 7, 1700);
+    dave_on_execute_transition(&a, 7);
+    dave_on_execute_transition(&c, 7);
     check(media(&a, &c) && media(&c, &a), "media after the removal");
 
     /* An add for someone not in the call is refused: no commit follows. */
@@ -269,7 +269,7 @@ void entry(void)
     }
 
     /* Version 0 passes media through. */
-    dave_on_prepare_transition(&a, 0, 0, 1800);
+    dave_on_prepare_transition(&a, 0, 0);
     {
         sb_t out = {0};
         check(a.version == 0 && dave_session_encrypt(&a, (const unsigned char *)"abc", 3, &out) && out.len == 3,

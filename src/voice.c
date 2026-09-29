@@ -601,13 +601,13 @@ static int handle(voice_t *v, const sb_t *msg)
     case OP_PREPARE_TRANSITION:
         EnterCriticalSection(&v->lock);
         dave_on_prepare_transition(&v->dave, (int)json_num(d, "transition_id"),
-                                   clamp_version(json_num(d, "protocol_version")), now_ms());
+                                   clamp_version(json_num(d, "protocol_version")));
         dave_trace(v);
         LeaveCriticalSection(&v->lock);
         break;
     case OP_EXECUTE_TRANSITION:
         EnterCriticalSection(&v->lock);
-        dave_on_execute_transition(&v->dave, (int)json_num(d, "transition_id"), now_ms());
+        dave_on_execute_transition(&v->dave, (int)json_num(d, "transition_id"));
         dave_trace(v);
         LeaveCriticalSection(&v->lock);
         break;

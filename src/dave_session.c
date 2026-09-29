@@ -198,7 +198,7 @@ static void execute(dave_session_t *s)
 static void prepare(dave_session_t *s, int transition_id, unsigned long long now_ms)
 {
     new_keyring(s, now_ms);
-    dave_on_prepare_transition(s, transition_id, s->protocol, now_ms);
+    dave_on_prepare_transition(s, transition_id, s->protocol);
 }
 
 /* ---- Opcodes ---- */
@@ -252,9 +252,8 @@ void dave_on_client_disconnect(dave_session_t *s, unsigned long long user)
         }
 }
 
-void dave_on_prepare_transition(dave_session_t *s, int transition_id, int version, unsigned long long now_ms)
+void dave_on_prepare_transition(dave_session_t *s, int transition_id, int version)
 {
-    (void)now_ms;
     s->pending_transition = transition_id;
     s->pending_version = version;
     s->has_pending = 1;
@@ -264,9 +263,8 @@ void dave_on_prepare_transition(dave_session_t *s, int transition_id, int versio
         send_json(s, 23, transition_id);
 }
 
-void dave_on_execute_transition(dave_session_t *s, int transition_id, unsigned long long now_ms)
+void dave_on_execute_transition(dave_session_t *s, int transition_id)
 {
-    (void)now_ms;
     if (s->has_pending && s->pending_transition == transition_id)
         execute(s);
 }
