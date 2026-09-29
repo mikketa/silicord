@@ -1390,6 +1390,7 @@ static void voice_dispatch(session_t *s, json_t t, json_t d)
         } else if (json_get(d, "endpoint", &v) && json_type(v) == JSON_STRING && json_get(d, "token", &t)) {
             json_raw(v, g_vc.p.endpoint, sizeof g_vc.p.endpoint);
             json_raw(t, g_vc.p.token, sizeof g_vc.p.token);
+            log_line("voice: VOICE_SERVER_UPDATE, endpoint ", g_vc.p.endpoint);
             g_vc.have_server = 1;
             voice_try_start();
         }
