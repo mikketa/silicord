@@ -19,8 +19,6 @@ typedef long long LONG64;
 typedef int BOOL;
 typedef void *HANDLE;
 typedef unsigned char BYTE;
-typedef unsigned short WORD;
-typedef unsigned short USHORT;
 typedef wchar_t WCHAR;
 
 #define TRUE 1
