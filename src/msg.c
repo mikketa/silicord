@@ -4,7 +4,6 @@
 #include "sc_asm.h"
 
 #define REPLY_SNIPPET 100
-#define DISCORD_EPOCH 1420070400000ll
 
 enum {
     TYPE_DEFAULT = 0,

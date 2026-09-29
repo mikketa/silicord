@@ -158,5 +158,6 @@ void msg_reaction_path(const msg_reaction_t *r, sb_t *out);
 /* "2026-09-28T12:34:56.789+00:00" in milliseconds since the Unix epoch, 0 if it is not a valid date. */
 long long msg_iso_ms(const char *iso);
 
-/* Milliseconds since the Unix epoch encoded in a snowflake. */
+/* Milliseconds since the Unix epoch encoded in a snowflake: DISCORD_EPOCH plus its top 42 bits. */
+#define DISCORD_EPOCH 1420070400000ll
 long long snowflake_ms(const char *id);

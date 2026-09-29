@@ -1,8 +1,6 @@
 #include "search.h"
 #include "msg.h"
 
-#define DISCORD_EPOCH 1420070400000ll
-
 static const char *const k_keys[] = {"from", "mentions", "has", "in", "before", "after", "during", "pinned"};
 
 static int lower(int c)
