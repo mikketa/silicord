@@ -191,6 +191,9 @@ static int fetch(const char *path, http_resp_t *resp)
         !(n == 18 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "cdn.discordapp.com", 18) == CSTR_EQUAL) &&
         !(n == 16 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "static.klipy.com", 16) == CSTR_EQUAL) &&
         !(n == 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "media.tenor.com", 15) == CSTR_EQUAL) &&
+        /* Spotify's album covers, as Discord shows them on a listening activity */
+        !(n == 9 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "i.scdn.co", 9) == CSTR_EQUAL &&
+          starts_with(slash, "/image/")) &&
         /* the app's own art, as the Nitro page shows it */
         !(n == 11 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "discord.com", 11) == CSTR_EQUAL &&
           starts_with(slash, "/assets/")))
