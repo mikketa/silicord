@@ -1,3 +1,4 @@
+#include <emmintrin.h>
 #include <string.h>
 #include "vp8_int.h"
 
@@ -326,15 +327,73 @@ void vp8i_find_near_mvs(const int *sign_bias, const vp8_mb_t *m, const vp8_mb_t 
         near_mvs[0] = near_mvs[1];
 }
 
-/* One pass of a subpixel filter over bw x bh pixels; `step` is 1 across a row, the stride down a column. */
+/* Taps a and b of filter f, for _mm_madd_epi16 on pixel pairs. */
+static __m128i tap_pair(const short *f, int a)
+{
+    return _mm_set1_epi32((int)((unsigned)(unsigned short)f[a] | (unsigned)(unsigned short)f[a + 1] << 16));
+}
+
+/* Stores the first n (4 or 8) of 8 pixels. */
+static void store_px(unsigned char *dst, __m128i px, int n)
+{
+    if (n >= 8)
+        _mm_storel_epi64((__m128i *)dst, px);
+    else
+        *(int *)dst = _mm_cvtsi128_si32(px);
+}
+
+/*
+ * One pass of a subpixel filter over bw x bh pixels (bw a multiple of 4);
+ * `step` is 1 across a row, the stride down a column. Eight pixels at a
+ * time, the taps summed in 32 bits (16 would overflow, and saturating
+ * would round differently from the reference), then (sum + 64) >> 7
+ * clamped to 0..255 by the packs. Reads up to 16 bytes from two pixels
+ * left of each group: within the planes' borders and the scratch buffers.
+ */
 static void filter_pass(unsigned char *dst, int ds, const unsigned char *src, int ss, int step, int bw, int bh,
                         const short *f)
 {
+    const __m128i f01 = tap_pair(f, 0), f23 = tap_pair(f, 2), f45 = tap_pair(f, 4), zero = _mm_setzero_si128();
+    const __m128i round = _mm_set1_epi32(64);
+
     for (int r = 0; r < bh; r++, dst += ds, src += ss)
-        for (int c = 0; c < bw; c++) {
-            const unsigned char *s = src + c;
-            dst[c] = vp8i_clamp255((s[-2 * step] * f[0] + s[-step] * f[1] + s[0] * f[2] + s[step] * f[3] +
-                                    s[2 * step] * f[4] + s[3 * step] * f[5] + 64) >> 7);
+        for (int c = 0; c < bw; c += 8) {
+            __m128i lo, hi;
+            if (step == 1) {
+                /* Pixels 0, 2, 4, 6 and 1, 3, 5, 7 each take their taps from pairs of neighbours. */
+                __m128i v = _mm_loadu_si128((const __m128i *)(src + c - 2));
+                __m128i even = _mm_add_epi32(
+                    _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi8(v, zero), f01),
+                                  _mm_madd_epi16(_mm_unpacklo_epi8(_mm_srli_si128(v, 2), zero), f23)),
+                    _mm_madd_epi16(_mm_unpacklo_epi8(_mm_srli_si128(v, 4), zero), f45));
+                __m128i odd = _mm_add_epi32(
+                    _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi8(_mm_srli_si128(v, 1), zero), f01),
+                                  _mm_madd_epi16(_mm_unpacklo_epi8(_mm_srli_si128(v, 3), zero), f23)),
+                    _mm_madd_epi16(_mm_unpacklo_epi8(_mm_srli_si128(v, 5), zero), f45));
+                even = _mm_srai_epi32(_mm_add_epi32(even, round), 7);
+                odd = _mm_srai_epi32(_mm_add_epi32(odd, round), 7);
+                /* Back in order as 16-bit lanes: each result fits, the even ones in the low halves. */
+                lo = _mm_or_si128(_mm_and_si128(even, _mm_set1_epi32(0xFFFF)), _mm_slli_epi32(odd, 16));
+                store_px(dst + c, _mm_packus_epi16(lo, lo), bw - c);
+            } else {
+                const unsigned char *s = src + c;
+                __m128i r0 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(s - 2 * step)), zero);
+                __m128i r1 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(s - step)), zero);
+                __m128i r2 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)s), zero);
+                __m128i r3 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(s + step)), zero);
+                __m128i r4 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(s + 2 * step)), zero);
+                __m128i r5 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(s + 3 * step)), zero);
+                lo = _mm_add_epi32(_mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), f01),
+                                                 _mm_madd_epi16(_mm_unpacklo_epi16(r2, r3), f23)),
+                                   _mm_madd_epi16(_mm_unpacklo_epi16(r4, r5), f45));
+                hi = _mm_add_epi32(_mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(r0, r1), f01),
+                                                 _mm_madd_epi16(_mm_unpackhi_epi16(r2, r3), f23)),
+                                   _mm_madd_epi16(_mm_unpackhi_epi16(r4, r5), f45));
+                lo = _mm_srai_epi32(_mm_add_epi32(lo, round), 7);
+                hi = _mm_srai_epi32(_mm_add_epi32(hi, round), 7);
+                lo = _mm_packs_epi32(lo, hi);
+                store_px(dst + c, _mm_packus_epi16(lo, lo), bw - c);
+            }
         }
 }
 
