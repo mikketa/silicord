@@ -1305,6 +1305,31 @@ static int call_h(void)
 
 /* ---- Video tiles ---- */
 
+/*
+ * A new video picture: only the tiles change, so only their area is painted
+ * again (the renderer skips the bands outside it). The voice grid fills the
+ * main column under the header, a direct message's call panel sits at its top.
+ */
+static void invalidate_video(void)
+{
+    RECT r;
+    const channel_t *c;
+
+    if (g_ui.view != VIEW_APP || g_ui.settings_open || !g_ui.model || g_ui.channel < 0)
+        return;
+    c = chan(g_ui.channel);
+    GetClientRect(g_ui.wnd, &r);
+    r.left = S(RAIL_W + SIDE_W);
+    r.right = main_right();
+    r.top = S(HEADER_H);
+    if (!(is_voice_type(c->type) && in_call(c->id))) {
+        if (!call_h())
+            return;
+        r.bottom = r.top + call_h();
+    }
+    InvalidateRect(g_ui.wnd, &r, FALSE);
+}
+
 static void copy_picture(void *ctx, const unsigned *bgra, int w, int h)
 {
     r_image_t **img = ctx;
@@ -4988,6 +5013,10 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     if (msg == UI_MESSAGES) {
         on_batch((msg_batch_t *)lp);
         redraw();
+        return;
+    }
+    if (msg == UI_VIDEO) {
+        invalidate_video();
         return;
     }
     if (msg == UI_GIFS) {
