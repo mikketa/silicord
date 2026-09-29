@@ -1,0 +1,90 @@
+name: release
+
+# Pushing a tag v<version> builds silicord.exe, signs it through SignPath once the
+# project is set up there, and publishes it as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      actions: read
+    env:
+      # Empty until the SignPath project exists: the release is then published unsigned.
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/setup-nasm@v1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the QR test decoder
+        run: pip install numpy zxing-cpp
+
+      - name: Check the tag against the project version
+        shell: pwsh
+        run: |
+          $version = [regex]::Match((Get-Content CMakeLists.txt -Raw), 'project\(silicord VERSION ([0-9.]+)').Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match the version in CMakeLists.txt ($version)"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - uses: actions/upload-artifact@v5
+        id: upload
+        with:
+          name: silicord-win64
+          path: build/silicord.exe
+
+      - name: Sign
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          # Every signing request is approved by hand.
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed
+
+      - name: Pick the executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          if ($env:SIGNPATH_API_TOKEN) {
+            $sig = Get-AuthenticodeSignature signed/silicord.exe
+            if ($sig.Status -ne 'Valid') { throw "signed/silicord.exe: $($sig.Status) $($sig.StatusMessage)" }
+            Copy-Item signed/silicord.exe dist/
+          } else {
+            Copy-Item build/silicord.exe dist/
+          }
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $signed = if ($env:SIGNPATH_API_TOKEN) { "Signed through SignPath." } else { "This build is not signed yet: Smart App Control blocks it." }
+          $notes = @"
+          A native Discord client for Windows: a single portable ``silicord.exe``, see the [README](https://github.com/mikketa/silicord#readme) for what it does and how to use it.
+
+          Built by GitHub Actions from $env:GITHUB_SHA. $signed See the [Code Signing Policy](https://github.com/mikketa/silicord#code-signing-policy).
+          "@
+          gh release create $env:GITHUB_REF_NAME dist/silicord.exe --title "Silicord $env:VERSION" --notes $notes
