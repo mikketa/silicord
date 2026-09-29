@@ -1105,13 +1105,34 @@ static const char *dm_key(const channel_t *c)
     return c->last_message[0] ? c->last_message : c->id;
 }
 
+/*
+ * Most recent conversation first; one without messages by when it was created,
+ * like Discord. A stable merge sort of a[0..n), with b as room: there can be
+ * thousands. Returns the one of the two that holds the result.
+ */
+static channel_t *sort_dms(channel_t *a, channel_t *b, unsigned n)
+{
+    for (unsigned width = 1; width < n; width *= 2) {
+        channel_t *t = a;
+        for (unsigned lo = 0; lo < n; lo += 2 * width) {
+            unsigned mid = lo + width < n ? lo + width : n, hi = lo + 2 * width < n ? lo + 2 * width : n;
+            unsigned i = lo, j = mid, k = lo;
+            while (k < hi) /* the right run's first goes first only if more recent: equal ones keep their order */
+                b[k++] = j < hi && (i == mid || id_cmp(dm_key(&a[i]), dm_key(&a[j])) < 0) ? a[j++] : a[i++];
+        }
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
 /* READY's private_channels, whose recipient ids point into its `user_list`. */
 static void add_dms(model_t *m, unsigned *cap, json_t list, json_t user_list)
 {
     json_t ch;
     json_iter_t it;
     unsigned total, n = 0;
-    channel_t *tmp;
+    channel_t *tmp, *room, *sorted;
     users_t users;
 
     m->dm_first = m->nchannels;
@@ -1119,25 +1140,18 @@ static void add_dms(model_t *m, unsigned *cap, json_t list, json_t user_list)
         return;
     total = (unsigned)json_count(list);
     tmp = mem_alloc((total + 1) * sizeof *tmp);
+    room = mem_alloc((total + 1) * sizeof *room);
     users_read(user_list, &users);
     json_iter(list, &it);
     while (n < total && json_next(&it, NULL, &ch))
         if (make_dm(m, &users, ch, &tmp[n]))
             n++;
     mem_free(users.v);
-    /* Most recent conversation first; one without messages by when it was created, like Discord. */
-    for (unsigned a = 1; a < n; a++) {
-        channel_t x = tmp[a];
-        unsigned b = a;
-        while (b > 0 && id_cmp(dm_key(&tmp[b - 1]), dm_key(&x)) < 0) {
-            tmp[b] = tmp[b - 1];
-            b--;
-        }
-        tmp[b] = x;
-    }
+    sorted = sort_dms(tmp, room, n);
     for (unsigned i = 0; i < n; i++)
-        push(m, cap, &tmp[i]);
+        push(m, cap, &sorted[i]);
     m->dm_count = n;
+    mem_free(room);
     mem_free(tmp);
 }
 
