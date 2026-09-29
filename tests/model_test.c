@@ -359,6 +359,28 @@ static void test_emojis(const model_t *m)
     check(a && model_emoji_next(a, 0, &cursor, &e) == model_emoji_next(m, 0, &(unsigned){0}, &e),
           "sticker update keeps the emoji");
     model_free(a);
+
+    /*
+     * A line break in a name must not split its line: the last line would lack
+     * its flag and the reader would step past the list. Names of every length
+     * put the list's end at every place in the string table's buffer.
+     */
+    ok = 1;
+    for (int len = 0; len < 2100; len++) {
+        static char json[2300];
+        int k = wsprintfA(json, "{\"guild_id\":\"1\",\"emojis\":[{\"id\":\"70\",\"name\":\"");
+        for (int i = 0; i < len; i++)
+            json[k++] = 'x';
+        lstrcpynA(json + k, "\\nb\"}]}", 16);
+        a = apply(m, "GUILD_EMOJIS_UPDATE", json);
+        cursor = 0;
+        n = 0;
+        while (a && model_emoji_next(a, 0, &cursor, &e))
+            ok &= n++ == 0 && lstrcmpA(e.id, "70") == 0 && e.name_len == len + 2;
+        ok &= n == 1;
+        model_free(a);
+    }
+    check(ok, "line breaks in emoji names");
 }
 
 /* A payload repeating channel ids must not place a channel twice (it used to overflow the ordering buffer). */

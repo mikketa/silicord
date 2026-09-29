@@ -494,6 +494,9 @@ static unsigned pack_emojis(model_t *m, json_t list, int stickers)
             sb_free(&name);
             continue;
         }
+        for (size_t i = 0; i < name.len; i++)
+            if (name.data[i] == '\n')
+                name.data[i] = ' '; /* it would end the line */
         if (stickers && json_get(e, "format_type", &v) && json_int(v, &format) && format > 0 && format < 10)
             flag[1] = (char)('0' + format);
         else if (!stickers && json_get(e, "animated", &v) && is_true(v))
@@ -542,7 +545,10 @@ static int packed_next(const char *base, unsigned *cursor, model_emoji_t *out)
     p += k + (p[k] == ' ');
     out->animated = *p == '1';
     out->format = *p - '0';
-    p += 2;
+    if (*p)
+        p++;
+    if (*p == ' ')
+        p++;
     out->name = p;
     while (*p && *p != '\n')
         p++;
