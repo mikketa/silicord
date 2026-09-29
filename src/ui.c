@@ -1737,7 +1737,7 @@ static void paint_tile(const voice_t *v, const char *name, const char *avatar, i
     r_image_t *pic = video_picture(v->user, 0, w, h);
     int d = (w < h ? w : h) / 2;
 
-    r_round(x, y, w, h, S(8), 0xFF111111);
+    r_round(x, y, w, h, S(8), 0xFF121214);
     if (pic) {
         int pw, ph, fw, fh;
         r_image_size(pic, &pw, &ph);
@@ -1778,7 +1778,7 @@ static void paint_stream_tile(const voice_t *v, const char *name, int x, int y, 
     r_image_t *pic = mine || watched ? video_picture(v->user, 1, w, h) : NULL;
     char label[140];
 
-    r_round(x, y, w, h, S(8), 0xFF0B0B0B);
+    r_round(x, y, w, h, S(8), 0xFF121214);
     if (pic) {
         int pw, ph, fw, fh;
         r_image_size(pic, &pw, &ph);
@@ -1902,8 +1902,8 @@ static void paint_call_card(void)
         lstrcpynA(g_ui.card_channel, g_ui.calls[i].channel, sizeof g_ui.card_channel);
         name = model_str(g_ui.model, chan(c)->name);
         x = S(RAIL_W + SIDE_W) + (main_right() - S(RAIL_W + SIDE_W) - w) / 2;
-        r_round(x, y, w, h, S(8), 0xFF222222);
-        r_round_outline(x, y, w, h, S(8), 1, 0xFF3A3A3A);
+        r_round(x, y, w, h, S(8), 0xFF1E1E20);
+        r_round_outline(x, y, w, h, S(8), 1, 0xFF2E2E31);
         text(g_ui.f_h, C_INK, rect(x + S(16), y + S(14), w - S(32), S(22)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         text(g_ui.f_small, C_MUTED, rect(x + S(16), y + S(38), w - S(32), S(20)), "Incoming call", DT_LEFT | DT_SINGLELINE);
         g_ui.card_join = call_button(x + S(16), y + h - S(54), (w - S(44)) / 2, "Join Call", ARGB(C_GREEN));
@@ -2459,7 +2459,7 @@ static void paint_scrollbar(int x, int top, int view, int content, int scroll)
     if (h < S(24))
         h = S(24);
     y = top + (view - h) * scroll / (content - view);
-    r_round(x, y, S(4), h, S(2), 0xFF2E2E2E);
+    r_round(x, y, S(4), h, S(2), 0xFF242426);
 }
 
 static void paint_channel_row(unsigned i, int y)
@@ -2737,6 +2737,7 @@ static void paint_side(RECT rc)
 static void place_composer(void);
 static void pop_close(void);
 static void dm_profile_sync(void);
+static void pop_dismiss(void);
 static void open_self(void);
 static void build_name_fonts(void);
 static void profiles_clear(void);
@@ -3320,7 +3321,7 @@ static void draw_media(r_image_t *img, int x, int y, int w, int h, int spoiler)
     if (img)
         r_image(img, x, y, w, h, S(8));
     else
-        r_round(x, y, w, h, S(8), 0xFF1E1E1E);
+        r_round(x, y, w, h, S(8), 0xFF17181B);
     if (spoiler) {
         r_round(x, y, w, h, S(8), 0xF2141414u);
         r_round(x + (w - S(76)) / 2, y + (h - S(28)) / 2, S(76), S(28), S(14), 0xFF000000u);
@@ -3353,8 +3354,8 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             int cw = w < S(FILE_W) ? w : S(FILE_W), ch = S(64);
             if (draw && r_visible(y, ch)) {
                 char size[32];
-                r_round(x, y, cw, ch, S(8), 0xFF1B1B1B);
-                r_round_outline(x, y, cw, ch, S(8), 1, 0xFF2A2A2A);
+                r_round(x, y, cw, ch, S(8), 0xFF121214);
+                r_round_outline(x, y, cw, ch, S(8), 1, 0xFF242426);
                 text_w(g_ui.f_icon_big, C_MUTED, rect(x + S(12), y + S(12), S(40), S(40)), L"\xE8A5", -1,
                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 text(g_ui.f_body, C_INK, rect(x + S(60), y + S(12), cw - S(72), S(20)), f->name.data,
@@ -3456,8 +3457,8 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                 }
                 ey += pad - S(6);
                 if (!pass && draw) {
-                    r_round(x, top, ew, ey - top, S(4), 0xFF1B1B1B);
-                    r_round(x, top, S(4), ey - top, S(2), e->has_color ? 0xFF000000u | e->color : 0xFF3A3A3Au);
+                    r_round(x, top, ew, ey - top, S(4), 0xFF121214);
+                    r_round(x, top, S(4), ey - top, S(2), e->has_color ? 0xFF000000u | e->color : 0xFF2E2E31u);
                     if (thumb) {
                         int mw, mh;
                         fit(e->thumb_w, e->thumb_h, thumb, thumb, &mw, &mh);
@@ -3483,7 +3484,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             int qh = S(24), rows = pl->nanswers * S(48), h = S(16) + qh + S(22) + rows + S(40);
             if (draw && r_visible(top, h)) {
                 char foot[96];
-                r_round(x, top, pw, h, S(8), 0xFF1B1B1B);
+                r_round(x, top, pw, h, S(8), 0xFF121214);
                 text(g_ui.f_title, C_INK, rect(x + S(16), py, pw - S(32), qh), pl->question.data ? pl->question.data : "",
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 text(g_ui.f_small, C_MUTED, rect(x + S(16), py + qh, pw - S(32), S(20)),
@@ -3583,7 +3584,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 } else {
                     r_round(cx, y, bw, S(COMP_H) + S(8), S(8), 0xFF1E1F22);
-                    r_round_outline(cx, y, bw, S(COMP_H) + S(8), S(8), 1, 0xFF2A2A2A);
+                    r_round_outline(cx, y, bw, S(COMP_H) + S(8), S(8), 1, 0xFF242426);
                     text(g_ui.f_body, c->label.len && !c->disabled ? C_MUTED : C_FAINT,
                          rect(cx + S(12), y, bw - S(48), S(COMP_H) + S(8)), c->label.len ? c->label.data : "Make a selection",
                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -3616,7 +3617,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                 y += S(REACTION_H) + S(4);
             }
             if (draw && r_visible(y, S(REACTION_H))) {
-                r_round(rx, y, pw, S(REACTION_H), S(8), r->me ? 0x33FFB000u : 0xFF1E1E1E);
+                r_round(rx, y, pw, S(REACTION_H), S(8), r->me ? 0x33FFB000u : 0xFF17181B);
                 if (r->me)
                     r_round_outline(rx, y, pw, S(REACTION_H), S(8), 1, ARGB(C_BRAND));
                 if (r->emoji_id[0]) {
@@ -4510,7 +4511,7 @@ static void paint_messages(const char *name)
             if (th < S(32))
                 th = S(32);
             ty = a.top + (view - th) - (view - th) * g_ui.msg_scroll / (content - view);
-            r_round(a.right - S(10), ty, S(6), th, S(3), 0xFF2A2A2A);
+            r_round(a.right - S(10), ty, S(6), th, S(3), 0xFF242426);
         }
     }
 }
@@ -4982,7 +4983,7 @@ static void paint_share_pick(void)
     r_fill(0, 0, rc.right, rc.bottom, 0xB0000000u);
     r = pick_rect();
     r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 0xFF151515);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 1, 0xFF2A2A2A);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 1, 0xFF242426);
     text(g_ui.f_title, C_INK, rect(r.left + S(24), r.top + S(18), r.right - r.left - S(48), S(28)), "Share Your Screen",
          DT_LEFT | DT_SINGLELINE);
     text(g_ui.f_body, C_MUTED, rect(r.left + S(24), r.top + S(50), r.right - r.left - S(48), S(22)),
@@ -4991,7 +4992,7 @@ static void paint_share_pick(void)
         RECT t = pick_tile(i);
         const RECT *m = &g_ui.screens[i].rect;
         char label[64];
-        r_round(t.left, t.top, S(PICK_TW), S(PICK_TH), S(6), 0xFF0B0B0B);
+        r_round(t.left, t.top, S(PICK_TW), S(PICK_TH), S(6), 0xFF121214);
         if (g_ui.screen_stills[i]) {
             int w, h;
             r_image_size(g_ui.screen_stills[i], &w, &h);
@@ -5007,12 +5008,12 @@ static void paint_share_pick(void)
     /* The sound of other programs, and a way out. */
     bx = r.left + S(24);
     by = r.bottom - S(52);
-    r_round(bx, by + S(9), S(18), S(18), S(4), g_ui.share_no_sound ? 0xFF2A2A2A : ARGB(C_GREEN));
+    r_round(bx, by + S(9), S(18), S(18), S(4), g_ui.share_no_sound ? 0xFF242426 : ARGB(C_GREEN));
     if (!g_ui.share_no_sound)
         text_w(g_ui.f_icon, C_INK, rect(bx, by + S(9), S(18), S(18)), L"\xE73E", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     text(g_ui.f_body, g_ui.share_pick_hover == PICK_SOUND ? C_INK : C_MUTED, rect(bx + S(28), by, S(200), S(36)), "Share sound",
          DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    r_round(r.right - S(120), by, S(96), S(36), S(6), g_ui.share_pick_hover == PICK_CANCEL ? 0xFF2A2A2A : 0xFF222222);
+    r_round(r.right - S(120), by, S(96), S(36), S(6), g_ui.share_pick_hover == PICK_CANCEL ? 0xFF242426 : 0xFF1E1E20);
     text(g_ui.f_h, C_INK, rect(r.right - S(120), by, S(96), S(36)), "Cancel", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -6721,7 +6722,7 @@ static int pop_render(int draw)
                 bc = rgb_argb(p->accent, 0xFF);
             else if (avatar)
                 bc = r_image_average(avatar);
-            r_round(0, 0, w, bh + S(POP_RADIUS), radius, bc ? bc : 0xFF2A2A2A);
+            r_round(0, 0, w, bh + S(POP_RADIUS), radius, bc ? bc : 0xFF242426);
         }
         r_unclip();
 
@@ -7059,6 +7060,13 @@ static void pop_reset_bio(void)
     r_rich_free(g_ui.pop_rich);
     g_ui.pop_rich = NULL;
     md_free(&g_ui.pop_bio);
+}
+
+/* Closes a floating popout; the profile docked beside a DM stays. */
+static void pop_dismiss(void)
+{
+    if (g_ui.pop && !g_ui.pop_docked)
+        pop_close();
 }
 
 static void pop_close(void)
@@ -7490,8 +7498,8 @@ static void paint_toolbar(void)
         return;
     n = tool_buttons(i, btn);
     r = toolbar_rect(i, n);
-    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF121214);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF242426);
     for (int k = 0; k < n; k++) {
         int x = r.left + S(4) + k * S(TOOL_BTN), y = r.top + S(2);
         if (g_ui.hover_tool == k)
@@ -7600,17 +7608,17 @@ static void paint_bar(int x0, int w, int cy)
         int zx = x0 + w - S(128), tw = S(34), th = S(20), tx = zx + S(64) - tw - S(4), ty = y + (S(BAR_H) - th) / 2;
         int hov = g_ui.bar_hover == 1, kd = th - S(6);
         float t = tween_on(TW_MENTION, 0, g_ui.bar_mention, TW_SHAPE, zx, ty, S(64), th);
-        unsigned off = hov ? 0xFF4A4A4Au : 0xFF3A3A3Au, on = hov ? 0xFF4752C4u : ARGB(C_BRAND);
+        unsigned off = hov ? 0xFF4A4A4Au : 0xFF2E2E31u, on = hov ? 0xFF4752C4u : ARGB(C_BRAND);
         r_text(g_ui.f_h, lerp_argb(ARGB(hov ? C_MUTED : C_FAINT), ARGB(C_BRAND), t), zx, y, tx - zx - S(6), S(BAR_H), L"@", -1,
                rflags(DT_RIGHT | DT_VCENTER | DT_SINGLELINE));
         r_round(tx, ty, tw, th, th / 2, lerp_argb(off, on, t));
-        r_circle(lerp_i(tx + S(3), tx + tw - S(3) - kd, t), ty + S(3), kd, lerp_argb(0xFFB5AFA4u, 0xFF181818u, t));
+        r_circle(lerp_i(tx + S(3), tx + tw - S(3) - kd, t), ty + S(3), kd, lerp_argb(0xFFB5AFA4u, 0xFF121214u, t));
     }
     {
         int bx = x0 + w - S(56), by = y + (S(BAR_H) - S(24)) / 2;
         float t = tween_on(TW_BAR_CLOSE, 0, g_ui.bar_hover == 2, TW_FAST, bx, by, S(24), S(24));
         if (t > 0.f)
-            r_circle(bx, by, S(24), lerp_argb(0xFF181818u, 0xFF2A2A2Au, t));
+            r_circle(bx, by, S(24), lerp_argb(0xFF121214u, 0xFF242426u, t));
         r_text(g_ui.f_icon, lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t), bx, y, S(24), S(BAR_H), L"\xE711", -1,
                rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
     }
@@ -7681,16 +7689,16 @@ static void paint_confirm(void)
     r_fill(0, 0, rc.right, rc.bottom, 0xB0000000u);
     r = confirm_rect();
     r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 0xFF151515);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 1, 0xFF2A2A2A);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 1, 0xFF242426);
     text(g_ui.f_title, C_INK, rect(r.left + S(20), r.top + S(18), S(400), S(28)), "Delete Message", DT_LEFT | DT_SINGLELINE);
     text(g_ui.f_body, C_MUTED, rect(r.left + S(20), r.top + S(56), S(400), S(22)),
          "Are you sure you want to delete this message?", DT_LEFT | DT_SINGLELINE);
     preview = plain_text(&g_ui.msgs[i].text);
-    r_round(r.left + S(20), r.top + S(86), S(400), S(40), S(6), 0xFF1E1E1E);
+    r_round(r.left + S(20), r.top + S(86), S(400), S(40), S(6), 0xFF17181B);
     r_text(g_ui.f_body, ARGB(C_INK), r.left + S(32), r.top + S(86), S(376), S(40), preview, -1,
            R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
     mem_free(preview);
-    r_round(r.right - S(220), r.bottom - S(56), S(96), S(36), S(6), g_ui.confirm_hover == 1 ? 0xFF2A2A2A : 0xFF222222);
+    r_round(r.right - S(220), r.bottom - S(56), S(96), S(36), S(6), g_ui.confirm_hover == 1 ? 0xFF242426 : 0xFF1E1E20);
     text(g_ui.f_h, C_INK, rect(r.right - S(220), r.bottom - S(56), S(96), S(36)), "Cancel", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     r_round(r.right - S(116), r.bottom - S(56), S(96), S(36), S(6), g_ui.confirm_hover == 2 ? 0xFFD83C3Eu : 0xFFC0363Au);
     text(g_ui.f_h, C_INK, rect(r.right - S(116), r.bottom - S(56), S(96), S(36)), "Delete", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -8370,8 +8378,8 @@ static void picker_paint(RECT rc)
 
     (void)rc;
     r_fill(0, 0, w, h, ARGB(C_MAIN));
-    r_round(0, 0, w, h, S(8), 0xFF111111);
-    r_round_outline(0, 0, w, h, S(8), 1, 0xFF2A2A2A);
+    r_round(0, 0, w, h, S(8), 0xFF121214);
+    r_round_outline(0, 0, w, h, S(8), 1, 0xFF242426);
     if (g_ui.picker_mode == PICK_COMPOSER) {
         for (int t = 0; t < 3; t++) {
             int tx = S(12) + t * S(PICK_TAB_W), id = k_pick_tabs[t];
@@ -8381,7 +8389,7 @@ static void picker_paint(RECT rc)
                  k_pick_tab_names[t], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
-    r_round(S(12), S(PICK_TABS), w - S(24), S(32), S(6), 0xFF1E1E1E);
+    r_round(S(12), S(PICK_TABS), w - S(24), S(32), S(6), 0xFF17181B);
     if (g_ui.picker_tab == TAB_GIFS) {
         gifs_paint(w, h);
         return;
@@ -8575,7 +8583,7 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_CTLCOLOREDIT:
         SetTextColor((HDC)wp, GDI(C_INK));
-        SetBkColor((HDC)wp, RGB(0x1E, 0x1E, 0x1E));
+        SetBkColor((HDC)wp, RGB(0x17, 0x18, 0x1B));
         return (LRESULT)g_ui.picker_brush;
     case WM_MOUSEMOVE: {
         int h = picker_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
@@ -8700,7 +8708,7 @@ static void gifs_paint(int w, int h)
             if (img)
                 r_image_cover(img, x, y, col_w, ch, S(6));
             else
-                r_round(x, y, col_w, ch, S(6), 0xFF1E1E1E);
+                r_round(x, y, col_w, ch, S(6), 0xFF17181B);
         }
         sb_free(&src);
         colh[c] += ch + S(8);
@@ -8745,7 +8753,7 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     HFONT font;
 
     picker_close();
-    pop_close();
+    pop_dismiss();
     GetClientRect(g_ui.wnd, &rc);
     x = right - w;
     y = bottom - h;
@@ -8762,7 +8770,7 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     if (mode != PICK_COMPOSER)
         g_ui.picker_tab = TAB_EMOJI;
     if (!g_ui.picker_brush)
-        g_ui.picker_brush = CreateSolidBrush(RGB(0x1E, 0x1E, 0x1E));
+        g_ui.picker_brush = CreateSolidBrush(RGB(0x17, 0x18, 0x1B));
     g_ui.picker = CreateWindowExW(0, L"SilicordEmoji", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, x, y, w, h,
                                   g_ui.wnd, NULL, NULL, NULL);
     g_ui.picker_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(22), S(PICK_TABS) + S(6),
@@ -8867,7 +8875,7 @@ static void paint_tray(int x0, int w, int bottom)
     for (int i = 0; i < g_ui.nuploads; i++, x += S(CARD) + S(12)) {
         const upload_t *u = &g_ui.uploads[i];
         int cy = y + S(12);
-        r_round(x, cy, S(CARD), S(CARD), S(8), 0xFF222222);
+        r_round(x, cy, S(CARD), S(CARD), S(8), 0xFF1E1E20);
         if (u->thumb)
             r_image_cover(u->thumb, x + S(8), cy + S(8), S(CARD) - S(16), S(CARD) - S(40), S(6));
         else
@@ -8876,7 +8884,7 @@ static void paint_tray(int x0, int w, int bottom)
         text(g_ui.f_small, C_INK, rect(x + S(8), cy + S(CARD) - S(28), S(CARD) - S(16), S(20)), upload_name(u),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         /* remove button */
-        r_circle(x + S(CARD) - S(22), cy - S(6), S(26), g_ui.upload_hover == i ? 0xFFC0363Au : 0xFF2A2A2A);
+        r_circle(x + S(CARD) - S(22), cy - S(6), S(26), g_ui.upload_hover == i ? 0xFFC0363Au : 0xFF242426);
         text_w(g_ui.f_icon, C_INK, rect(x + S(CARD) - S(22), cy - S(6), S(26), S(26)), L"\xE74D", -1,
                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -9429,7 +9437,7 @@ static void paint_autocomplete(void)
         return;
     r = ac_rect();
     r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF151515);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF242426);
     title = g_ui.ac_kind == AC_USER      ? "MEMBERS"
             : g_ui.ac_kind == AC_CHANNEL ? "TEXT CHANNELS"
             : g_ui.ac_kind == AC_COMMAND ? "COMMANDS"
@@ -10674,8 +10682,8 @@ static void paint_pins(void)
     if (!g_ui.pins_open)
         return;
     r = pins_rect();
-    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF121214);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF242426);
     text(g_ui.f_h, C_INK, rect(r.left + S(16), r.top, S(300), S(48)), g_ui.pins_inbox ? "Mentions" : "Pinned Messages",
          DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     fill(r.left + S(1), r.top + S(48), r.right - r.left - S(2), 1, C_LINE);
@@ -10709,7 +10717,7 @@ static void paint_pins(void)
         }
         body = plain_text(&m->text);
         img = user_avatar(m->author_id, m->avatar);
-        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + eh + S(12), S(6), 0xFF181818);
+        r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + eh + S(12), S(6), 0xFF121214);
         if (img)
             r_image(img, r.left + S(16), y + S(10), S(32), S(32), S(16));
         text(g_ui.f_h, C_INK, rect(r.left + S(60), y + S(8), tw, S(20)), m->author.data ? m->author.data : "",
@@ -10839,7 +10847,7 @@ static void qs_paint(RECT rc)
     (void)rc;
     r_fill(0, 0, w, h, 0xFF000000u);
     r_round(0, 0, w, h, S(10), 0xFF151515);
-    r_round_outline(0, 0, w, h, S(10), 1, 0xFF2A2A2A);
+    r_round_outline(0, 0, w, h, S(10), 1, 0xFF242426);
     text(g_ui.f_h, C_INK, rect(S(20), S(12), w - S(40), S(24)),
          g_ui.qs_prompt == PROMPT_THREAD         ? "Create Thread"
          : g_ui.qs_prompt == PROMPT_POST_TITLE   ? "New Post"
@@ -10852,7 +10860,7 @@ static void qs_paint(RECT rc)
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    r_round(S(20), S(44), w - S(40), S(40), S(6), 0xFF0B0B0B);
+    r_round(S(20), S(44), w - S(40), S(40), S(6), 0xFF121214);
     if (!g_ui.nqs)
         text(g_ui.f_body, C_MUTED, rect(0, y, w, S(QS_ROW)), "No results", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     for (int i = 0; i < g_ui.nqs; i++, y += S(QS_ROW)) {
@@ -10948,7 +10956,7 @@ static LRESULT CALLBACK qs_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_CTLCOLOREDIT:
         SetTextColor((HDC)wp, GDI(C_INK));
-        SetBkColor((HDC)wp, RGB(0x0B, 0x0B, 0x0B));
+        SetBkColor((HDC)wp, RGB(0x12, 0x12, 0x14));
         return (LRESULT)g_ui.qs_brush;
     case WM_MOUSEMOVE: {
         int i = qs_hit(GET_Y_LPARAM(lp));
@@ -11032,9 +11040,9 @@ static void qs_open(void)
         return;
     }
     picker_close();
-    pop_close();
+    pop_dismiss();
     if (!g_ui.qs_brush)
-        g_ui.qs_brush = CreateSolidBrush(RGB(0x0B, 0x0B, 0x0B));
+        g_ui.qs_brush = CreateSolidBrush(RGB(0x12, 0x12, 0x14));
     g_ui.qs = CreateWindowExW(0, L"SilicordSwitch", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 0, 0, g_ui.wnd,
                               NULL, NULL, NULL);
     g_ui.qs_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(32), S(53), S(QS_W) - S(64), S(22),
@@ -11252,7 +11260,7 @@ static void place_settings_edit(void)
 static void paint_button(int x, int y, int w, const char *label, int id, int primary)
 {
     int hover = g_ui.settings_hover == id;
-    unsigned fillc = primary ? (hover ? 0xFF4752C4u : ARGB(C_BRAND)) : (hover ? 0xFF3A3A3A : 0xFF2E2E2E);
+    unsigned fillc = primary ? (hover ? 0xFF4752C4u : ARGB(C_BRAND)) : (hover ? 0xFF2E2E31u : 0xFF242426u);
 
     r_round(x, y, w, S(38), S(6), fillc);
     text(g_ui.f_h, primary ? C_RAIL : C_INK, rect(x, y, w, S(38)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -11262,7 +11270,7 @@ static void paint_button(int x, int y, int w, const char *label, int id, int pri
 /* A box showing the current choice, opening a menu. */
 static void paint_dropdown(int x, int y, int w, const wchar_t *label, int id)
 {
-    r_round(x, y, w, S(40), S(6), g_ui.settings_hover == id ? 0xFF262626 : 0xFF1E1E1E);
+    r_round(x, y, w, S(40), S(6), g_ui.settings_hover == id ? 0xFF1E1E20u : 0xFF121214u);
     text_w(g_ui.f_body, C_INK, rect(x + S(12), y, w - S(48), S(40)), label, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     text_w(g_ui.f_icon, C_MUTED, rect(x + w - S(36), y, S(24), S(40)), L"\xE70D", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     set_hit(x, y, w, S(40), id);
@@ -11273,7 +11281,7 @@ static void paint_slider(int x, int y, int w, int value, int min, int max, int m
 {
     int ty = y + S(10), kx = x + (int)((long long)(value - min) * w / (max - min));
 
-    r_round(x, ty, w, S(8), S(4), 0xFF3A3A3A);
+    r_round(x, ty, w, S(8), S(4), 0xFF2E2E31u);
     if (meter > min) {
         int mx = x + (int)((long long)(meter - min) * w / (max - min));
         r_round(x, ty, mx - x, S(8), S(4), meter > value ? ARGB(C_GREEN) : 0xFF6A6A6A);
@@ -11332,7 +11340,7 @@ static int paint_toggle(int x, int y, int w, const char *title, const char *desc
 
     text(g_ui.f_h, C_INK, rect(x, y + S(4), w - S(64), S(22)), title, DT_LEFT | DT_SINGLELINE);
     text(g_ui.f_small, C_MUTED, rect(x, y + S(28), w - S(64), S(36)), desc, DT_LEFT | DT_WORDBREAK);
-    r_round(sx, sy, S(44), S(24), S(12), on ? ARGB(C_BRAND) : 0xFF4A4A4A);
+    r_round(sx, sy, S(44), S(24), S(12), on ? ARGB(C_BRAND) : 0xFF4E5058u);
     r_circle(on ? sx + S(22) : sx + S(2), sy + S(2), S(20), 0xFFFFFFFFu);
     set_hit(x, y, w, S(SET_ROW), id);
     fill(x, y + S(SET_ROW) - S(12), w, 1, C_LINE);
@@ -11393,12 +11401,12 @@ static void paint_settings(RECT rc)
         const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name) : "";
         const char *custom = g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "";
         r_image_t *img = g_ui.model ? user_avatar(g_ui.model->user_id, g_ui.model->user_avatar) : NULL;
-        r_round(x, y, w, S(112), S(8), 0xFF161616);
+        r_round(x, y, w, S(112), S(8), 0xFF121214u);
         if (img)
             r_image(img, x + S(20), y + S(16), S(80), S(80), S(40));
         else
             r_circle(x + S(20), y + S(16), S(80), ARGB(C_ITEM));
-        paint_status(x + S(20), y + S(16), S(80), g_ui.my_status, 0xFF161616);
+        paint_status(x + S(20), y + S(16), S(80), g_ui.my_status, 0xFF121214u);
         text(g_ui.f_title, C_INK, rect(x + S(120), y + S(28), w - S(140), S(30)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         text(g_ui.f_body, C_MUTED, rect(x + S(120), y + S(60), w - S(140), S(24)), custom[0] ? custom : status_name(),
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -11418,7 +11426,7 @@ static void paint_settings(RECT rc)
         y += S(24);
         text(g_ui.f_cat, C_FAINT, rect(x, y, w, S(20)), "CUSTOM STATUS", DT_LEFT | DT_SINGLELINE);
         y += S(28);
-        r_round(x, y, w - S(216), S(40), S(6), 0xFF1E1E1E);
+        r_round(x, y, w - S(216), S(40), S(8), 0xFF121214u);
         if (g_ui.settings_edit_y != y) {
             g_ui.settings_edit_y = y;
             place_settings_edit();
@@ -11459,7 +11467,7 @@ static void paint_settings(RECT rc)
             paint_button(x, y, S(140), g_ui.mic_test ? "Stop Testing" : "Let's Check", SH_MIC_TEST, !g_ui.mic_test);
         {
             int mx = g_ui.voice_state != VOICE_CONNECTED ? x + S(160) : x, mw = x + w - mx, lit = (level + 100) * mw / 100;
-            r_round(mx, y + S(15), mw, S(8), S(4), 0xFF3A3A3A);
+            r_round(mx, y + S(15), mw, S(8), S(4), 0xFF2E2E31u);
             if (level > -100)
                 r_round(mx, y + S(15), lit, S(8), S(4), ARGB(C_GREEN));
         }
@@ -11477,7 +11485,7 @@ static void paint_settings(RECT rc)
                 lstrcpyW(label, L"Press a key or a mouse button\x2026");
             else
                 key_name(v->ptt_key, label, ARRAYSIZE(label));
-            r_round(x, y, col, S(40), S(6), 0xFF1E1E1E);
+            r_round(x, y, col, S(40), S(8), 0xFF121214u);
             if (g_ui.set_record)
                 r_round_outline(x, y, col, S(40), S(6), 1, ARGB(C_BRAND));
             text_w(g_ui.f_body, g_ui.set_record ? C_BRAND : C_INK, rect(x + S(12), y, col - S(24), S(40)), label, -1,
@@ -12215,7 +12223,7 @@ static void on_right_click(int x, int y)
 
     if (g_ui.view != VIEW_APP || !g_ui.model)
         return;
-    pop_close();
+    pop_dismiss();
     picker_close();
     if ((i = ml_hit(x, y, &top)) >= 0) {
         const ml_item_t *it = &g_ui.ml.items[i];
@@ -12489,8 +12497,8 @@ static void paint_search(void)
     if (!g_ui.results_open)
         return;
     r = results_rect();
-    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF111111);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF2A2A2A);
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF121214);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF242426);
     if (!g_ui.results)
         lstrcpyA(title, "Searching\xE2\x80\xA6");
     else if (g_ui.results->status)
@@ -12524,7 +12532,7 @@ static void paint_search(void)
         text(g_ui.f_cat, C_MUTED, rect(r.left + S(16), y, tw, S(18)), where, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         y += S(20);
         r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + S(8) + eh, S(6),
-                g_ui.result_hover == k ? 0xFF222222 : 0xFF181818);
+                g_ui.result_hover == k ? 0xFF1E1E20 : 0xFF121214);
         if (img)
             r_image(img, r.left + S(16), y + S(8), S(32), S(32), S(16));
         text(g_ui.f_h, C_INK, rect(r.left + S(60), y + S(6), tw, S(20)), m->author.data ? m->author.data : "",
@@ -12587,7 +12595,7 @@ static void paint_detached(int x0, int w, int cy)
 
     if (!g_ui.detached)
         return;
-    r_round(x0 + S(24), y, w - S(48), S(28), S(6), 0xFF1B1B1B);
+    r_round(x0 + S(24), y, w - S(48), S(28), S(6), 0xFF121214);
     text(g_ui.f_small, C_MUTED, rect(x0 + S(36), y, w - S(200), S(28)), "You're viewing older messages",
          DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     text(g_ui.f_cat, C_INK, rect(x0 + w - S(180), y, S(144), S(28)), "Jump To Present \xE2\x86\x93",
@@ -12724,7 +12732,7 @@ static void paint_forum(RECT rc, int x0, int w)
             g_ui.post_y[i] = y; /* for clicks, even when scrolled out of sight */
         if (!r_visible(y, S(POST_H)))
             continue;
-        r_round(cx, y, cw, S(POST_H), S(8), g_ui.post_hover == i ? 0xFF222222 : 0xFF1A1A1A);
+        r_round(cx, y, cw, S(POST_H), S(8), g_ui.post_hover == i ? 0xFF1E1E20 : 0xFF1A1A1A);
         text(g_ui.f_title, C_INK, rect(cx + S(16), y + S(12), cw - S(100), S(26)), pt->name.data ? pt->name.data : "",
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         img = pt->author_id[0] ? user_avatar(pt->author_id, pt->avatar) : NULL;
@@ -12972,7 +12980,7 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_MOUSEWHEEL)
         return SendMessageW(g_ui.wnd, msg, wp, lp);
     if (msg == WM_LBUTTONDOWN)
-        pop_close();
+        pop_dismiss();
     return CallWindowProcW(g_ui.composer_proc, h, msg, wp, lp);
 }
 
@@ -13150,6 +13158,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         place_friend_input();
         place_search();
         pop_place();
+        dm_profile_sync(); /* back from the tray, or fonts rebuilt: the DM's profile returns */
         redraw();
         return 0;
     case WM_COMMAND:
@@ -13175,20 +13184,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return (LRESULT)GetStockObject(BLACK_BRUSH);
         }
         if ((HWND)lp == g_ui.settings_edit) {
-            if ((HWND)lp == g_ui.settings_edit) {
-                static HBRUSH box;
-                if (!box)
-                    box = CreateSolidBrush(RGB(0x1E, 0x1E, 0x1E));
-                SetTextColor((HDC)wp, GDI(C_INK));
-                SetBkColor((HDC)wp, RGB(0x1E, 0x1E, 0x1E));
-                return (LRESULT)box;
-            }
-            static HBRUSH dark;
-            if (!dark)
-                dark = CreateSolidBrush(RGB(0x0B, 0x0B, 0x0B));
-            SetTextColor((HDC)wp, GDI(C_INK));
-            SetBkColor((HDC)wp, RGB(0x0B, 0x0B, 0x0B));
-            return (LRESULT)dark;
+            static HBRUSH box;
+            if (!box)
+                box = CreateSolidBrush(RGB(0x12, 0x12, 0x14));
+            SetTextColor((HDC)wp, GDI(C_TEXT));
+            SetBkColor((HDC)wp, RGB(0x12, 0x12, 0x14));
+            return (LRESULT)box;
         }
         SetTextColor((HDC)wp, GDI(C_TEXT));
         SetBkColor((HDC)wp, RGB(0x10, 0x10, 0x13));
