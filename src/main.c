@@ -743,11 +743,9 @@ static void views_clear(void)
 int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx, const unsigned *bgra, int w, int h),
                    void *ctx)
 {
-    unsigned long long u = 0;
+    unsigned long long u = parse_id(user_id);
     int i, fresh = 0;
 
-    for (const char *c = user_id; *c >= '0' && *c <= '9'; c++)
-        u = u * 10 + (unsigned)(*c - '0');
     InterlockedExchange(&g_video_posted, 0);
     EnterCriticalSection(&g_video_lock);
     if ((i = view_find(u)) >= 0 && g_views[i].bgra && g_views[i].serial != *serial) {
@@ -763,15 +761,6 @@ static void voice_log(void *ctx, const char *text)
 {
     (void)ctx;
     log_line("", text);
-}
-
-static unsigned long long parse_u64(const char *s)
-{
-    unsigned long long u = 0;
-
-    for (; *s >= '0' && *s <= '9'; s++)
-        u = u * 10 + (unsigned)(*s - '0');
-    return u;
 }
 
 /* Op 4: into a channel, or out of voice with channel NULL. */
@@ -919,10 +908,10 @@ static void voice_dispatch(session_t *s, json_t t, json_t d)
                 json_raw(v, channel, sizeof channel);
             if (lstrcmpA(user, s->me) == 0 && lstrcmpA(channel, g_vc.channel) == 0 && json_get(d, "session_id", &v)) {
                 json_raw(v, g_vc.p.session_id, sizeof g_vc.p.session_id);
-                g_vc.p.user_id = parse_u64(s->me);
+                g_vc.p.user_id = parse_id(s->me);
                 /* in a direct message, the call's server is the channel */
-                g_vc.p.server_id = parse_u64(g_vc.guild[0] ? g_vc.guild : g_vc.channel);
-                g_vc.p.channel_id = parse_u64(g_vc.channel);
+                g_vc.p.server_id = parse_id(g_vc.guild[0] ? g_vc.guild : g_vc.channel);
+                g_vc.p.channel_id = parse_id(g_vc.channel);
                 g_vc.have_state = 1;
                 voice_try_start();
             }
