@@ -672,11 +672,12 @@ static void cleanup(voice_t *v)
             CloseHandle(threads[i]);
         }
     v->heartbeat = v->udp_thread = v->thread = NULL;
+    ws_close(&v->ws);
+    /* Under the lock: the audio and camera threads may be sending on the socket. */
+    EnterCriticalSection(&v->lock);
     if (v->udp != INVALID_SOCKET)
         closesocket(v->udp);
     v->udp = INVALID_SOCKET;
-    ws_close(&v->ws);
-    EnterCriticalSection(&v->lock);
     dave_session_free(&v->dave);
     secure_wipe(v->key, sizeof v->key);
     v->have_key = v->speaking = v->video_on = 0;
