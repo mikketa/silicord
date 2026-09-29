@@ -1547,7 +1547,7 @@ static void on_ready(void *ctx, json_t d)
                         sb_addn(p, rv.p, (size_t)(rv.end - rv.p));
                     else
                         sb_add(p, "0");
-                    sb_add(p, ",\"ruser\":");
+                    sb_add(p, ",\"user\":");
                     sb_addn(p, ruser.p, (size_t)(ruser.end - ruser.p));
                     sb_add(p, "}");
                 }
