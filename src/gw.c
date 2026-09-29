@@ -180,7 +180,8 @@ static int handle(gw_t *g, const sb_t *msg)
             return GW_RESUME;
         g->interval = (DWORD)interval;
         g->acked = 1;
-        g->heartbeat = CreateThread(NULL, 0, heartbeat_main, g, 0, NULL);
+        if (!g->heartbeat) /* one per connection: a second would leak and outlive the socket */
+            g->heartbeat = CreateThread(NULL, 0, heartbeat_main, g, 0, NULL);
         if (g->resuming)
             return send_resume(g) ? CONTINUE : GW_RESUME;
         forget_session(g);

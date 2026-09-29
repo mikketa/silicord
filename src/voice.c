@@ -466,7 +466,8 @@ static int handle(voice_t *v, const sb_t *msg)
         v->interval = (DWORD)json_num(d, "heartbeat_interval");
         if (v->interval < 1000)
             v->interval = 1000;
-        v->heartbeat = CreateThread(NULL, 0, heartbeat_main, v, 0, NULL);
+        if (!v->heartbeat) /* one per connection: a second would leak and outlive the socket */
+            v->heartbeat = CreateThread(NULL, 0, heartbeat_main, v, 0, NULL);
         send_identify(v);
         break;
     case OP_READY: {
