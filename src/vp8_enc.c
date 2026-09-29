@@ -494,8 +494,8 @@ static int code_residual(vp8_encoder_t *e, unsigned char *y, unsigned char *u, u
     short res[16], f[16], dc[16];
     int any = 0;
 
-    memset(e->coeffs, 0, sizeof e->coeffs);
-    memset(e->quant, 0, sizeof e->quant);
+    /* Nothing to clear: quantize() writes each block from `first`, vp8i_iwht() the Y blocks' dequantized DC;
+       their quantized DC is never read (Y2 codes it). */
     for (int b = 0; b < 24; b++) {
         const unsigned char *s, *p;
         int ss, ps;
@@ -584,7 +584,6 @@ static void encode_mb(vp8_encoder_t *e, int row, int col)
                 m->mv = cand[k];
             }
         }
-        mv = cand[0];
         mv.x = (short)(cand[1].x & ~7);
         mv.y = (short)(cand[1].y & ~7);
         mv = search(e, row, col, mv, &cost, side->best, lambda);
