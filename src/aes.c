@@ -286,32 +286,49 @@ void aes_encrypt_block(const aes_t *a, const unsigned char in[16], unsigned char
 
 /* ---- GCM ---- */
 
-/* x * y in GCM's bit-reflected GF(2^128), with masks instead of branches. */
-static void gf_mult(const unsigned char x[16], const unsigned char y[16], unsigned char out[16])
+static u64 load64(const unsigned char *p)
 {
-    unsigned char z[16] = {0}, v[16];
+    u64 v = 0;
 
-    memcpy(v, y, 16);
-    for (int i = 0; i < 128; i++) {
-        unsigned char mask = (unsigned char)-((x[i / 8] >> (7 - i % 8)) & 1), lsb = (unsigned char)-(v[15] & 1);
-        for (int j = 0; j < 16; j++)
-            z[j] ^= (unsigned char)(v[j] & mask);
-        for (int j = 15; j > 0; j--)
-            v[j] = (unsigned char)(v[j] >> 1 | v[j - 1] << 7);
-        v[0] = (unsigned char)((v[0] >> 1) ^ (0xe1 & lsb));
-    }
-    memcpy(out, z, 16);
+    for (int i = 0; i < 8; i++)
+        v = v << 8 | p[i];
+    return v;
 }
 
-static void ghash_blocks(unsigned char x[16], const unsigned char h[16], const unsigned char *p, size_t n)
+static void store64(unsigned char *p, u64 v)
+{
+    for (int i = 0; i < 8; i++)
+        p[i] = (unsigned char)(v >> (56 - 8 * i));
+}
+
+/* x * h in GCM's bit-reflected GF(2^128), both as big-endian halves, with masks instead of branches. */
+static void gf_mult(u64 x[2], const u64 h[2])
+{
+    u64 zh = 0, zl = 0, vh = h[0], vl = h[1];
+
+    for (int w = 0; w < 2; w++) {
+        u64 bits = x[w];
+        for (int i = 0; i < 64; i++, bits <<= 1) {
+            u64 mask = 0 - (bits >> 63), lsb = 0 - (vl & 1);
+            zh ^= vh & mask;
+            zl ^= vl & mask;
+            vl = vl >> 1 | vh << 63;
+            vh = vh >> 1 ^ (0xE1ull << 56 & lsb);
+        }
+    }
+    x[0] = zh;
+    x[1] = zl;
+}
+
+static void ghash_blocks(u64 x[2], const u64 h[2], const unsigned char *p, size_t n)
 {
     while (n) {
         unsigned char block[16] = {0};
         size_t take = n < 16 ? n : 16;
         memcpy(block, p, take);
-        for (int j = 0; j < 16; j++)
-            x[j] ^= block[j];
-        gf_mult(x, h, x);
+        x[0] ^= load64(block);
+        x[1] ^= load64(block + 8);
+        gf_mult(x, h);
         p += take;
         n -= take;
     }
@@ -327,24 +344,27 @@ static void inc32(unsigned char ctr[16])
 static void gcm(const aes_t *a, const unsigned char nonce[12], const void *aad, size_t an, const unsigned char *ct,
                 size_t n, unsigned char full_tag[16])
 {
-    unsigned char h[16] = {0}, j0[16], s[16], x[16] = {0}, lens[16];
-    unsigned long long abits = (unsigned long long)an * 8, cbits = (unsigned long long)n * 8;
+    unsigned char h[16] = {0}, j0[16], s[16];
+    u64 hk[2], x[2] = {0, 0};
 
     aes_encrypt_block(a, h, h);
-    ghash_blocks(x, h, aad, an);
-    ghash_blocks(x, h, ct, n);
-    for (int i = 0; i < 8; i++) {
-        lens[i] = (unsigned char)(abits >> (56 - 8 * i));
-        lens[8 + i] = (unsigned char)(cbits >> (56 - 8 * i));
-    }
-    ghash_blocks(x, h, lens, 16);
+    hk[0] = load64(h);
+    hk[1] = load64(h + 8);
+    ghash_blocks(x, hk, aad, an);
+    ghash_blocks(x, hk, ct, n);
+    x[0] ^= (u64)an * 8; /* the lengths block, in bits */
+    x[1] ^= (u64)n * 8;
+    gf_mult(x, hk);
     memcpy(j0, nonce, 12);
     j0[12] = j0[13] = j0[14] = 0;
     j0[15] = 1;
     aes_encrypt_block(a, j0, s);
+    store64(full_tag, x[0]);
+    store64(full_tag + 8, x[1]);
     for (int i = 0; i < 16; i++)
-        full_tag[i] = (unsigned char)(s[i] ^ x[i]);
+        full_tag[i] ^= s[i];
     secure_wipe(h, sizeof h);
+    secure_wipe(hk, sizeof hk);
 }
 
 static void ctr_xor(const aes_t *a, const unsigned char nonce[12], const unsigned char *in, unsigned char *out, size_t n)
