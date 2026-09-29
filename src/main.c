@@ -1635,7 +1635,8 @@ typedef struct {
     char file[96];
 } font_job_t;
 
-static int font_cache_path(int id, wchar_t *out, int size)
+/* out: MAX_PATH characters. */
+static int font_cache_path(int id, wchar_t *out)
 {
     wchar_t dir[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);
@@ -1646,8 +1647,6 @@ static int font_cache_path(int id, wchar_t *out, int size)
     CreateDirectoryW(dir, NULL);
     lstrcatW(dir, L"\\fonts");
     CreateDirectoryW(dir, NULL);
-    if (size < MAX_PATH)
-        return 0;
     wsprintfW(out, L"%s\\font-%d.ttf", dir, id);
     return 1;
 }
@@ -1665,7 +1664,7 @@ static DWORD WINAPI font_main(LPVOID arg)
     font_job_t *j = arg;
     sb_t *data = mem_alloc(sizeof *data);
     wchar_t path[MAX_PATH];
-    int cached = font_cache_path(j->id, path, MAX_PATH);
+    int cached = font_cache_path(j->id, path);
     HANDLE f;
 
     if (cached && (f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE) {
