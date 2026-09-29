@@ -11,8 +11,6 @@
 #define SILK_MAX_SUBFR 80
 #define SILK_MAX_ORDER 16
 
-enum { SILK_DECODE_NORMAL, SILK_PACKET_LOST, SILK_DECODE_FEC };
-
 typedef struct {
     int sIIR[6];
     short sFIR[8];
@@ -91,8 +89,8 @@ void silk_init(silk_decoder_t *d);
 /*
  * Decodes one SILK frame (10 or 20 ms) of a packet at 48 kHz into `out`
  * (interleaved for 2 API channels). `internal_hz` is 8000, 12000 or 16000;
- * `payload_ms` the packet's duration (10, 20, 40 or 60). Returns the samples
- * per channel, or -1.
+ * `payload_ms` the packet's duration (10, 20, 40 or 60); `lost` conceals a
+ * lost packet instead. Returns the samples per channel, or -1.
  */
 int silk_decode(silk_decoder_t *d, opus_rc_t *rc, int channels_api, int channels_internal, int internal_hz,
                 int payload_ms, int lost, int new_packet, short *out);

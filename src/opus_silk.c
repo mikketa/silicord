@@ -1263,14 +1263,13 @@ static void cng(silk_channel_t *ch, const silk_ctrl_t *ctrl, short *frame, int l
 static void decode_frame(silk_channel_t *ch, opus_rc_t *rc, short *out, int lost, int cond, silk_scratch_t *tmp)
 {
     silk_ctrl_t ctrl;
-    int L = ch->frame_length, mv;
+    int L = ch->frame_length, mv = ch->ltp_mem_length - L;
 
     ctrl.ltp_scale_Q14 = 0;
-    if (lost == SILK_DECODE_NORMAL || (lost == SILK_DECODE_FEC && ch->lbrr_flags[ch->frames_decoded] == 1)) {
-        decode_indices(ch, rc, ch->frames_decoded, lost, cond);
+    if (!lost) {
+        decode_indices(ch, rc, ch->frames_decoded, 0, cond);
         decode_pulses(rc, tmp->pulses, ch->idx.signal_type, ch->idx.quant_offset_type, ch->frame_length);
         decode_parameters(ch, &ctrl, cond);
-        L = ch->frame_length;
         decode_core(ch, &ctrl, out, tmp->pulses, tmp);
         plc(ch, &ctrl, out, 0, tmp);
         ch->loss_cnt = 0;
@@ -1279,9 +1278,8 @@ static void decode_frame(silk_channel_t *ch, opus_rc_t *rc, short *out, int lost
     } else {
         plc(ch, &ctrl, out, 1, tmp);
     }
-    mv = ch->ltp_mem_length - ch->frame_length;
-    memmove(ch->out_buf, &ch->out_buf[ch->frame_length], (size_t)mv * sizeof(short));
-    memcpy(&ch->out_buf[mv], out, (size_t)ch->frame_length * sizeof(short));
+    memmove(ch->out_buf, &ch->out_buf[L], (size_t)mv * sizeof(short));
+    memcpy(&ch->out_buf[mv], out, (size_t)L * sizeof(short));
     plc_glue_frames(ch, out, L);
     cng(ch, &ctrl, out, L, tmp);
     ch->lag_prev = ctrl.pitchL[ch->nb_subfr - 1];
@@ -1391,7 +1389,7 @@ int silk_decode(silk_decoder_t *d, opus_rc_t *rc, int channels_api, int channels
     d->channels_api = channels_api;
     d->channels_internal = channels_internal;
 
-    if (lost != SILK_PACKET_LOST && ch[0].frames_decoded == 0) {
+    if (!lost && ch[0].frames_decoded == 0) {
         /* The packet's VAD and LBRR flags. */
         for (int n = 0; n < channels_internal; n++) {
             for (int i = 0; i < ch[n].frames_per_packet; i++)
@@ -1410,30 +1408,27 @@ int silk_decode(silk_decoder_t *d, opus_rc_t *rc, int channels_api, int channels
                 }
             }
         }
-        if (lost == SILK_DECODE_NORMAL) {
-            /* Skip the redundant (LBRR) data. */
-            for (int i = 0; i < ch[0].frames_per_packet; i++)
-                for (int n = 0; n < channels_internal; n++)
-                    if (ch[n].lbrr_flags[i]) {
-                        int cond;
-                        if (channels_internal == 2 && n == 0) {
-                            stereo_decode_pred(rc, pred_Q13);
-                            if (ch[1].lbrr_flags[i] == 0)
-                                decode_only_middle = rc_icdf(rc, k_stereo_only_code_mid_iCDF, 8);
-                        }
-                        cond = i > 0 && ch[n].lbrr_flags[i - 1] ? CODE_CONDITIONALLY : CODE_INDEPENDENTLY;
-                        decode_indices(&ch[n], rc, i, 1, cond);
-                        decode_pulses(rc, tmp->pulses, ch[n].idx.signal_type, ch[n].idx.quant_offset_type,
-                                      ch[n].frame_length);
+        /* Skip the redundant (LBRR) data. */
+        for (int i = 0; i < ch[0].frames_per_packet; i++)
+            for (int n = 0; n < channels_internal; n++)
+                if (ch[n].lbrr_flags[i]) {
+                    int cond;
+                    if (channels_internal == 2 && n == 0) {
+                        stereo_decode_pred(rc, pred_Q13);
+                        if (ch[1].lbrr_flags[i] == 0)
+                            decode_only_middle = rc_icdf(rc, k_stereo_only_code_mid_iCDF, 8);
                     }
-        }
+                    cond = i > 0 && ch[n].lbrr_flags[i - 1] ? CODE_CONDITIONALLY : CODE_INDEPENDENTLY;
+                    decode_indices(&ch[n], rc, i, 1, cond);
+                    decode_pulses(rc, tmp->pulses, ch[n].idx.signal_type, ch[n].idx.quant_offset_type,
+                                  ch[n].frame_length);
+                }
     }
 
     if (channels_internal == 2) {
-        if (lost == SILK_DECODE_NORMAL || (lost == SILK_DECODE_FEC && ch[0].lbrr_flags[ch[0].frames_decoded] == 1)) {
+        if (!lost) {
             stereo_decode_pred(rc, pred_Q13);
-            if ((lost == SILK_DECODE_NORMAL && ch[1].vad_flags[ch[0].frames_decoded] == 0) ||
-                (lost == SILK_DECODE_FEC && ch[1].lbrr_flags[ch[0].frames_decoded] == 0))
+            if (ch[1].vad_flags[ch[0].frames_decoded] == 0)
                 decode_only_middle = rc_icdf(rc, k_stereo_only_code_mid_iCDF, 8);
             else
                 decode_only_middle = 0;
@@ -1450,19 +1445,13 @@ int silk_decode(silk_decoder_t *d, opus_rc_t *rc, int channels_api, int channels
         ch[1].prev_signal_type = TYPE_NO_VOICE;
         ch[1].first_frame_after_reset = 1;
     }
-    if (lost == SILK_DECODE_NORMAL)
-        has_side = !decode_only_middle;
-    else
-        has_side = !d->prev_decode_only_middle ||
-                   (channels_internal == 2 && lost == SILK_DECODE_FEC && ch[1].lbrr_flags[ch[1].frames_decoded] == 1);
+    has_side = lost ? !d->prev_decode_only_middle : !decode_only_middle;
 
     for (int n = 0; n < channels_internal; n++) {
         if (n == 0 || has_side) {
             int frame_index = ch[0].frames_decoded - n, cond;
             if (frame_index <= 0)
                 cond = CODE_INDEPENDENTLY;
-            else if (lost == SILK_DECODE_FEC)
-                cond = ch[n].lbrr_flags[frame_index - 1] ? CODE_CONDITIONALLY : CODE_INDEPENDENTLY;
             else if (n > 0 && d->prev_decode_only_middle)
                 cond = CODE_INDEPENDENTLY_NO_LTP_SCALING;
             else
@@ -1498,7 +1487,7 @@ int silk_decode(silk_decoder_t *d, opus_rc_t *rc, int channels_api, int channels
                 out[1 + 2 * i] = out[2 * i];
         }
     }
-    if (lost == SILK_PACKET_LOST) {
+    if (lost) {
         for (int i = 0; i < d->channels_internal; i++)
             ch[i].last_gain_index = 10;
     } else {

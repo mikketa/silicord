@@ -216,7 +216,7 @@ static int decode_frame(opus_decoder_t *d, const unsigned char *data, int len, f
     frame_size = audiosize;
 
     if (mode != OPUS_CELT) {
-        int lost = data ? SILK_DECODE_NORMAL : SILK_PACKET_LOST, decoded = 0, internal_hz = 16000;
+        int lost = !data, decoded = 0, internal_hz = 16000;
         int payload_ms = 1000 * audiosize / 48000;
         short *p = d->pcm_silk;
         if (d->prev_mode == OPUS_CELT)
