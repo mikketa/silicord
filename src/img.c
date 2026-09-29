@@ -190,7 +190,10 @@ static int fetch(const char *path, http_resp_t *resp)
     if (!(n > 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, slash - 15, 15, ".discordapp.net", 15) == CSTR_EQUAL) &&
         !(n == 18 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "cdn.discordapp.com", 18) == CSTR_EQUAL) &&
         !(n == 16 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "static.klipy.com", 16) == CSTR_EQUAL) &&
-        !(n == 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "media.tenor.com", 15) == CSTR_EQUAL))
+        !(n == 15 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "media.tenor.com", 15) == CSTR_EQUAL) &&
+        /* the app's own art, as the Nitro page shows it */
+        !(n == 11 && CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, p, n, "discord.com", 11) == CSTR_EQUAL &&
+          starts_with(slash, "/assets/")))
         return 0;
     MultiByteToWideChar(CP_UTF8, 0, p, n, host, 127);
     host[n] = 0;

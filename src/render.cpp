@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <dwrite_3.h>
 #include <wincodec.h>
+#include <d2d1_3.h>
 #include <emmintrin.h>
 extern "C" {
 #include "md.h"
@@ -1630,6 +1631,375 @@ extern "C" int r_bitmap_to_png(HBITMAP bmp, const wchar_t *path)
     return ok;
 }
 
+/* Byte compare: no memcmp without the CRT. */
+static int bytes_eq(const void *a, const char *b, size_t n)
+{
+    const BYTE *p = (const BYTE *)a;
+
+    for (size_t i = 0; i < n; i++)
+        if (p[i] != (BYTE)b[i])
+            return 0;
+    return 1;
+}
+
+/* Whether the bytes are an SVG document (after a BOM and blanks, an XML prolog or the <svg> tag). */
+static int is_svg(const BYTE *p, size_t n)
+{
+    size_t i = 0;
+
+    if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF)
+        i = 3;
+    while (i < n && (p[i] == ' ' || p[i] == '\t' || p[i] == '\r' || p[i] == '\n'))
+        i++;
+    return n - i >= 5 && (bytes_eq(p + i, "<svg", 4) || bytes_eq(p + i, "<?xml", 5));
+}
+
+/* A number in SVG text at s[*k], moving past it (and the blanks or commas before it). */
+static float svg_number(const char *s, size_t lim, size_t *k)
+{
+    float whole = 0, frac = 0, scale = 1;
+    int neg = 0;
+
+    while (*k < lim && (s[*k] == ' ' || s[*k] == ','))
+        (*k)++;
+    if (*k < lim && s[*k] == '-')
+        neg = 1, (*k)++;
+    while (*k < lim && s[*k] >= '0' && s[*k] <= '9')
+        whole = whole * 10 + (float)(s[(*k)++] - '0');
+    if (*k < lim && s[*k] == '.')
+        for ((*k)++; *k < lim && s[*k] >= '0' && s[*k] <= '9'; (*k)++)
+            frac = frac * 10 + (float)(s[*k] - '0'), scale *= 10;
+    return (whole + frac / scale) * (neg ? -1.f : 1.f);
+}
+
+/* The size an SVG is drawn at: its width and height attributes, else its viewBox's; 0 if none says. */
+static void svg_size(const BYTE *p, size_t n, float *w, float *h)
+{
+    const char *s = (const char *)p;
+    size_t lim = n < 4096 ? n : 4096, start = 0;
+    float vw = 0, vh = 0;
+
+    *w = *h = 0;
+    /* the attributes of the <svg> tag only */
+    for (size_t i = 0; i + 4 < lim; i++)
+        if (bytes_eq(s + i, "<svg", 4)) {
+            start = i;
+            break;
+        }
+    for (size_t i = start + 4; i + 9 < lim && s[i] != '>'; i++) {
+        size_t k;
+        if ((s[i - 1] == ' ' || s[i - 1] == '\n' || s[i - 1] == '\t') && bytes_eq(s + i, "width=\"", 7)) {
+            k = i + 7;
+            *w = svg_number(s, lim, &k);
+        } else if ((s[i - 1] == ' ' || s[i - 1] == '\n' || s[i - 1] == '\t') && bytes_eq(s + i, "height=\"", 8)) {
+            k = i + 8;
+            *h = svg_number(s, lim, &k);
+        } else if (bytes_eq(s + i, "viewBox=\"", 9)) {
+            k = i + 9;
+            svg_number(s, lim, &k);
+            svg_number(s, lim, &k);
+            vw = svg_number(s, lim, &k);
+            vh = svg_number(s, lim, &k);
+        }
+    }
+    if (*w <= 0 || *h <= 0) {
+        *w = vw;
+        *h = vh;
+    }
+}
+
+/*
+ * Direct2D's SVG reader ignores <style>: Illustrator's exports color their
+ * shapes with classes (".cls-5{fill:#fff}") and would come out black. The
+ * rules of the style sheet become attributes of the elements with those
+ * classes ("fill=\"#fff\"", unless the element sets it itself), and the sheet
+ * goes. Only class selectors are understood, which is all such art uses.
+ */
+#define SVG_RULES 256
+
+typedef struct {
+    const char *name, *decl; /* class name and its declarations, in the source */
+    size_t name_n, decl_n;
+} svg_rule_t;
+
+typedef struct {
+    char *p;
+    size_t n, cap;
+} svg_out_t;
+
+static void svg_put(svg_out_t *o, const char *s, size_t n)
+{
+    if (o->n + n > o->cap)
+        return; /* sized for the worst case; never happens */
+    memcpy(o->p + o->n, s, n);
+    o->n += n;
+}
+
+static int is_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* Whether the tag text [tag, end) already has attribute `name` (n bytes). */
+static int tag_has(const char *tag, const char *end, const char *name, size_t n)
+{
+    for (const char *q = tag; q + n + 2 <= end; q++)
+        if (is_space(q[0]) && bytes_eq(q + 1, name, n) && q[1 + n] == '=')
+            return 1;
+    return 0;
+}
+
+/* Returns a copy of the SVG with its class rules inlined (mem_free it), or NULL when it has no <style>. */
+static char *svg_inline_styles(const char *in, size_t n, size_t *out_n)
+{
+    svg_rule_t *rules; /* on the heap: no __chkstk without the CRT */
+    int nrules = 0;
+    const char *st = NULL, *st_end = NULL, *body = NULL, *body_end = NULL;
+    svg_out_t o;
+
+    for (size_t i = 0; i + 7 < n; i++)
+        if (bytes_eq(in + i, "<style", 6)) {
+            st = in + i;
+            break;
+        }
+    if (!st)
+        return NULL;
+    for (const char *q = st; q < in + n; q++)
+        if (*q == '>') {
+            body = q + 1;
+            break;
+        }
+    for (const char *q = body; q && q + 8 <= in + n; q++)
+        if (bytes_eq(q, "</style>", 8)) {
+            body_end = q;
+            st_end = q + 8;
+            break;
+        }
+    if (!body || !st_end)
+        return NULL;
+    rules = (svg_rule_t *)mem_alloc(SVG_RULES * sizeof *rules);
+    /* ".a,.b{decl}" rules */
+    for (const char *q = body; q < body_end && nrules < SVG_RULES;) {
+        const char *sel = q, *brace, *close;
+        while (q < body_end && *q != '{')
+            q++;
+        brace = q;
+        while (q < body_end && *q != '}')
+            q++;
+        close = q;
+        if (q < body_end)
+            q++;
+        if (brace >= body_end)
+            break;
+        for (const char *c = sel; c < brace && nrules < SVG_RULES;) {
+            const char *a, *b;
+            while (c < brace && (is_space(*c) || *c == ','))
+                c++;
+            a = c;
+            while (c < brace && *c != ',')
+                c++;
+            b = c;
+            while (b > a && is_space(b[-1]))
+                b--;
+            if (b - a > 1 && *a == '.') {
+                rules[nrules].name = a + 1;
+                rules[nrules].name_n = (size_t)(b - a - 1);
+                rules[nrules].decl = brace + 1;
+                rules[nrules].decl_n = (size_t)(close - brace - 1);
+                nrules++;
+            }
+        }
+    }
+    o.cap = n * 4 + 65536;
+    o.p = (char *)mem_alloc(o.cap);
+    o.n = 0;
+    for (const char *q = in; q < in + n;) {
+        const char *tag_end, *cls;
+        if (q == st) { /* the sheet goes */
+            q = st_end;
+            continue;
+        }
+        if (*q != '<' || q + 1 >= in + n || q[1] == '/' || q[1] == '!' || q[1] == '?') {
+            svg_put(&o, q, 1);
+            q++;
+            continue;
+        }
+        for (tag_end = q; tag_end < in + n && *tag_end != '>'; tag_end++)
+            ;
+        cls = NULL;
+        for (const char *c = q; c + 8 <= tag_end; c++)
+            if (is_space(c[0]) && bytes_eq(c + 1, "class=\"", 7)) {
+                cls = c + 8;
+                break;
+            }
+        /* The tag up to its end, then the declarations of its classes as attributes. */
+        {
+            const char *close = tag_end > q && tag_end[-1] == '/' ? tag_end - 1 : tag_end;
+            svg_put(&o, q, (size_t)(close - q));
+            for (const char *c = cls; c && c < tag_end && *c != '"';) {
+                const char *a;
+                while (c < tag_end && is_space(*c))
+                    c++;
+                a = c;
+                while (c < tag_end && *c != '"' && !is_space(*c))
+                    c++;
+                for (int r = 0; r < nrules; r++) {
+                    const char *d, *de;
+                    if (rules[r].name_n != (size_t)(c - a) || !bytes_eq(a, rules[r].name, rules[r].name_n))
+                        continue;
+                    d = rules[r].decl;
+                    de = d + rules[r].decl_n;
+                    while (d < de) {
+                        const char *k = d, *colon, *v, *ve;
+                        while (d < de && *d != ';')
+                            d++;
+                        for (colon = k; colon < d && *colon != ':'; colon++)
+                            ;
+                        if (colon < d) {
+                            const char *kb = k, *ke = colon;
+                            while (kb < ke && is_space(*kb))
+                                kb++;
+                            while (ke > kb && is_space(ke[-1]))
+                                ke--;
+                            v = colon + 1;
+                            ve = d;
+                            while (v < ve && is_space(*v))
+                                v++;
+                            while (ve > v && is_space(ve[-1]))
+                                ve--;
+                            if (ke > kb && ve > v && !tag_has(q, tag_end, kb, (size_t)(ke - kb))) {
+                                svg_put(&o, " ", 1);
+                                svg_put(&o, kb, (size_t)(ke - kb));
+                                svg_put(&o, "=\"", 2);
+                                svg_put(&o, v, (size_t)(ve - v));
+                                svg_put(&o, "\"", 1);
+                            }
+                        }
+                        if (d < de)
+                            d++;
+                    }
+                }
+            }
+            svg_put(&o, close, (size_t)(tag_end - close) + (tag_end < in + n));
+        }
+        q = tag_end + (tag_end < in + n);
+    }
+    mem_free(rules);
+    *out_n = o.n;
+    return o.p;
+}
+
+/*
+ * An SVG (the art of Discord's pages): Direct2D draws it once, on the CPU,
+ * into a bitmap of ours; its factory and target go right after, so nothing
+ * of Direct2D stays around.
+ */
+static r_image_t *svg_decode(const void *data, size_t n, int max_px)
+{
+    ID2D1Factory *f = NULL;
+    IWICImagingFactory *wic = NULL;
+    IWICBitmap *bmp = NULL;
+    ID2D1RenderTarget *rt = NULL;
+    ID2D1DeviceContext5 *dc = NULL;
+    ID2D1SvgDocument *doc = NULL;
+    IStream *st = NULL;
+    HGLOBAL mem;
+    r_image_t *img = NULL;
+    float sw, sh;
+    UINT w, h;
+
+    svg_size((const BYTE *)data, n, &sw, &sh);
+    if (sw <= 0 || sh <= 0)
+        sw = sh = 256;
+    if (max_px <= 0)
+        max_px = 512;
+    if (sw >= sh) {
+        w = (UINT)max_px;
+        h = (UINT)((float)max_px * sh / sw + .5f);
+    } else {
+        h = (UINT)max_px;
+        w = (UINT)((float)max_px * sw / sh + .5f);
+    }
+    if (!w || !h || w > 4096 || h > 4096)
+        return NULL;
+    {
+        size_t in_n;
+        char *inl = svg_inline_styles((const char *)data, n, &in_n);
+        if (inl) {
+            data = inl;
+            n = in_n;
+        }
+        mem = GlobalAlloc(GMEM_MOVEABLE, n);
+        if (mem) {
+            memcpy(GlobalLock(mem), data, n);
+            GlobalUnlock(mem);
+        }
+        if (inl)
+            mem_free(inl);
+        if (!mem)
+            return NULL;
+    }
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(CreateStreamOnHGlobal(mem, TRUE, &st)) &&
+        SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), NULL, (void **)&f)) &&
+        SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory),
+                                   (void **)&wic)) &&
+        SUCCEEDED(wic->CreateBitmap(w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bmp))) {
+        D2D1_RENDER_TARGET_PROPERTIES props = {D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                                               {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96, 96,
+                                               D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT};
+        if (SUCCEEDED(f->CreateWicBitmapRenderTarget(bmp, &props, &rt)) &&
+            SUCCEEDED(rt->QueryInterface(__uuidof(ID2D1DeviceContext5), (void **)&dc)) &&
+            SUCCEEDED(dc->CreateSvgDocument(st, D2D1_SIZE_F{sw, sh}, &doc))) {
+            /* Drawn at its own size, scaled to ours: with or without a viewBox, it fills the bitmap. */
+            D2D1_COLOR_F clear = {0, 0, 0, 0};
+            D2D1_MATRIX_3X2_F scale = {(float)w / sw, 0, 0, (float)h / sh, 0, 0};
+            D2D1_COLOR_F ink = {0xDC / 255.f, 0xDC / 255.f, 0xDF / 255.f, 1};
+            ID2D1SvgElement *root = NULL;
+            /* Art painted with currentColor takes the text color, as it would in Discord's dark theme. */
+            doc->GetRoot(&root);
+            if (root) {
+                root->SetAttributeValue(L"color", D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR, &ink, sizeof ink);
+                root->Release();
+            }
+            dc->BeginDraw();
+            dc->Clear(&clear);
+            dc->SetTransform(&scale);
+            dc->DrawSvgDocument(doc);
+            if (SUCCEEDED(dc->EndDraw())) {
+                img = (r_image_t *)mem_alloc(sizeof *img);
+                img->w = w;
+                img->h = h;
+                img->pixels = (BYTE *)mem_alloc((size_t)w * h * 4);
+                if (FAILED(bmp->CopyPixels(NULL, w * 4, w * h * 4, img->pixels))) {
+                    mem_free(img->pixels);
+                    mem_free(img);
+                    img = NULL;
+                } else {
+                    img->average = average_of(img);
+                }
+            }
+        }
+    } else if (!st) {
+        GlobalFree(mem); /* the stream owns it once made */
+    }
+    if (doc)
+        doc->Release();
+    if (dc)
+        dc->Release();
+    if (rt)
+        rt->Release();
+    if (bmp)
+        bmp->Release();
+    if (wic)
+        wic->Release();
+    if (f)
+        f->Release();
+    if (st)
+        st->Release();
+    return img;
+}
+
 extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
 {
     IWICImagingFactory *wic = NULL;
@@ -1642,6 +2012,8 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
     r_image_t *img = NULL;
     UINT w = 0, h = 0;
 
+    if (is_svg((const BYTE *)data, n))
+        return svg_decode(data, n, max_px);
     /* Worker threads call this: make sure COM is up (once per thread is enough). */
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory),

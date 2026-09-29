@@ -102,7 +102,7 @@ target_compile_definitions(silicord PRIVATE
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0>
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_ICON="${CMAKE_SOURCE_DIR}/assets/silicord.ico">)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
-target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid d3d11 dxgi dxguid)
+target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 d2d1 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid d3d11 dxgi dxguid)
 
 enable_testing()
 # tests/<name>_test.c, built like the client; extra arguments are libraries to link.
@@ -128,7 +128,7 @@ foreach(name dave mls_schedule mls_tree mls_path mls_msg mls_group dave_session 
   silicord_test(${name} bcrypt)
 endforeach()
 silicord_test(crypto bcrypt crypt32)
-silicord_test(render ole32 gdi32 user32 dwrite windowscodecs)
+silicord_test(render ole32 gdi32 user32 d2d1 dwrite windowscodecs)
 target_sources(render_test PRIVATE src/render.cpp)
 
 # The QR test needs an independent decoder: pip install numpy zxing-cpp
