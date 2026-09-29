@@ -277,22 +277,45 @@ static void fwht(const short *in, short *out)
 /* Quantizes a block from `first`; `deq` gets what decoders will multiply back. Returns whether any is nonzero. */
 static int quantize(const short *in, short *q, short *deq, int first, const short *dq)
 {
-    /* Dividing by a step as multiplying by 2^32 / step, rounded up: exact for dividends below 2^16. */
-    const unsigned long long inv[2] = {0xFFFFFFFFu / (unsigned)dq[0] + 1ull, 0xFFFFFFFFu / (unsigned)dq[1] + 1ull};
-    int any = 0;
+    /*
+     * Eight coefficients at a time in 16 bits. n = |c| plus the rounding is
+     * below 2^16; mulhi(n, 2^16 / step) is the quotient n / step or one less
+     * (its error is below n / 2^16 < 1), which the remainder corrects.
+     */
+    short ac_round = (short)(dq[1] * 3 / 8), ac_inv = (short)(65536 / dq[1]);
+    const __m128i steps[2] = {_mm_setr_epi16(dq[0], dq[1], dq[1], dq[1], dq[1], dq[1], dq[1], dq[1]),
+                              _mm_set1_epi16(dq[1])};
+    const __m128i inv[2] = {_mm_setr_epi16((short)(65536 / dq[0]), ac_inv, ac_inv, ac_inv, ac_inv, ac_inv, ac_inv,
+                                           ac_inv),
+                            _mm_set1_epi16(ac_inv)};
+    /* A dead zone on the AC coefficients saves bits where they matter least. */
+    const __m128i round[2] = {_mm_setr_epi16((short)(dq[0] / 2), ac_round, ac_round, ac_round, ac_round, ac_round,
+                                             ac_round, ac_round),
+                              _mm_set1_epi16(ac_round)};
+    const __m128i one = _mm_set1_epi16(1), max = _mm_set1_epi16(2048 + 66), zero = _mm_setzero_si128();
+    /* With `first`, coefficient 0 is the Y2 block's: left as it is. */
+    const __m128i keep = _mm_setr_epi16((short)-first, 0, 0, 0, 0, 0, 0, 0);
+    __m128i any = zero;
 
-    for (int i = first; i < 16; i++) {
-        int c = in[i], a = c < 0 ? -c : c, step = dq[i > 0], v;
-        /* A dead zone on the AC coefficients saves bits where they matter least. */
-        v = (int)((unsigned long long)(a + (i ? step * 3 / 8 : step / 2)) * inv[i > 0] >> 32);
-        if (v > 2048 + 66)
-            v = 2048 + 66;
-        v = c < 0 ? -v : v;
-        q[i] = (short)v;
-        deq[i] = (short)(v * step);
-        any |= v != 0;
+    for (int h = 0; h < 2; h++) {
+        __m128i c = _mm_loadu_si128((const __m128i *)(in + 8 * h)), sign = _mm_srai_epi16(c, 15);
+        __m128i n = _mm_add_epi16(_mm_sub_epi16(_mm_xor_si128(c, sign), sign), round[h]);
+        __m128i v = _mm_mulhi_epu16(n, inv[h]), rem = _mm_sub_epi16(n, _mm_mullo_epi16(v, steps[h]));
+        v = _mm_sub_epi16(v, _mm_cmpgt_epi16(rem, _mm_sub_epi16(steps[h], one)));
+        v = _mm_sub_epi16(_mm_xor_si128(_mm_min_epi16(v, max), sign), sign);
+        if (h == 0) {
+            v = _mm_andnot_si128(keep, v);
+            any = v;
+            v = _mm_or_si128(v, _mm_and_si128(keep, _mm_loadu_si128((const __m128i *)q)));
+            _mm_storeu_si128((__m128i *)deq, _mm_or_si128(_mm_andnot_si128(keep, _mm_mullo_epi16(v, steps[0])),
+                                                          _mm_and_si128(keep, _mm_loadu_si128((const __m128i *)deq))));
+        } else {
+            any = _mm_or_si128(any, v);
+            _mm_storeu_si128((__m128i *)(deq + 8), _mm_mullo_epi16(v, steps[1]));
+        }
+        _mm_storeu_si128((__m128i *)(q + 8 * h), v);
     }
-    return any;
+    return _mm_movemask_epi8(_mm_cmpeq_epi16(any, zero)) != 0xFFFF;
 }
 
 /* ---- Tokens (the inverse of the decoder's reading) ---- */
