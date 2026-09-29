@@ -2247,6 +2247,17 @@ static DWORD retry_after_ms(const http_resp_t *resp)
     return ms < 100 ? 100 : ms > 5000 ? 5000 : ms;
 }
 
+/* GET, waiting what Discord asks and trying again (3 tries in all) while it answers 429. */
+static void get_rate_limited(const char *path, const char *token, http_resp_t *resp)
+{
+    for (int tries = 0; tries < 3; tries++) {
+        http_resp_free(resp);
+        if (!http_request("GET", path, token, NULL, 0, resp) || resp->status != 429)
+            break;
+        Sleep(retry_after_ms(resp));
+    }
+}
+
 static DWORD WINAPI gifs_main(LPVOID arg)
 {
     rest_job_t *j = arg;
@@ -2270,13 +2281,7 @@ static DWORD WINAPI gifs_main(LPVOID arg)
     } else {
         sb_add(&path, "/gifs/trending-gifs?media_format=tinygif&provider=tenor&locale=en-US&limit=40");
     }
-    /* Rate limited: wait what Discord asks, then try again. */
-    for (int tries = 0; tries < 3; tries++) {
-        http_resp_free(&resp);
-        if (!http_request("GET", path.data, j->token.data, NULL, 0, &resp) || resp.status != 429)
-            break;
-        Sleep(retry_after_ms(&resp));
-    }
+    get_rate_limited(path.data, j->token.data, &resp);
     sb_addn(p, j->text.data ? j->text.data : "", j->text.len);
     sb_addn(p, "", 1);
     if (g_debug && resp.body.len) {
@@ -2314,12 +2319,7 @@ static DWORD WINAPI commands_main(LPVOID arg)
         wsprintfA(path, "/guilds/%s/application-command-index", j->guild);
     else
         wsprintfA(path, "/channels/%s/application-command-index", j->channel);
-    for (int tries = 0; tries < 3; tries++) {
-        http_resp_free(&resp);
-        if (!http_request("GET", path, j->token.data, NULL, 0, &resp) || resp.status != 429)
-            break;
-        Sleep(retry_after_ms(&resp));
-    }
+    get_rate_limited(path, j->token.data, &resp);
     sb_add(p, j->guild[0] ? j->guild : j->channel);
     sb_addn(p, "", 1);
     if (resp.status == 200)
