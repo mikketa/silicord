@@ -433,6 +433,9 @@ typedef struct presence {
     unsigned hash;      /* of user: lookups compare it first */
     int status;
     sb_t activity;
+    /* The first activity that is not a custom status, for Active Now's card. */
+    sb_t game, details, state, image; /* image: a full URL, empty if none we can show */
+    long long start;                  /* ms since 1970 it began, 0 if not told */
 } presence_t;
 
 typedef struct member {
@@ -467,6 +470,7 @@ static void rel_remove(const char *id);
 #define TIMER_REACTORS 9
 #define TIMER_VOICE 10 /* refreshes who is speaking in our call */
 #define TIMER_MIC 11   /* the microphone meter in the voice settings */
+#define TIMER_ACTIVE 14 /* Active Now's elapsed times, each second while shown */
 #define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
@@ -3102,6 +3106,64 @@ static presence_t *presence_find(const char *user)
     return NULL;
 }
 
+/* A string member into `out` (cleared first), if there is one. */
+static void json_str_of(json_t obj, const char *key, sb_t *out)
+{
+    json_t v;
+
+    sb_clear(out);
+    if (json_get(obj, key, &v) && json_type(v) == JSON_STRING)
+        json_str(v, out);
+}
+
+/*
+ * The first activity that is not a custom status: its name, details, state,
+ * start and large picture. Pictures are "mp:" media proxy paths or assets of
+ * the application; Spotify's covers are on a host we do not fetch from.
+ */
+static void presence_game(json_t obj, presence_t *p)
+{
+    json_t acts, a, v, assets, ts;
+    json_iter_t it;
+    long long type;
+
+    sb_clear(&p->game);
+    sb_clear(&p->details);
+    sb_clear(&p->state);
+    sb_clear(&p->image);
+    p->start = 0;
+    if (!json_get(obj, "activities", &acts))
+        return;
+    json_iter(acts, &it);
+    while (json_next(&it, NULL, &a)) {
+        char app[24] = "";
+        sb_t img = {0};
+        if (!json_get(a, "type", &v) || !json_int(v, &type) || type == 4)
+            continue;
+        json_str_of(a, "name", &p->game);
+        json_str_of(a, "details", &p->details);
+        json_str_of(a, "state", &p->state);
+        if (json_get(a, "timestamps", &ts) && json_get(ts, "start", &v))
+            json_int(v, &p->start);
+        if (json_get(a, "application_id", &v))
+            json_raw(v, app, sizeof app);
+        if (json_get(a, "assets", &assets))
+            json_str_of(assets, "large_image", &img);
+        if (img.len > 3 && img.data[0] == 'm' && img.data[1] == 'p' && img.data[2] == ':') {
+            sb_add(&p->image, "https://media.discordapp.net/");
+            sb_addn(&p->image, img.data + 3, img.len - 3);
+        } else if (img.len && app[0] && img.data[0] >= '0' && img.data[0] <= '9') {
+            sb_add(&p->image, "https://cdn.discordapp.com/app-assets/");
+            sb_add(&p->image, app);
+            sb_add(&p->image, "/");
+            sb_add(&p->image, img.data);
+            sb_add(&p->image, ".png");
+        }
+        sb_free(&img);
+        return;
+    }
+}
+
 /* A presence object: {user: {id}, status, activities}. */
 static void presence_store(json_t obj)
 {
@@ -3129,12 +3191,18 @@ static void presence_store(json_t obj)
     p->status = json_get(obj, "status", &v) ? ml_status(v) : ML_OFFLINE;
     sb_clear(&p->activity);
     ml_activity(obj, &p->activity);
+    presence_game(obj, p);
 }
 
 static void presences_clear(void)
 {
-    for (int i = 0; i < g_ui.npresences; i++)
+    for (int i = 0; i < g_ui.npresences; i++) {
         sb_free(&g_ui.presences[i].activity);
+        sb_free(&g_ui.presences[i].game);
+        sb_free(&g_ui.presences[i].details);
+        sb_free(&g_ui.presences[i].state);
+        sb_free(&g_ui.presences[i].image);
+    }
     g_ui.npresences = 0;
 }
 
@@ -11626,10 +11694,14 @@ static void paint_active_now(RECT rc, int x, int w)
         const relation_t *r = &g_ui.rels[i];
         const presence_t *pr = presence_find(r->id);
         r_image_t *img;
-        if (r->type != REL_FRIEND || !pr || !pr->activity.len || pr->status == ML_OFFLINE)
-            continue;
-        r_round(x, y, w, S(72), S(16), ARGB(C_MAIN));
-        r_round_outline(x, y, w, S(72), S(16), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        int rich, h;
+        if (r->type != REL_FRIEND || !pr || !pr->game.len || pr->status == ML_OFFLINE)
+            continue; /* activities only, as Discord: not a custom status */
+        /* a game with more to say gets Discord's inner card: its picture, name, details, state and time */
+        rich = pr->game.len && (pr->details.len || pr->state.len || pr->image.len || pr->start);
+        h = S(72) + (rich ? S(92) + S(8) : 0);
+        r_round(x, y, w, h, S(16), ARGB(C_MAIN));
+        r_round_outline(x, y, w, h, S(16), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
         img = user_avatar(r->id, r->avatar);
         if (img)
             r_image(img, x + S(16), y + S(16), S(40), S(40), S(20));
@@ -11640,7 +11712,50 @@ static void paint_active_now(RECT rc, int x, int w)
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(38), w - S(84), S(18)), pr->activity.data,
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        y += S(80);
+        if (rich) {
+            int cx = x + S(12), cy = y + S(72), cw = w - S(24), tx = cx + S(12), line = cy + S(14);
+            r_image_t *art = pr->image.len ? shop_image(pr->image.data, S(64)) : NULL;
+            r_round(cx, cy, cw, S(92), S(8), 0xFF121214u);
+            if (art) {
+                r_image_cover(art, cx + S(14), cy + S(14), S(64), S(64), S(8));
+                tx = cx + S(14) + S(64) + S(12);
+            } else if (pr->image.len) {
+                r_round(cx + S(14), cy + S(14), S(64), S(64), S(8), 0xFF1E1E20u);
+                tx = cx + S(14) + S(64) + S(12);
+            }
+            text(g_ui.f_small_mid, C_INK, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->game.data,
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            line += S(18);
+            if (pr->details.len) {
+                text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->details.data,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                line += S(18);
+            }
+            if (pr->state.len && line < cy + S(62)) {
+                text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->state.data,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                line += S(18);
+            }
+            if (pr->start && line < cy + S(78)) {
+                /* "01:23:45 elapsed", ticking */
+                FILETIME ft;
+                ULARGE_INTEGER t;
+                long long now, el;
+                char elapsed[48];
+                GetSystemTimeAsFileTime(&ft);
+                t.LowPart = ft.dwLowDateTime;
+                t.HighPart = ft.dwHighDateTime;
+                now = (long long)(t.QuadPart / 10000ull) - 11644473600000ll;
+                el = (now - pr->start) / 1000;
+                if (el < 0)
+                    el = 0;
+                wsprintfA(elapsed, "%02d:%02d:%02d elapsed", (int)(el / 3600), (int)(el / 60 % 60), (int)(el % 60));
+                text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), elapsed,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                SetTimer(g_ui.wnd, TIMER_ACTIVE, 1000, NULL);
+            }
+        }
+        y += h + S(8);
         shown++;
     }
     if (!shown) {
@@ -14926,6 +15041,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
+        if (wp == TIMER_ACTIVE) {
+            /* the elapsed times move on while Active Now shows; the next paint arms it again */
+            KillTimer(g_ui.wnd, TIMER_ACTIVE);
+            redraw();
+            return 0;
+        }
         if (wp == TIMER_ANIM) {
             anim_tick();
             return 0;
