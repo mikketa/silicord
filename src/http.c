@@ -48,7 +48,7 @@ static int read_body(HINTERNET req, sb_t *out)
     }
 }
 
-static int do_request(HINTERNET conn, const char *method, const sb_t *url, const char *token,
+static int do_request(HINTERNET conn, const char *method, const char *url, const char *token,
                       const char *body, size_t body_len, http_resp_t *resp, const char *ctype)
 {
     sb_t hdr = {0};
@@ -70,7 +70,7 @@ static int do_request(HINTERNET conn, const char *method, const sb_t *url, const
     }
 
     wmethod = utf8_to_wide(method, sc_strlen(method));
-    wurl = utf8_to_wide(url->data, url->len);
+    wurl = utf8_to_wide(url, sc_strlen(url));
     whdr = utf8_to_wide(hdr.data, hdr.len);
 
     resp->status = 0;
@@ -107,7 +107,7 @@ int http_request_type(const char *method, const char *path, const char *token, c
 
     sb_add(&url, API_BASE);
     sb_add(&url, path);
-    ok = do_request(g_api, method, &url, token, body, body_len, resp, content_type);
+    ok = do_request(g_api, method, url.data, token, body, body_len, resp, content_type);
     sb_free(&url);
     return ok;
 }
@@ -120,26 +120,17 @@ int http_request(const char *method, const char *path, const char *token,
 
 int http_cdn_get(const char *path, http_resp_t *resp)
 {
-    sb_t url = {0};
-    int ok;
-
-    sb_add(&url, path);
-    ok = do_request(g_cdn, "GET", &url, NULL, NULL, 0, resp, NULL);
-    sb_free(&url);
-    return ok;
+    return do_request(g_cdn, "GET", path, NULL, NULL, 0, resp, NULL);
 }
 
 int http_get(const wchar_t *host, const char *path, http_resp_t *resp)
 {
     HINTERNET conn = WinHttpConnect(g_session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    sb_t url = {0};
     int ok;
 
     if (!conn)
         return 0;
-    sb_add(&url, path);
-    ok = do_request(conn, "GET", &url, NULL, NULL, 0, resp, NULL);
-    sb_free(&url);
+    ok = do_request(conn, "GET", path, NULL, NULL, 0, resp, NULL);
     WinHttpCloseHandle(conn);
     return ok;
 }
