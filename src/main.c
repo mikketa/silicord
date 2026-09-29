@@ -1358,6 +1358,17 @@ static DWORD WINAPI fetch_main(LPVOID arg)
 
 #define BOUNDARY "----SilicordFormBoundary7MA4YWxk"
 
+/* The file name at the end of a path. */
+static const char *file_name(const char *path)
+{
+    const char *name = path;
+
+    for (const char *q = path; *q; q++)
+        if (*q == '\\' || *q == '/')
+            name = q + 1;
+    return name;
+}
+
 /* Wraps the JSON payload and the files of job j into a multipart body, replacing *body. */
 static int multipart(rest_job_t *j, sb_t *body)
 {
@@ -1372,13 +1383,10 @@ static int multipart(rest_job_t *j, sb_t *body)
     for (int i = 0; i < j->nfiles && ok; i++, p += lstrlenA(p) + 1) {
         wchar_t *wpath = utf8_to_wide(p, (size_t)lstrlenA(p));
         HANDLE f = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-        const char *name = p;
+        const char *name = file_name(p);
         DWORD size, got = 0;
 
         mem_free(wpath);
-        for (const char *q = p; *q; q++)
-            if (*q == '\\' || *q == '/')
-                name = q + 1;
         if (f == INVALID_HANDLE_VALUE) {
             ok = 0;
             break;
@@ -1446,10 +1454,7 @@ static DWORD WINAPI send_main(LPVOID arg)
         const char *p = j->files.data;
         sb_add(&body, ",\"attachments\":[");
         for (int i = 0; i < j->nfiles; i++, p += lstrlenA(p) + 1) {
-            const char *name = p;
-            for (const char *q = p; *q; q++)
-                if (*q == '\\' || *q == '/')
-                    name = q + 1;
+            const char *name = file_name(p);
             if (i)
                 sb_add(&body, ",");
             sb_add(&body, "{\"id\":");
