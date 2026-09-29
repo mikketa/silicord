@@ -204,6 +204,7 @@ static void send_identify(voice_t *v)
     sb_add(&m, v->p.screen ? ",\"video\":true,\"streams\":[{\"type\":\"screen\",\"rid\":\"100\",\"quality\":100}]"
                            : ",\"video\":true,\"streams\":[{\"type\":\"video\",\"rid\":\"100\",\"quality\":100}]");
     sb_add(&m, ",\"max_dave_protocol_version\":1}}");
+    vlog(v, "sent identify", (long long)m.len, -1);
     send_text(v, &m);
 }
 
@@ -640,14 +641,21 @@ static DWORD WINAPI voice_main(LPVOID arg)
     wchar_t host[256];
     char narrow[256];
     int i, binary;
+    unsigned port = 0;
     sb_t msg = {0};
 
     for (i = 0; i < 255 && v->p.endpoint[i] && v->p.endpoint[i] != ':'; i++)
         narrow[i] = v->p.endpoint[i];
     narrow[i] = 0;
+    /* "host:port": a voice host runs several servers, each on its own port, and only ours knows the session. */
+    if (v->p.endpoint[i] == ':')
+        for (const char *c = v->p.endpoint + i + 1; *c >= '0' && *c <= '9' && port < 65536; c++)
+            port = port * 10 + (unsigned)(*c - '0');
+    if (!port || port > 65535 || port == 80) /* old endpoints named port 80 for a wss:// connection on 443 */
+        port = INTERNET_DEFAULT_HTTPS_PORT;
     MultiByteToWideChar(CP_UTF8, 0, narrow, -1, host, 256);
     state(v, VOICE_CONNECTING, "Connecting to voice\xE2\x80\xA6");
-    if (!ws_connect(&v->ws, host, L"/?v=8", NULL)) {
+    if (!ws_connect(&v->ws, host, (INTERNET_PORT)port, L"/?v=8", NULL)) {
         state(v, VOICE_FAILED, "Could not reach the voice server");
         return 0;
     }
@@ -665,8 +673,14 @@ static DWORD WINAPI voice_main(LPVOID arg)
         }
     }
     /* Ended by the server or a failure, not by voice_stop(). */
-    if (WaitForSingleObject(v->stop, 0) == WAIT_TIMEOUT)
+    if (WaitForSingleObject(v->stop, 0) == WAIT_TIMEOUT) {
+        sb_t reason = {0};
+        sb_add(&reason, "closed by the server: ");
+        vlog(v, "close code", ws_close_status(&v->ws, &reason), -1);
+        vlog(v, reason.data, -1, -1);
+        sb_free(&reason);
         state(v, VOICE_FAILED, "Voice disconnected");
+    }
     SetEvent(v->stop);
     ws_shutdown(&v->ws, WS_CLOSE_NORMAL);
     sb_free(&msg);

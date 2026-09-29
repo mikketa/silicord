@@ -274,7 +274,7 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
     g->resuming = resume && g->session_id[0];
     host = g->resuming && g->resume_host[0] ? g->resume_host : GW_HOST;
 
-    if (!ws_connect(&g->ws, host, GW_PATH, NULL)) {
+    if (!ws_connect(&g->ws, host, INTERNET_DEFAULT_HTTPS_PORT, GW_PATH, NULL)) {
         g->resume_host[0] = 0; /* next time, try the main host */
         status(g, "Could not reach the gateway");
         return cancelled(g) ? GW_STOPPED : (g->session_id[0] ? GW_RESUME : GW_REIDENTIFY);

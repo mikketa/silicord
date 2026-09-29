@@ -9,11 +9,11 @@ void ws_init(ws_t *ws)
     InitializeCriticalSection(&ws->lock);
 }
 
-int ws_connect(ws_t *ws, const wchar_t *host, const wchar_t *path, const wchar_t *headers)
+int ws_connect(ws_t *ws, const wchar_t *host, INTERNET_PORT port, const wchar_t *path, const wchar_t *headers)
 {
     HINTERNET conn, req, socket = NULL;
 
-    conn = WinHttpConnect(http_session(), host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    conn = WinHttpConnect(http_session(), host, port, 0);
     if (!conn)
         return 0;
     req = WinHttpOpenRequest(conn, L"GET", path, NULL, WINHTTP_NO_REFERER,

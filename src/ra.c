@@ -258,7 +258,7 @@ int ra_login(const ra_events_t *ev, sb_t *token)
         return 0;
     }
 
-    if (!ws_connect(&r->ws, RA_HOST, RA_PATH, RA_HEADERS)) {
+    if (!ws_connect(&r->ws, RA_HOST, INTERNET_DEFAULT_HTTPS_PORT, RA_PATH, RA_HEADERS)) {
         status(r, "Could not reach the login server");
     } else if (!cancelled(r)) {
         while (ws_recv(&r->ws, &msg) && (result = handle(r, &msg)) == CONTINUE)

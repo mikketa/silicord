@@ -16,7 +16,8 @@ typedef struct {
 
 void ws_init(ws_t *ws);
 /* `headers` may be NULL, otherwise CRLF-separated "Name: value" lines. */
-int ws_connect(ws_t *ws, const wchar_t *host, const wchar_t *path, const wchar_t *headers);
+/* `port`: INTERNET_DEFAULT_HTTPS_PORT, or the one a voice endpoint names. */
+int ws_connect(ws_t *ws, const wchar_t *host, INTERNET_PORT port, const wchar_t *path, const wchar_t *headers);
 int ws_send(ws_t *ws, const sb_t *msg);
 int ws_send_binary(ws_t *ws, const void *data, size_t n);
 /* Receives one complete text or binary message. Returns 0 once the socket is closed. */
