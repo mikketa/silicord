@@ -82,16 +82,13 @@ static void test_rsa(void)
         check(cipher.len == 256, "encrypt with the imported public key");
         check(rsa_decrypt_oaep_sha256(key, cipher.data, cipher.len, &plain) &&
               bytes_eq(&plain, secret, sizeof secret - 1), "oaep-sha256 round trip through the spki");
+        if (cipher.len) {
+            cipher.data[10] ^= 1;
+            sb_clear(&plain);
+            check(!rsa_decrypt_oaep_sha256(key, cipher.data, cipher.len, &plain), "reject a tampered ciphertext");
+        }
         BCryptDestroyKey(imported);
     }
-
-    sb_clear(&cipher);
-    sb_clear(&plain);
-    check(rsa_encrypt_oaep_sha256(key, "x", 1, &cipher) && rsa_decrypt_oaep_sha256(key, cipher.data, cipher.len, &plain) &&
-          bytes_eq(&plain, "x", 1), "oaep-sha256 round trip with the key pair");
-    cipher.data[10] ^= 1;
-    sb_clear(&plain);
-    check(!rsa_decrypt_oaep_sha256(key, cipher.data, cipher.len, &plain), "reject a tampered ciphertext");
 
     if (info)
         LocalFree(info);

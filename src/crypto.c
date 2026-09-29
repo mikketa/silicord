@@ -114,34 +114,18 @@ int rsa_public_spki(rsa_key_t *k, sb_t *der)
     return 1;
 }
 
-static int oaep(rsa_key_t *k, const void *in, size_t n, sb_t *out, int encrypt)
+int rsa_decrypt_oaep_sha256(rsa_key_t *k, const void *in, size_t n, sb_t *out)
 {
     BCRYPT_OAEP_PADDING_INFO pad = {BCRYPT_SHA256_ALGORITHM, NULL, 0};
     ULONG size = 0;
-    NTSTATUS st;
 
-    st = encrypt ? BCryptEncrypt(k->key, (PUCHAR)in, (ULONG)n, &pad, NULL, 0, NULL, 0, &size, BCRYPT_PAD_OAEP)
-                 : BCryptDecrypt(k->key, (PUCHAR)in, (ULONG)n, &pad, NULL, 0, NULL, 0, &size, BCRYPT_PAD_OAEP);
-    if (!BCRYPT_SUCCESS(st))
+    if (!BCRYPT_SUCCESS(BCryptDecrypt(k->key, (PUCHAR)in, (ULONG)n, &pad, NULL, 0, NULL, 0, &size, BCRYPT_PAD_OAEP)))
         return 0;
     sb_reserve(out, size);
-    st = encrypt ? BCryptEncrypt(k->key, (PUCHAR)in, (ULONG)n, &pad, NULL, 0,
-                                 (PUCHAR)out->data + out->len, size, &size, BCRYPT_PAD_OAEP)
-                 : BCryptDecrypt(k->key, (PUCHAR)in, (ULONG)n, &pad, NULL, 0,
-                                 (PUCHAR)out->data + out->len, size, &size, BCRYPT_PAD_OAEP);
-    if (!BCRYPT_SUCCESS(st))
+    if (!BCRYPT_SUCCESS(BCryptDecrypt(k->key, (PUCHAR)in, (ULONG)n, &pad, NULL, 0, (PUCHAR)out->data + out->len, size,
+                                      &size, BCRYPT_PAD_OAEP)))
         return 0;
     out->len += size;
     out->data[out->len] = 0;
     return 1;
-}
-
-int rsa_encrypt_oaep_sha256(rsa_key_t *k, const void *in, size_t n, sb_t *out)
-{
-    return oaep(k, in, n, out, 1);
-}
-
-int rsa_decrypt_oaep_sha256(rsa_key_t *k, const void *in, size_t n, sb_t *out)
-{
-    return oaep(k, in, n, out, 0);
 }

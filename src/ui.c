@@ -453,7 +453,7 @@ void ui_post_model(model_t *model)
         model_free(model);
 }
 
-void activity_free(activity_t *a)
+static void activity_free(activity_t *a)
 {
     sb_free(&a->author);
     sb_free(&a->preview);

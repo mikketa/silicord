@@ -32,6 +32,4 @@ size_t tls_read_varint(tls_reader_t *r);
 const unsigned char *tls_read_vec(tls_reader_t *r, size_t *n);
 /* A sub-reader over the next vector, for nested structures. */
 tls_reader_t tls_read_nested(tls_reader_t *r);
-/* Fixed-size raw bytes. */
-const unsigned char *tls_read_raw(tls_reader_t *r, size_t n);
 int tls_done(const tls_reader_t *r);

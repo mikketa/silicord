@@ -53,8 +53,6 @@ enum { MLS_HANDLED_PROPOSAL = 1, MLS_HANDLED_COMMIT, MLS_HANDLED_REMOVED };
 /* A fresh KeyPackage for `identity` (DAVE: the user id as 8 big-endian bytes). */
 int mls_member_create(mls_member_t *m, const void *identity, size_t in);
 void mls_member_free(mls_member_t *m);
-/* KeyPackageRef. */
-void mls_key_package_ref(const void *kp, size_t n, unsigned char ref[32]);
 
 /* A one-member group at epoch 0; `extensions` is the list's content. */
 int mls_group_create(mls_group_t *g, const mls_member_t *m, const void *group_id, size_t gn, const void *extensions,
@@ -64,8 +62,6 @@ int mls_group_create(mls_group_t *g, const mls_member_t *m, const void *group_id
 int mls_group_join(mls_group_t *g, const mls_member_t *m, const void *welcome, size_t n, const void *tree, size_t tn,
                    const mls_psk_t *psks, int npsks);
 void mls_group_free(mls_group_t *g);
-int mls_group_copy(mls_group_t *dst, const mls_group_t *src);
-void mls_group_context_of(const mls_group_t *g, sb_t *gc);
 
 /* A handshake MLSMessage: caches a proposal or applies a commit (MLS_HANDLED_*); 0 when invalid. `ref` gets
    a proposal's reference. */

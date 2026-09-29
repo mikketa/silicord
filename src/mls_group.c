@@ -30,7 +30,7 @@ static void root_hash(const mls_tree_t *t, unsigned char h[32])
     mls_tree_hash(t, mls_root(t->nleaves), h);
 }
 
-void mls_key_package_ref(const void *kp, size_t n, unsigned char ref[32])
+static void mls_key_package_ref(const void *kp, size_t n, unsigned char ref[32])
 {
     mls_ref_hash("MLS 1.0 KeyPackage Reference", kp, n, ref);
 }
@@ -98,7 +98,7 @@ void mls_member_free(mls_member_t *m)
 
 /* ---- Group state ---- */
 
-void mls_group_context_of(const mls_group_t *g, sb_t *gc)
+static void mls_group_context_of(const mls_group_t *g, sb_t *gc)
 {
     unsigned char th[32];
 
@@ -123,20 +123,6 @@ void mls_group_free(mls_group_t *g)
     sb_free(&g->extensions);
     mls_tree_free(&g->tree);
     secure_wipe(g, sizeof *g);
-}
-
-int mls_group_copy(mls_group_t *dst, const mls_group_t *src)
-{
-    *dst = *src;
-    sb_copy(&dst->group_id, &src->group_id);
-    sb_copy(&dst->extensions, &src->extensions);
-    mls_tree_copy(&dst->tree, &src->tree);
-    dst->props = src->nprops ? mem_alloc(sizeof *dst->props * (size_t)src->nprops) : NULL;
-    for (int i = 0; i < src->nprops; i++) {
-        dst->props[i] = src->props[i];
-        sb_copy(&dst->props[i].proposal, &src->props[i].proposal);
-    }
-    return 1;
 }
 
 /* Keeps this epoch's resumption PSK for later PreSharedKey proposals. */

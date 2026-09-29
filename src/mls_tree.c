@@ -7,7 +7,7 @@
 
 /* ---- Tree math (RFC 9420, appendix C) ---- */
 
-unsigned mls_level(unsigned x)
+static unsigned mls_level(unsigned x)
 {
     unsigned k = 0;
 

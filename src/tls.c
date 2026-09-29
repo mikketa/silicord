@@ -49,7 +49,7 @@ void tls_reader(tls_reader_t *r, const void *data, size_t n)
     r->bad = 0;
 }
 
-const unsigned char *tls_read_raw(tls_reader_t *r, size_t n)
+static const unsigned char *tls_read_raw(tls_reader_t *r, size_t n)
 {
     const unsigned char *p = r->p;
 

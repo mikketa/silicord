@@ -62,7 +62,6 @@ void ui_post_batch(msg_batch_t *batch);
 void ui_post_activity(activity_t *a);
 void ui_post_profile(profile_t *p);
 void ui_post_font(int id, sb_t *data);
-void activity_free(activity_t *a);
 sb_t *ui_text(const char *text);
 
 /* Implemented by the application, called on the UI thread. */
@@ -146,8 +145,6 @@ void app_voice_leave(void);
 void app_call_ring(const char *channel_id, const char *stop_for);
 /* Whether a member of our voice call is talking right now (any thread). */
 int app_voice_speaking(const char *user_id);
-void app_voice_deafen(int deafened);
-void app_voice_mute(int muted);
 /* Turns our camera on or off in the call; returns whether it is on. */
 int app_video_camera(int on);
 /* Mutes and deafens (deafened also mutes), and tells the others. */

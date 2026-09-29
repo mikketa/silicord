@@ -65,6 +65,67 @@ void mls_ref_hash(const char *label, const void *value, size_t n, unsigned char 
     sb_free(&in);
 }
 
+/* ---- DER: ECDSA signatures between r || s and DER ---- */
+
+static void der_int(sb_t *out, const unsigned char v[32])
+{
+    int i = 0;
+
+    while (i < 31 && !v[i])
+        i++;
+    tls_u8(out, 0x02);
+    tls_u8(out, (unsigned)(32 - i + (v[i] >> 7)));
+    if (v[i] >> 7)
+        tls_u8(out, 0);
+    sb_addn(out, (const char *)v + i, (size_t)(32 - i));
+}
+
+static void der_from_rs(const unsigned char rs[64], sb_t *der)
+{
+    sb_t body = {0};
+
+    der_int(&body, rs);
+    der_int(&body, rs + 32);
+    tls_u8(der, 0x30);
+    tls_u8(der, (unsigned)body.len);
+    sb_addn(der, body.data, body.len);
+    sb_free(&body);
+}
+
+/* One INTEGER into 32 big-endian bytes. */
+static int der_read_int(const unsigned char **p, const unsigned char *end, unsigned char out[32])
+{
+    size_t len;
+
+    if (end - *p < 2 || (*p)[0] != 0x02)
+        return 0;
+    len = (*p)[1];
+    *p += 2;
+    if (!len || len > 33 || (size_t)(end - *p) < len)
+        return 0;
+    if (len == 33) { /* the sign byte */
+        if ((*p)[0] != 0)
+            return 0;
+        (*p)++;
+        len--;
+    }
+    memset(out, 0, 32);
+    memcpy(out + 32 - len, *p, len);
+    *p += len;
+    return 1;
+}
+
+static int der_to_rs(const unsigned char *der, size_t n, unsigned char rs[64])
+{
+    const unsigned char *p = der, *end;
+
+    if (n < 8 || der[0] != 0x30 || der[1] != n - 2)
+        return 0;
+    p += 2;
+    end = der + n;
+    return der_read_int(&p, end, rs) && der_read_int(&p, end, rs + 32) && p == end;
+}
+
 /* SignContent's digest: label and content as vectors. */
 static void sign_digest(const char *label, const void *content, size_t n, unsigned char hash[32])
 {
@@ -144,65 +205,4 @@ int mls_decrypt_with_label(const unsigned char sk[32], const char *label, const 
     secure_wipe(&h, sizeof h);
     sb_free(&info);
     return ok;
-}
-
-/* ---- DER ---- */
-
-static void der_int(sb_t *out, const unsigned char v[32])
-{
-    int i = 0;
-
-    while (i < 31 && !v[i])
-        i++;
-    tls_u8(out, 0x02);
-    tls_u8(out, (unsigned)(32 - i + (v[i] >> 7)));
-    if (v[i] >> 7)
-        tls_u8(out, 0);
-    sb_addn(out, (const char *)v + i, (size_t)(32 - i));
-}
-
-void der_from_rs(const unsigned char rs[64], sb_t *der)
-{
-    sb_t body = {0};
-
-    der_int(&body, rs);
-    der_int(&body, rs + 32);
-    tls_u8(der, 0x30);
-    tls_u8(der, (unsigned)body.len);
-    sb_addn(der, body.data, body.len);
-    sb_free(&body);
-}
-
-/* One INTEGER into 32 big-endian bytes. */
-static int der_read_int(const unsigned char **p, const unsigned char *end, unsigned char out[32])
-{
-    size_t len;
-
-    if (end - *p < 2 || (*p)[0] != 0x02)
-        return 0;
-    len = (*p)[1];
-    *p += 2;
-    if (!len || len > 33 || (size_t)(end - *p) < len)
-        return 0;
-    if (len == 33) { /* the sign byte */
-        if ((*p)[0] != 0)
-            return 0;
-        (*p)++;
-        len--;
-    }
-    memset(out, 0, 32);
-    memcpy(out + 32 - len, *p, len);
-    *p += len;
-    return 1;
-}
-
-int der_to_rs(const unsigned char *der, size_t n, unsigned char rs[64])
-{
-    const unsigned char *p = der, *end;
-
-    if (n < 8 || der[0] != 0x30 || der[1] != n - 2)
-        return 0;
-    p += 2;
-    end = der + n;
-    return der_read_int(&p, end, rs) && der_read_int(&p, end, rs + 32) && p == end;
 }

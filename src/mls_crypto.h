@@ -31,7 +31,3 @@ int mls_encrypt_with_label(const unsigned char pub[65], const char *label, const
                            size_t n, unsigned char kem_output[65], sb_t *ct);
 int mls_decrypt_with_label(const unsigned char sk[32], const char *label, const void *ctx, size_t cn,
                            const unsigned char kem_output[65], const unsigned char *ct, size_t n, sb_t *pt);
-
-/* ECDSA signatures between r || s and DER. */
-void der_from_rs(const unsigned char rs[64], sb_t *der);
-int der_to_rs(const unsigned char *der, size_t n, unsigned char rs[64]);

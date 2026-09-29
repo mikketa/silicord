@@ -25,11 +25,6 @@ extern const int k_nemoji_aliases;
 
 /* The emoji called `name` (without colons), by its picker name or another Discord name; NULL if none. */
 const char *emoji_by_name(const char *name, size_t n);
-/*
- * Appends the emoji called `name` to out, skin tone variants included
- * ("thumbsup_tone2", "wave_medium_skin_tone"). Returns 0 if there is none.
- */
-int emoji_append(const char *name, size_t n, sb_t *out);
 /* 2 when one of emoji i's names starts with `query`, 1 when one contains it, else 0 (ASCII, any case). */
 int emoji_matches(int i, const char *query);
 /* Copies emoji i's main name into out. */

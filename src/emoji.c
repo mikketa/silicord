@@ -73,7 +73,8 @@ static size_t utf8_len(unsigned char c)
     return c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
 }
 
-int emoji_append(const char *name, size_t n, sb_t *out)
+/* Appends the emoji called `name`, skin tone variants included ("thumbsup_tone2", "wave_medium_skin_tone"). */
+static int emoji_append(const char *name, size_t n, sb_t *out)
 {
     /* Longest first: "_medium_light_skin_tone" also ends with "_light_skin_tone". */
     static const struct {

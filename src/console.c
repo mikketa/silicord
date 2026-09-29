@@ -1,5 +1,4 @@
 #include "console.h"
-#include "sc_asm.h"
 
 static HANDLE g_out;
 static HANDLE g_file;
@@ -20,7 +19,7 @@ void con_init(void)
     SetConsoleTitleW(L"Silicord debug log");
 }
 
-void con_write(const char *s, DWORD len)
+static void con_write(const char *s, DWORD len)
 {
     DWORD written;
 
@@ -28,11 +27,6 @@ void con_write(const char *s, DWORD len)
         WriteFile(g_out, s, len, &written, NULL);
     if (g_file)
         WriteFile(g_file, s, len, &written, NULL);
-}
-
-void con_print(const char *s)
-{
-    con_write(s, (DWORD)sc_strlen(s));
 }
 
 void con_print_sb(const sb_t *sb)

@@ -36,26 +36,6 @@ static void release_devices(IMFActivate **list, UINT32 n)
     CoTaskMemFree(list);
 }
 
-int camera_list(wchar_t (*names)[CAMERA_NAME], int max)
-{
-    IMFActivate **list;
-    UINT32 n;
-    int k = 0;
-
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    MFStartup(MF_VERSION, MFSTARTUP_LITE);
-    if ((list = devices(&n)) != NULL) {
-        for (UINT32 i = 0; i < n && k < max; i++, k++) {
-            UINT32 len;
-            names[k][0] = 0;
-            IMFActivate_GetString(list[i], &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, names[k], CAMERA_NAME, &len);
-        }
-        release_devices(list, n);
-    }
-    MFShutdown();
-    return k;
-}
-
 static IMFSourceReader *open_reader(int index, int w, int h, int fps, int *got_w, int *got_h)
 {
     IMFActivate **list;

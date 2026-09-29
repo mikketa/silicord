@@ -12,8 +12,6 @@
 int p256_scalar_ok(const unsigned char sk[32]);
 /* The public point of a secret scalar. Returns 0 if the scalar is not valid. */
 int p256_public(const unsigned char sk[32], unsigned char pub[65]);
-/* 1 when `pub` is an encoded point on the curve. */
-int p256_point_ok(const unsigned char pub[65]);
 /* ECDH: the X coordinate of sk * pub. Returns 0 on an invalid point or scalar. */
 int p256_ecdh(const unsigned char sk[32], const unsigned char pub[65], unsigned char shared[32]);
 /* ECDSA over a SHA-256 digest, with RFC 6979's deterministic nonce; sig is r || s. */

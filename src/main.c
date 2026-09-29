@@ -470,7 +470,7 @@ static void audio_capture(void *ctx, const float *in)
         voice_quiet();
 }
 
-void app_voice_deafen(int deafened)
+static void app_voice_deafen(int deafened)
 {
     InterlockedExchange(&g_deafened, deafened);
     EnterCriticalSection(&g_mix_lock);
@@ -478,7 +478,7 @@ void app_voice_deafen(int deafened)
     LeaveCriticalSection(&g_mix_lock);
 }
 
-void app_voice_mute(int muted)
+static void app_voice_mute(int muted)
 {
     InterlockedExchange(&g_muted, muted);
 }

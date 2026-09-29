@@ -18,5 +18,3 @@ void vp8_encoder_free(vp8_encoder_t *e);
 int vp8_encode(vp8_encoder_t *e, const vp8_image_t *img, int key, sb_t *out);
 /* The last frame as decoders will reconstruct it. */
 void vp8_encoder_recon(const vp8_encoder_t *e, vp8_image_t *out);
-/* The quantizer index in use (0-127). */
-int vp8_encoder_q(const vp8_encoder_t *e);

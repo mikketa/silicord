@@ -190,11 +190,6 @@ void vp8_encoder_free(vp8_encoder_t *e)
     mem_free(e);
 }
 
-int vp8_encoder_q(const vp8_encoder_t *e)
-{
-    return e->q;
-}
-
 void vp8_encoder_recon(const vp8_encoder_t *e, vp8_image_t *out)
 {
     out->w = e->w;

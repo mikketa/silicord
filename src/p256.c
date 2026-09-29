@@ -363,14 +363,6 @@ int p256_public(const unsigned char sk[32], unsigned char pub[65])
     return 1;
 }
 
-int p256_point_ok(const unsigned char pub[65])
-{
-    pt p;
-
-    setup();
-    return decode(&p, pub);
-}
-
 int p256_ecdh(const unsigned char sk[32], const unsigned char pub[65], unsigned char shared[32])
 {
     pt p, q;

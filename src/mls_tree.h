@@ -31,7 +31,6 @@ typedef struct {
 } mls_tree_t;
 
 /* Tree math on node indices. */
-unsigned mls_level(unsigned x);
 unsigned mls_root(unsigned nleaves);
 unsigned mls_left(unsigned x);
 unsigned mls_right(unsigned x);

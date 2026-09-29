@@ -29,14 +29,14 @@ static const char k_uy[] = "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3
 
 static void test_keys(void)
 {
-    unsigned char sk[32], pub[65], zero[32] = {0}, n[32];
+    unsigned char sk[32], pub[65], zero[32] = {0}, n[32], shared[32];
 
     unhex(k_sk, sk);
     check(p256_public(sk, pub) && pub[0] == 4 && same_hex(pub + 1, k_ux) && same_hex(pub + 33, k_uy),
           "public key of rfc 6979's key");
-    check(p256_point_ok(pub), "it is on the curve");
+    check(p256_ecdh(sk, pub, shared), "it is on the curve");
     pub[64] ^= 1;
-    check(!p256_point_ok(pub), "a point off the curve is refused");
+    check(!p256_ecdh(sk, pub, shared), "a point off the curve is refused");
     check(!p256_scalar_ok(zero), "zero is not a scalar");
     unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", n);
     check(!p256_scalar_ok(n), "nor is the order");
