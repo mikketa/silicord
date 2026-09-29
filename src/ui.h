@@ -175,7 +175,7 @@ void app_set_status(const char *status, const char *custom);
 void app_user_settings(const char *fields);
 /* Like app_subscribe, also asking for the member list rows [start, start + 99]. */
 void app_subscribe_range(const char *guild_id, const char *channel_id, int start);
-/* Asks the gateway for these members (nickname, roles); they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
+/* Asks the gateway for these members (nickname, roles), if any; they come back as UI_EVENT GUILD_MEMBERS_CHUNK. */
 void app_request_members(const char *guild_id, const char *const *user_ids, int n);
 /* Sets our poll answers (none removes our vote). */
 void app_vote(const char *channel_id, const char *message_id, const int *answers, int n);

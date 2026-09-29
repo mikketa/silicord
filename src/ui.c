@@ -1120,8 +1120,7 @@ static void voice_request_names(void)
         v->asked = 1;
         ids[n++] = v->user;
     }
-    if (n)
-        app_request_members(guild, ids, n);
+    app_request_members(guild, ids, n);
 }
 
 /* ---- Calls in direct messages ---- */
@@ -5038,6 +5037,8 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case UI_QR:
+        if (!p)
+            break;
         if (!g_ui.qr)
             g_ui.qr = mem_alloc(sizeof *g_ui.qr);
         if (!qr_encode(s, p->len, g_ui.qr)) {
