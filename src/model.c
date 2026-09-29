@@ -1062,6 +1062,38 @@ static int make_dm(model_t *m, const users_t *users, json_t ch, channel_t *out)
         return 0;
     if (out->type == CH_GROUP_DM && json_get(ch, "icon", &v))
         json_raw(v, out->avatar, sizeof out->avatar);
+    if (out->type == CH_GROUP_DM) {
+        /* "3 members" under its name, and two of them as its picture, as Discord shows a group. */
+        int faces = 0;
+        if (json_get(ch, "recipients", &list)) {
+            json_iter(list, &it);
+        } else if (json_get(ch, "recipient_ids", &list)) {
+            by_id = 1;
+            json_iter(list, &it);
+        } else {
+            it.p = it.end = NULL;
+        }
+        out->members = 1;
+        while (it.p && next_recipient(users, &it, by_id, &user)) {
+            json_t id, av;
+            out->members++;
+            if (faces < 2 && json_get(user, "id", &id)) {
+                char buf[24], hash[40] = "";
+                if (!faces++)
+                    out->faces = (unsigned)m->strings.len;
+                json_raw(id, buf, sizeof buf);
+                if (json_get(user, "avatar", &av) && json_type(av) == JSON_STRING)
+                    json_raw(av, hash, sizeof hash);
+                sb_add(&m->strings, buf);
+                sb_add(&m->strings, " ");
+                sb_add(&m->strings, hash);
+                sb_add(&m->strings, "\n");
+            }
+        }
+        if (faces)
+            sb_addn(&m->strings, "", 1);
+        by_id = 0;
+    }
     if (out->name && model_str(m, out->name)[0])
         return 1; /* named group */
 
