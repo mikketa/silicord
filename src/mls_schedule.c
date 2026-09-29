@@ -1,6 +1,5 @@
 #include <string.h>
 #include "mls_schedule.h"
-#include "hpke.h"
 #include "mls_crypto.h"
 #include "sha2.h"
 #include "tls.h"
@@ -22,7 +21,6 @@ int mls_key_schedule_joiner(const unsigned char joiner[32], const unsigned char 
                             size_t cn, mls_epoch_t *e)
 {
     unsigned char member[32];
-    unsigned char sk[32];
     int ok;
 
     if (e->joiner != joiner)
@@ -35,10 +33,8 @@ int mls_key_schedule_joiner(const unsigned char joiner[32], const unsigned char 
          mls_derive_secret(e->epoch, "external", e->external) && mls_derive_secret(e->epoch, "confirm", e->confirm) &&
          mls_derive_secret(e->epoch, "membership", e->membership) &&
          mls_derive_secret(e->epoch, "resumption", e->resumption) &&
-         mls_derive_secret(e->epoch, "authentication", e->authentication) && mls_derive_secret(e->epoch, "init", e->init) &&
-         hpke_derive_keypair(e->external, 32, sk, e->external_pub);
+         mls_derive_secret(e->epoch, "authentication", e->authentication) && mls_derive_secret(e->epoch, "init", e->init);
     secure_wipe(member, sizeof member);
-    secure_wipe(sk, sizeof sk);
     return ok;
 }
 

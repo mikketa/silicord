@@ -1,6 +1,7 @@
 /* The MLS key schedule: the IETF mls-implementations key-schedule vectors for ciphersuite 2 (five epochs). */
 #include <windows.h>
 #include "test.h"
+#include "hpke.h"
 #include "mls_schedule.h"
 #include "sha2.h"
 
@@ -157,7 +158,7 @@ static int same_hex(const unsigned char *got, size_t n, const char *want)
 
 void entry(void)
 {
-    unsigned char gid[64], init[32], commit[32], psk[32], th[32], cth[32], label[128], ctx[64], out[64];
+    unsigned char gid[64], init[32], commit[32], psk[32], th[32], cth[32], label[128], ctx[64], out[64], sk[32], pk[65];
     size_t gn = unhex(k_group_id, gid);
 
     unhex(k_initial_init, init);
@@ -181,7 +182,8 @@ void entry(void)
                   same_hex(e.confirm, 32, v->confirmation_key) && same_hex(e.membership, 32, v->membership_key) &&
                   same_hex(e.resumption, 32, v->resumption_psk),
               "epoch secrets");
-        check(ok && same_hex(e.external_pub, 65, v->external_pub), "external public key");
+        check(ok && hpke_derive_keypair(e.external, 32, sk, pk) && same_hex(pk, 65, v->external_pub),
+              "external public key");
         /* The vectors use the label's hex text itself as the label. */
         ln = (size_t)lstrlenA(v->exp_label);
         for (size_t k = 0; k < ln && k < sizeof label; k++)

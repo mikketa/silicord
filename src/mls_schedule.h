@@ -8,7 +8,6 @@ typedef struct {
     unsigned char joiner[32], welcome[32], epoch[32];
     unsigned char sender_data[32], encryption[32], exporter[32], external[32], confirm[32], membership[32],
         resumption[32], authentication[32], init[32];
-    unsigned char external_pub[65];
 } mls_epoch_t;
 
 /* GroupContext: version 1.0, ciphersuite 2, the group id, epoch, tree hash, confirmed transcript hash (empty at
