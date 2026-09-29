@@ -23,7 +23,8 @@ typedef struct {
 static mod_t g_p = {{{0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0, 0, 0, 1, 0xFFFFFFFF}}, 0, {{0}}, {{0}}, {{0}}, 0};
 static mod_t g_n = {{{0xFC632551, 0xF3B9CAC2, 0xA7179E84, 0xBCE6FAAD, 0xFFFFFFFF, 0xFFFFFFFF, 0, 0xFFFFFFFF}},
                     0, {{0}}, {{0}}, {{0}}, 0};
-static const fe k_b = {{0x27D2604B, 0x3BCE3C3E, 0xCC53B0F6, 0x651D06B0, 0x769886BC, 0xB3EBBD55, 0xAA3A93E7, 0x5AC635D8}};
+/* b in Montgomery form (b * 2^256 mod p). */
+static const fe k_b = {{0x29C4BDDF, 0xD89CDF62, 0x78843090, 0xACF005CD, 0xF7212ED6, 0xE5A220AB, 0x04874834, 0xDC30061D}};
 static const fe k_gx = {{0xD898C296, 0xF4A13945, 0x2DEB33A0, 0x77037D81, 0x63A440F2, 0xF8BCE6E5, 0xE12C4247, 0x6B17D1F2}};
 static const fe k_gy = {{0x37BF51F5, 0xCBB64068, 0x6B315ECE, 0x2BCE3357, 0x7C0F9E16, 0x8EE7EB4A, 0xFE1A7F9B, 0x4FE342E2}};
 
@@ -207,9 +208,8 @@ typedef struct {
 static void padd(pt *r, const pt *p, const pt *q)
 {
     const mod_t *M = &g_p;
-    fe t0, t1, t2, t3, t4, x3, y3, z3, b;
+    fe t0, t1, t2, t3, t4, x3, y3, z3;
 
-    to_mont(&b, &k_b, M);
     fmul(&t0, &p->x, &q->x, M);
     fmul(&t1, &p->y, &q->y, M);
     fmul(&t2, &p->z, &q->z, M);
@@ -228,13 +228,13 @@ static void padd(pt *r, const pt *p, const pt *q)
     fmul(&x3, &x3, &y3, M);
     fadd(&y3, &t0, &t2, M);
     fsub(&y3, &x3, &y3, M);
-    fmul(&z3, &b, &t2, M);
+    fmul(&z3, &k_b, &t2, M);
     fsub(&x3, &y3, &z3, M);
     fadd(&z3, &x3, &x3, M);
     fadd(&x3, &x3, &z3, M);
     fsub(&z3, &t1, &x3, M);
     fadd(&x3, &t1, &x3, M);
-    fmul(&y3, &b, &y3, M);
+    fmul(&y3, &k_b, &y3, M);
     fadd(&t1, &t2, &t2, M);
     fadd(&t2, &t1, &t2, M);
     fsub(&y3, &y3, &t2, M);
@@ -302,7 +302,7 @@ static int affine(const pt *p, fe *x, fe *y)
 /* Decodes and checks y^2 = x^3 - 3x + b. */
 static int decode(pt *p, const unsigned char pub[65])
 {
-    fe x, y, lhs, rhs, t, b;
+    fe x, y, lhs, rhs, t;
 
     if (pub[0] != 4)
         return 0;
@@ -313,14 +313,13 @@ static int decode(pt *p, const unsigned char pub[65])
     to_mont(&p->x, &x, &g_p);
     to_mont(&p->y, &y, &g_p);
     p->z = g_p.one;
-    to_mont(&b, &k_b, &g_p);
     fmul(&lhs, &p->y, &p->y, &g_p);
     fmul(&t, &p->x, &p->x, &g_p);
     fmul(&rhs, &t, &p->x, &g_p);
     fsub(&rhs, &rhs, &p->x, &g_p);
     fsub(&rhs, &rhs, &p->x, &g_p);
     fsub(&rhs, &rhs, &p->x, &g_p);
-    fadd(&rhs, &rhs, &b, &g_p);
+    fadd(&rhs, &rhs, &k_b, &g_p);
     return ct_equal(lhs.v, rhs.v, sizeof lhs.v);
 }
 
