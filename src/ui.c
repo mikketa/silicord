@@ -1,6 +1,7 @@
 /*
  * Custom-drawn Win32 UI: server rail, channel list, main pane. Everything is
- * painted into one back buffer; the only child windows are none so far.
+ * painted by the renderer (render.h); the only child windows are the EDIT
+ * controls and the popups that hold them (profile, emoji picker, quick switcher).
  * Runs on the UI thread only.
  */
 #include <windows.h>
@@ -77,7 +78,6 @@ enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SE
 typedef struct {
     char key[96];
     r_image_t *img;
-    int failed;
     unsigned used;   /* paint that last drew it */
     HWND wnd;        /* window that drew it, for animations */
 } image_t;
@@ -665,7 +665,6 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
     if (im && im->img && r_image_lost(im->img)) { /* render target was recreated */
         r_image_free(im->img);
         im->img = NULL;
-        im->failed = 0;
         img_request(key, path, max_px);
     }
     if (im) {
@@ -681,7 +680,6 @@ static r_image_t *image_get(const char *key, const char *path, int max_px)
     }
     im = &g_ui.images[g_ui.nimages++];
     lstrcpynA(im->key, key, sizeof im->key);
-    im->failed = 0;
     im->used = g_ui.frame;
     im->wnd = g_ui.paint_wnd;
     im->img = frame_ms() < SYNC_DECODE_MS ? img_cached(path, max_px) : NULL;
@@ -2261,7 +2259,6 @@ static int text_w_px(void)
     return a.right - S(24) - text_x();
 }
 
-/* grouped: 0 = starts a group, 1 = continues it, 2 = starts a group after a date divider. */
 /* Whether a message pings us: a user mention, @everyone, or one of our roles. */
 static int pings_me(const msg_t *m)
 {
@@ -2293,6 +2290,7 @@ static int pings_me(const msg_t *m)
     return 0;
 }
 
+/* grouped: 0 = starts a group, 1 = continues it, 2 = starts a group after a date divider. */
 static void update_grouping(void)
 {
     int seen_new = 0;
@@ -3620,11 +3618,9 @@ static void paint_divider(int x0, int y, int w, const char *id)
 {
     SYSTEMTIME st = local_time(id);
     wchar_t date[64];
-    RECT r;
     int tw;
 
     GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, &st, NULL, date, ARRAYSIZE(date), NULL);
-    (void)r;
     tw = r_text_width(g_ui.f_cat, date, -1) + S(16);
     fill(x0 + S(16), y + S(22), w - S(32), 1, C_LINE);
     fill(x0 + (w - tw) / 2, y + S(12), tw, S(20), C_MAIN);
@@ -3720,7 +3716,7 @@ static void paint_message(int i, int x0, int y, int w)
     msg_extras(m, tx, y, tw, 1, 0, 0, NULL);
 }
 
-static void paint_messages(RECT rc, const char *name)
+static void paint_messages(const char *name)
 {
     RECT a = message_area();
     int x0 = a.left, w = a.right - a.left;
@@ -3736,7 +3732,6 @@ static void paint_messages(RECT rc, const char *name)
              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    (void)rc;
     r_clip(a.left, a.top, a.right - a.left, a.bottom - a.top);
 
     for (int i = g_ui.nmsgs; i-- > 0;) {
@@ -3848,7 +3843,7 @@ static void paint_main(RECT rc)
             paint_forum(rc, x0, w);
             return;
         }
-        paint_messages(rc, name);
+        paint_messages(name);
         paint_call(x0, w);
         paint_toolbar();
         paint_autocomplete();
@@ -5079,7 +5074,6 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         image_t *im = image_find(s);
         if (im) {
             im->img = (r_image_t *)wp;
-            im->failed = !wp;
             if (im->wnd && im->wnd != g_ui.wnd && IsWindow(im->wnd))
                 InvalidateRect(im->wnd, NULL, FALSE); /* the picker or another child waits for it */
         } else {
@@ -5469,7 +5463,7 @@ static profile_t *cached_profile(const char *user, const char *guild, int *fresh
     return NULL;
 }
 
-/* Takes ownership of p; returns it, or NULL if it was dropped. */
+/* Takes ownership of p and returns it. */
 static profile_t *cache_profile(profile_t *p)
 {
     int n = (int)ARRAYSIZE(g_ui.profiles), slot = -1;
