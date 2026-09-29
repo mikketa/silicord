@@ -161,11 +161,11 @@ int app_voice_mic_level(void);
 /* Starts or stops hearing yourself (not during a call); returns whether the test runs. */
 int app_voice_mic_test(int on);
 /*
- * Someone's latest video picture in our call: calls copy() with it (BGRA)
+ * Someone's latest video picture in our call: calls take() with it (BGRA)
  * when it changed since *serial. Returns 0 without video from them, 1 when
  * unchanged, 2 when copied.
  */
-int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx, const unsigned *bgra, int w, int h),
+int app_video_take(const char *user_id, unsigned *serial, void (*take)(void *ctx, const unsigned *bgra, int w, int h),
                    void *ctx);
 /* Someone's volume in calls, in percent (0 to 200; 0 mutes them for you). */
 void app_voice_user_volume(const char *user_id, int percent);

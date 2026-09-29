@@ -739,7 +739,7 @@ static void views_clear(void)
         view_remove(g_views[0].user);
 }
 
-int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx, const unsigned *bgra, int w, int h),
+int app_video_take(const char *user_id, unsigned *serial, void (*take)(void *ctx, const unsigned *bgra, int w, int h),
                    void *ctx)
 {
     unsigned long long u = parse_id(user_id);
@@ -749,7 +749,7 @@ int app_video_take(const char *user_id, unsigned *serial, void (*copy)(void *ctx
     EnterCriticalSection(&g_video_lock);
     if ((i = view_find(u)) >= 0 && g_views[i].bgra && g_views[i].serial != *serial) {
         *serial = g_views[i].serial;
-        copy(ctx, g_views[i].bgra, g_views[i].w, g_views[i].h);
+        take(ctx, g_views[i].bgra, g_views[i].w, g_views[i].h);
         fresh = 1;
     }
     LeaveCriticalSection(&g_video_lock);
@@ -1408,7 +1408,8 @@ static unsigned long long nonce_now(void)
     GetSystemTimeAsFileTime(&ft);
     now.LowPart = ft.dwLowDateTime;
     now.HighPart = ft.dwHighDateTime;
-    return (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22;
+    /* 100 ns ticks since 1601 to milliseconds since 1970, then since Discord's epoch. */
+    return (now.QuadPart / 10000 - 11644473600000ull - (unsigned long long)DISCORD_EPOCH) << 22;
 }
 
 static DWORD WINAPI send_main(LPVOID arg)
