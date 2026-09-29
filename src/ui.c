@@ -640,17 +640,14 @@ static void log_memory(const char *when)
               (unsigned)(pmc.PrivateUsage >> 10), (unsigned)(pmc.WorkingSetSize >> 10));
     app_log(line);
     {
-        sb_t out = {0};
-        unsigned long long uptime, cpu_ms;
-        process_times(&uptime, &cpu_ms);
-        sb_add(&out, "[net] ");
-        stats_format(&out, uptime);
-        app_log(out.data);
-        sb_clear(&out);
-        sb_add(&out, "[cpu] ");
-        stats_format_cpu(&out, cpu_ms, uptime);
-        app_log(out.data);
-        sb_free(&out);
+        sb_t net = {0}, cpu = {0};
+        sb_add(&net, "[net] ");
+        sb_add(&cpu, "[cpu] ");
+        usage_lines(&net, &cpu);
+        app_log(net.data);
+        app_log(cpu.data);
+        sb_free(&net);
+        sb_free(&cpu);
     }
 }
 
@@ -2786,14 +2783,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
     if (m->poll) {
         msg_poll_t *pl = m->poll;
         int pw = w < S(440) ? w : S(440), top = y + gap, py = top + S(16), total = 0, voted = 0;
-        long long now, left;
-        FILETIME ft;
-        ULARGE_INTEGER t;
-        GetSystemTimeAsFileTime(&ft);
-        t.LowPart = ft.dwLowDateTime;
-        t.HighPart = ft.dwHighDateTime;
-        now = (long long)(t.QuadPart / 10000 - 11644473600000ull);
-        left = pl->expiry_ms ? pl->expiry_ms - now : 0;
+        long long left = pl->expiry_ms ? pl->expiry_ms - now_ms() : 0;
         for (int k = 0; k < pl->nanswers; k++) {
             total += pl->answers[k].count;
             voted |= pl->answers[k].me;
@@ -2802,12 +2792,12 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             int show = voted || pl->final || (pl->expiry_ms && left <= 0);
             int qh = S(24), rows = pl->nanswers * S(48), h = S(16) + qh + S(22) + rows + S(40);
             if (draw && r_visible(top, h)) {
-                char sub[64], foot[96];
+                char foot[96];
                 r_round(x, top, pw, h, S(8), 0xFF1B1B1B);
                 text(g_ui.f_title, C_INK, rect(x + S(16), py, pw - S(32), qh), pl->question.data ? pl->question.data : "",
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                lstrcpyA(sub, pl->multi ? "Select one or more answers" : "Select one answer");
-                text(g_ui.f_small, C_MUTED, rect(x + S(16), py + qh, pw - S(32), S(20)), sub, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                text(g_ui.f_small, C_MUTED, rect(x + S(16), py + qh, pw - S(32), S(20)),
+                     pl->multi ? "Select one or more answers" : "Select one answer", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 for (int k = 0; k < pl->nanswers; k++) {
                     msg_answer_t *an = &pl->answers[k];
                     int ay = py + qh + S(26) + k * S(48), aw = pw - S(32), pct = total ? an->count * 100 / total : 0;
@@ -3285,18 +3275,16 @@ static void resolve_channels(msg_t *m)
                 j++;
             if (j < n && s[j] == '>' && j - i - 2 < 24) {
                 char id[24];
-                int found = 0;
+                int c;
                 lstrcpynA(id, s + i + 2, (int)(j - i - 1));
-                for (unsigned c = 0; g_ui.model && c < g_ui.model->nchannels; c++)
-                    if (lstrcmpA(g_ui.model->channels[c].id, id) == 0) {
-                        sb_add(&out, MD_MENTION_OPEN "#");
-                        sb_add(&out, model_str(g_ui.model, g_ui.model->channels[c].name));
-                        sb_add(&out, MD_MENTION_CLOSE);
-                        found = 1;
-                        break;
-                    }
-                if (!found)
+                c = g_ui.model ? model_find_channel(g_ui.model, id) : -1;
+                if (c >= 0) {
+                    sb_add(&out, MD_MENTION_OPEN "#");
+                    sb_add(&out, model_str(g_ui.model, chan(c)->name));
+                    sb_add(&out, MD_MENTION_CLOSE);
+                } else {
                     sb_add(&out, "#unknown");
+                }
                 i = j + 1;
                 changed = 1;
                 continue;
@@ -4068,15 +4056,15 @@ static void paint_app(RECT rc)
 
 #define TIMER_ANIM 4
 
-static int anim_allowed(void)
+static int window_active(void)
 {
-    /* Only while the window is in front: nothing moves, nothing wakes up otherwise. */
     return GetForegroundWindow() == g_ui.wnd && !IsIconic(g_ui.wnd);
 }
 
+/* Only while the window is in front: nothing moves, nothing wakes up otherwise. */
 static void anim_schedule(void)
 {
-    if (!g_ui.anim_timer && anim_allowed()) {
+    if (!g_ui.anim_timer && window_active()) {
         g_ui.anim_timer = 1;
         SetTimer(g_ui.wnd, TIMER_ANIM, 40, NULL);
     }
@@ -4088,7 +4076,7 @@ static void anim_tick(void)
     unsigned now = GetTickCount(), next = 1000;
     int live = 0;
 
-    if (anim_allowed())
+    if (window_active())
         for (int i = 0; i < g_ui.nimages; i++) {
             image_t *im = &g_ui.images[i];
             int before;
@@ -4267,11 +4255,6 @@ static void set_icons(UINT dpi)
 }
 
 /* ---- Read markers and notifications ---- */
-
-static int window_active(void)
-{
-    return GetForegroundWindow() == g_ui.wnd && !IsIconic(g_ui.wnd);
-}
 
 /* Marks channel i read locally and tells Discord if something was unread. */
 static void mark_read(int i)
@@ -5829,8 +5812,6 @@ static int pop_render(int draw)
 
     /* Our own status, as in Discord's account popout. */
     if (g_ui.pop_self) {
-        static const char *const names[] = {"Online", "Idle", "Do Not Disturb", "Invisible"};
-        static const int states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
         y += S(12);
         if (draw)
             r_round(pad, y, inner, S(4 * 34 + 8), S(8), 0xFF0B0B0B);
@@ -5840,9 +5821,10 @@ static int pop_render(int draw)
             if (draw) {
                 if (g_ui.pop_hover == -10 - k)
                     r_round(pad + S(4), y, inner - S(8), S(34), S(4), ARGB(C_HOVER));
-                status_dot(pad + S(14), y + S(11), S(12), states[k], g_ui.pop_hover == -10 - k ? ARGB(C_HOVER) : 0xFF0B0B0B);
-                text(g_ui.f_body, g_ui.my_status == states[k] ? C_INK : C_MUTED, rect(pad + S(36), y, inner - S(44), S(34)),
-                     names[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                status_dot(pad + S(14), y + S(11), S(12), k_status_states[k],
+                           g_ui.pop_hover == -10 - k ? ARGB(C_HOVER) : 0xFF0B0B0B);
+                text(g_ui.f_body, g_ui.my_status == k_status_states[k] ? C_INK : C_MUTED,
+                     rect(pad + S(36), y, inner - S(44), S(34)), k_status_names[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
             y += S(34);
         }
