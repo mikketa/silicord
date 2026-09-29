@@ -11478,6 +11478,7 @@ static int quests_view(void)
 #define QUEST_MAX_W 1310
 #define QUEST_H 316
 #define QUEST_HERO_H 150
+#define QUEST_HERO_BANNER_H 500 /* the featured quest's banner on top of the page */
 
 /* Lays the Quests out: paints them, or returns the card whose button is at (hx, hy) (-1 if none). */
 static int quests_walk(int x0, int w, int draw, int hx, int hy)
@@ -11492,6 +11493,64 @@ static int quests_walk(int x0, int w, int draw, int hx, int hy)
     if (cols < 1)
         cols = 1;
     cardw = (cw - (cols - 1) * S(QUEST_GAP)) / cols;
+    {
+        /*
+         * Discord's hero banner on top (at least 500 high, 56 above the rest):
+         * the first quest still to take, its picture, its partner's logotype,
+         * what it gives and its button.
+         */
+        int f = -1, hh = S(QUEST_HERO_BANNER_H);
+        for (int k = 0; k < g_quests.n && f < 0; k++)
+            if (g_quests.v[k].state != 2)
+                f = k;
+        if (f >= 0) {
+            const quest_t *q = &g_quests.v[f];
+            RECT b = rect(x + S(40), y + hh - S(40) - S(40), S(180), S(40));
+            if (!draw) {
+                if (hx >= b.left && hx < b.right && hy >= b.top && hy < b.bottom && hy >= S(HEADER_H))
+                    return f;
+            } else if (r_visible(y, hh)) {
+                r_image_t *hero = shop_image(quest_s(q->hero), cw), *logo = shop_image(quest_s(q->logo), S(480));
+                char line[200];
+                int ty;
+                r_round(x, y, cw, hh, S(16), 0xFF0A0A0Cu);
+                if (hero) {
+                    r_clip(x, y, cw, hh);
+                    r_image_cover(hero, x, y, cw, hh, S(16));
+                    r_unclip();
+                }
+                /* the lower half darkens for the words */
+                r_round_gradient(x, y + hh / 3, cw, hh - hh / 3, S(16), 0x00000000u, 0xE6000000u);
+                ty = b.top - S(24) - S(20) - S(30) - S(20);
+                if (logo) {
+                    int iw, ih, lh = S(96), lw;
+                    r_image_size(logo, &iw, &ih);
+                    lw = ih ? iw * lh / ih : lh;
+                    if (lw > S(320)) {
+                        lw = S(320);
+                        lh = iw ? ih * lw / iw : lh;
+                    }
+                    r_image(logo, x + S(40), ty - S(16) - lh, lw, lh, 0);
+                }
+                wsprintfA(line, "Promoted by %.60s \xC2\xB7 Ends %s", quest_s(q->publisher), q->ends);
+                text(g_ui.f_small, C_TEXT, rect(x + S(40), ty, cw - S(80), S(20)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                text(g_ui.f_h1x, C_INK, rect(x + S(40), ty + S(20), cw - S(80), S(30)), quest_s(q->name),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                if (q->minutes)
+                    wsprintfA(line, "Claim %.80s \xC2\xB7 Play %.60s for %d minutes", quest_s(q->reward), quest_s(q->game), q->minutes);
+                else
+                    wsprintfA(line, "Claim %.120s", quest_s(q->reward));
+                text(g_ui.f_body, C_TEXT, rect(x + S(40), ty + S(50), cw - S(80), S(20)), line,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                {
+                    float t = tween_on(TW_QUEST, 1000, g_quests.hover == f, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
+                    r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(8), lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, t));
+                    text(g_ui.f_small_mid, C_INK, b, q->state == 1 ? "In Progress" : "Accept Quest", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+            y += hh + S(56);
+        }
+    }
     lstrcpyA(title, "All Quests");
     if (draw)
         text(g_ui.f_h1x, C_INK, rect(x, y, cw, S(32)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
