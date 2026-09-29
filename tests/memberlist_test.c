@@ -32,7 +32,7 @@ void entry(void)
                     "{\"member\":{\"user\":{\"id\":\"9\",\"username\":\"bob\"},\"roles\":[],\"presence\":{\"status\":\"online\"}}}"
                     "]}]}"),
           "sync applies");
-    check(l.member_count == 5 && l.online_count == 3 && lstrcmpA(l.guild, "1") == 0, "counts");
+    check(lstrcmpA(l.guild, "1") == 0, "guild");
     apply(&l, "{\"guild_id\":\"1\",\"id\":\"everyone\",\"groups\":[{\"id\":\"50\",\"count\":1},{\"id\":\"online\",\"count\":7}],\"ops\":[]}");
     check(ml_group_count(&l, "online") == 7 && ml_group_count(&l, "50") == 1 && ml_group_count(&l, "x") == 0 && l.n == 100,
           "group sizes from the groups field");

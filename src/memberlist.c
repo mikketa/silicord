@@ -155,7 +155,6 @@ int ml_apply(ml_t *l, json_t d)
     json_t v, ops, op, items, item;
     json_iter_t it, iit;
     char guild[24] = "", id[32] = "";
-    long long count;
     int changed = 0;
 
     get_raw(d, "guild_id", guild, sizeof guild);
@@ -166,10 +165,6 @@ int ml_apply(ml_t *l, json_t d)
         lstrcpynA(l->list_id, id, sizeof l->list_id);
         changed = 1;
     }
-    if (json_get(d, "member_count", &v) && json_int(v, &count))
-        l->member_count = (int)count;
-    if (json_get(d, "online_count", &v) && json_int(v, &count))
-        l->online_count = (int)count;
     if (json_get(d, "groups", &v)) {
         json_t g, c;
         l->ngroups = 0;

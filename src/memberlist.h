@@ -27,7 +27,6 @@ typedef struct {
 typedef struct {
     char guild[24];
     char list_id[32];   /* "everyone" or a hash of the channel's permissions */
-    int member_count, online_count;
     ml_item_t *items;
     int n, cap;
     /* Size of each group, from the "groups" field. */
