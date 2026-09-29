@@ -2106,7 +2106,6 @@ static void paint_side(RECT rc)
 /* ---- Messages ---- */
 
 static void place_composer(void);
-static void invalidate_views(void);
 static void pop_close(void);
 static void open_self(void);
 static void build_name_fonts(void);
@@ -2123,36 +2122,22 @@ static void posts_clear(void);
 static void on_forum(const sb_t *p);
 static int forum_view(void);
 static void paint_forum(RECT rc, int x0, int w);
-static void replace_model(model_t *m);
 static wchar_t *plain_text(const sb_t *text);
-static void place_search(void);
 static void paint_search(void);
 static void paint_detached(int x0, int w, int cy);
-static void search_close(void);
 static int open_discord_link(const char *url);
 static void jump_to(int i);
 static LRESULT CALLBACK search_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
-static void guild_state(int g, int *unread, int *mentions);
-static int divider_h(const msg_t *m);
 static void qs_open(void);
 static void qs_close(void);
 static void qs_rebuild(void);
 static void prompt_submit(void);
-static void redraw(void);
 static void qs_place(void);
 static int pins_button_x(void);
 static int call_button_x(void);
 static void paint_settings(RECT rc);
 static void settings_open(void);
-static void settings_close(void);
-static void settings_click(int x, int y);
-static void settings_set_key(int vk);
-static void slider_drag(int id, int x);
 static int run_menu(HMENU menu);
-static int settings_hit(int x, int y);
-static void place_settings_edit(void);
-static void prefs_load(void);
-static int developer_mode(void);
 static void place_search(void);
 static void place_friend_input(void);
 static const char *const k_status_codes[] = {"online", "idle", "dnd", "invisible"};
@@ -2163,11 +2148,7 @@ static void paint_pins(void);
 static void pins_close(void);
 static int divider_h(const msg_t *m);
 static const char *find_str(const char *hay, const char *needle);
-static void paint_new_line(int x0, int y, int w);
-static void place_friend_input(void);
 static void paint_friends(RECT rc, int x0, int w);
-static int friends_hit(int x, int y, int *act);
-static void friends_click(int x, int y);
 static void rels_clear(void);
 static void paint_autocomplete(void);
 static void ac_update(void);
@@ -2179,11 +2160,7 @@ static void picker_close(void);
 static void picker_rebuild(void);
 static void picker_layout(void);
 static int members_shown(void);
-static int main_right(void);
 static void paint_members(RECT rc);
-static int ml_hit(int x, int y, int *top);
-static void ml_request_visible(void);
-static void ml_clamp(void);
 static void on_member_list(json_t d);
 static void paint_bar(int x0, int w, int cy);
 static void paint_confirm(void);
@@ -2260,8 +2237,6 @@ static void format_time(const char *id, wchar_t *out, int n)
     len = lstrlenW(out);
     lstrcpynW(out + len, clock, n - len);
 }
-
-static int call_h(void);
 
 static RECT message_area(void)
 {
