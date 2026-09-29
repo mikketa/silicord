@@ -74,7 +74,19 @@ void vp8i_iwht(short *coeffs)
 void vp8i_idct_add(unsigned char *dst, int stride, const short *in)
 {
     short tmp[16];
+    int ac = 0;
 
+    for (int i = 1; i < 16; i++)
+        ac |= in[i];
+    if (!ac) {
+        /* No AC coefficients (none at all in a skipped macroblock): every pixel moves by the same amount. */
+        int dc = (in[0] + 4) >> 3;
+        if (dc)
+            for (int i = 0; i < 4; i++, dst += stride)
+                for (int j = 0; j < 4; j++)
+                    dst[j] = vp8i_clamp255(dst[j] + dc);
+        return;
+    }
     for (int i = 0; i < 4; i++) {
         int a1 = in[i] + in[8 + i], b1 = in[i] - in[8 + i];
         int c1 = ((in[4 + i] * SIN) >> 16) - (in[12 + i] + ((in[12 + i] * COS_M1) >> 16));
