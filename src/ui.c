@@ -7559,25 +7559,52 @@ static int pop_render(int draw)
         }
     }
 
-    /* Our own status, as in Discord's account popout. */
+    /*
+     * Our account, as Discord's popout has it: two cards of rows, Edit Profile
+     * and our status (its choices in a menu), then Copy User ID.
+     */
     if (g_ui.pop_self) {
+        static const char *const labels[3] = {"Edit Profile", NULL, "Copy User ID"};
+        int cur = 0;
+        for (int k = 0; k < 4; k++)
+            if (g_ui.my_status == k_status_states[k])
+                cur = k;
         y += S(12);
-        if (draw)
-            r_round(pad, y, inner, S(4 * 34 + 8), S(8), 0xFF17181Bu);
-        y += S(4);
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 3; k++) {
+            int top = k == 0 || k == 2, bottom = k == 1 || k == 2, hot = g_ui.pop_hover == -10 - k;
+            unsigned card = 0xFF202024u, bg = hot ? 0xFF2A2A2Eu : card;
+            if (k == 2)
+                y += S(8); /* the second card */
             g_ui.pop_status_y[k] = y;
             if (draw) {
-                if (g_ui.pop_hover == -10 - k)
-                    r_round(pad + S(4), y, inner - S(8), S(34), S(4), ARGB(C_HOVER));
-                status_dot(pad + S(14), y + S(11), S(12), k_status_states[k],
-                           g_ui.pop_hover == -10 - k ? ARGB(C_HOVER) : 0xFF17181Bu);
-                text(g_ui.f_body, g_ui.my_status == k_status_states[k] ? C_INK : C_MUTED,
-                     rect(pad + S(36), y, inner - S(44), S(34)), k_status_names[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                /* the card's corners are round at its ends only */
+                r_round(pad, y, inner, S(40), top || bottom ? S(8) : 0, bg);
+                if (!top)
+                    r_fill(pad, y, inner, S(8), bg);
+                if (!bottom)
+                    r_fill(pad, y + S(32), inner, S(8), bg);
+                if (k == 1) {
+                    status_dot(pad + S(12), y + S(14), S(12), k_status_states[cur], bg);
+                    text(g_ui.f_menu, C_INK, rect(pad + S(32), y, inner - S(72), S(40)), k_status_names[cur],
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    sicon(SI_CHEVRON_RIGHT, pad + inner - S(12) - S(18), y + S(11), S(18), hot ? ARGB(C_INK) : ARGB(C_MUTED));
+                } else {
+                    text(g_ui.f_menu, C_INK, rect(pad + S(12), y, inner - S(52), S(40)), labels[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    if (k == 0) {
+                        r_text(g_ui.f_icon_tb, hot ? ARGB(C_INK) : ARGB(C_MUTED), pad + inner - S(12) - S(20), y, S(20), S(40),
+                               L"\xE70F", -1, R_CENTER | R_VCENTER | R_SINGLE);
+                    } else {
+                        unsigned ink = hot ? ARGB(C_INK) : ARGB(C_MUTED);
+                        r_round_outline(pad + inner - S(12) - S(20), y + S(13), S(20), S(14), S(3), S(1) + 1, ink);
+                        r_text(g_ui.f_gif, ink, pad + inner - S(12) - S(20), y + S(13), S(20), S(14), L"ID", -1,
+                               R_CENTER | R_VCENTER | R_SINGLE);
+                    }
+                }
+                if (k == 0) /* between the rows of a card */
+                    r_fill(pad + S(12), y + S(40) - (S(1) > 1 ? S(1) : 1), inner - S(24), S(1) > 1 ? S(1) : 1, 0xFF2A2A2Eu);
             }
-            y += S(34);
+            y += S(40);
         }
-        y += S(4);
     }
 
     /* Message box; the EDIT control sits inside it. Not beside a DM: its composer is right there. */
@@ -7812,8 +7839,8 @@ static int pop_hit(int x, int y)
     if (x >= bx && x < bx + S(32) && y >= by && y < by + S(32))
         return -2;
     if (g_ui.pop_self)
-        for (int k = 0; k < 4; k++)
-            if (y >= g_ui.pop_status_y[k] && y < g_ui.pop_status_y[k] + S(34) && x >= S(POP_PAD) && x < pop_width() - S(POP_PAD))
+        for (int k = 0; k < 3; k++)
+            if (y >= g_ui.pop_status_y[k] && y < g_ui.pop_status_y[k] + S(40) && x >= S(POP_PAD) && x < pop_width() - S(POP_PAD))
                 return -10 - k;
     for (int i = 0; p && i < p->nbadges && i < (int)ARRAYSIZE(g_ui.pop_badge_x); i++)
         if (x >= g_ui.pop_badge_x[i] && x < g_ui.pop_badge_x[i] + S(POP_BADGE) && y >= g_ui.pop_badge_y[i] &&
@@ -7872,7 +7899,7 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         const profile_t *p = g_ui.pop_profile;
         int h = g_ui.pop_hover;
         if (LOWORD(lp) == HTCLIENT) {
-            int hand = h == -2 || (p && h >= 0 && h < p->nbadges && p->badges[h].link.len);
+            int hand = h == -2 || (h <= -10 && h >= -12) || (p && h >= 0 && h < p->nbadges && p->badges[h].link.len);
             SetCursor(LoadCursorW(NULL, (LPCWSTR)(hand ? IDC_HAND : IDC_ARROW)));
             return TRUE;
         }
@@ -7886,9 +7913,31 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         int h = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         if (h == -2) {
             pop_menu();
-        } else if (h <= -10 && h >= -13) {
-            set_status(-10 - h);
-            redraw();
+        } else if (h == -10) {
+            pop_close();
+            settings_open();
+        } else if (h == -11) {
+            /* the status choices, beside the row */
+            HMENU menu = CreatePopupMenu();
+            POINT pt = {pop_width() + S(8), g_ui.pop_status_y[1] - S(8)};
+            int cmd;
+            for (int k = 0; k < 4; k++) {
+                wchar_t label[32];
+                MultiByteToWideChar(CP_UTF8, 0, k_status_names[k], -1, label, ARRAYSIZE(label));
+                AppendMenuW(menu, MF_STRING | (g_ui.my_status == k_status_states[k] ? MF_CHECKED : 0), (UINT_PTR)(k + 1), label);
+            }
+            menu_mark(menu, 0, MENU_RADIO);
+            ClientToScreen(wnd, &pt);
+            cmd = menu_track(menu, pt.x, pt.y);
+            DestroyMenu(menu);
+            if (cmd > 0) {
+                set_status(cmd - 1);
+                redraw();
+                InvalidateRect(wnd, NULL, FALSE);
+            }
+        } else if (h == -12) {
+            copy_text(g_ui.model ? g_ui.model->user_id : "");
+            pop_close();
         }
         else if (p && h >= 0 && h < p->nbadges && p->badges[h].link.len)
             open_url(p->badges[h].link.data);
