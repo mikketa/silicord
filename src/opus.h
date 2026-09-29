@@ -37,10 +37,9 @@ void opus_decoder_init(opus_decoder_t *d, int channels);
    returns the samples per channel, or -1 for a malformed packet. `pcm` holds 5760 per channel. */
 int opus_decode(opus_decoder_t *d, const unsigned char *data, size_t n, float *pcm, int lost_samples);
 
-/* A mono voice encoder: CELT fullband, 20 ms frames, constant bitrate. */
+/* A mono voice encoder: CELT fullband, 20 ms frames, 64 kbit/s constant bitrate. */
 typedef struct {
     celt_encoder_t celt;
-    int bitrate; /* bits per second, 64000 by default */
 } opus_encoder_t;
 
 void opus_encoder_init(opus_encoder_t *e);
