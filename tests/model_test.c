@@ -412,6 +412,16 @@ static void test_roles(const model_t *m)
                                           "\"position\":20,\"permissions\":\"0\"}}");
         check(c && model_role_color(c, 0, "60,61") == 0x00FF00, "updated role takes its new color and position");
         model_free(c);
+        /* The most negative numbers JSON integers can hold are read back without overflowing. */
+        c = apply(b, "GUILD_ROLE_UPDATE", "{\"guild_id\":\"1\",\"role\":{\"id\":\"60\",\"name\":\"Mods\","
+                                          "\"color\":-9223372036854775808,\"position\":-9223372036854775808}}");
+        found = 0;
+        cursor = 0;
+        while (c && model_role_next(c, 0, &cursor, &r))
+            if (lstrcmpA(r.id, "60") == 0)
+                found = r.color == 0 && r.position == 0 && r.name_len == 4;
+        check(found, "extreme role numbers");
+        model_free(c);
     }
     model_free(a);
     model_free(b);

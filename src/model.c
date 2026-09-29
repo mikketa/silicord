@@ -387,16 +387,13 @@ static unsigned pack_roles(model_t *m, json_t roles)
 
 static long long parse_num(const char **p)
 {
-    long long n = 0;
     int neg = **p == '-';
+    unsigned long long n;
 
     if (neg)
         (*p)++;
-    while (**p >= '0' && **p <= '9')
-        n = n * 10 + (*(*p)++ - '0');
-    if (**p == ' ')
-        (*p)++;
-    return neg ? -n : n;
+    n = read_u64(p); /* unsigned: -9223372036854775808 has no positive long long */
+    return neg ? (long long)(0ull - n) : (long long)n;
 }
 
 static int role_next(const char *base, unsigned *cursor, model_role_t *out)
