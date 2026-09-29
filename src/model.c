@@ -329,7 +329,7 @@ int model_has_role(const model_t *m, int g, const char *role_id)
 }
 
 /* ---- Role list ----
- * Packed in the string table, one role per line: "id color position hoist permissions\tname\n".
+ * Packed in the string table, one role per line: "id color position permissions\tname\n".
  */
 
 static void pack_role(sb_t *out, json_t role)
@@ -358,7 +358,7 @@ static void pack_role(sb_t *out, json_t role)
     sb_i64(out, color);
     sb_add(out, " ");
     sb_i64(out, pos);
-    sb_add(out, json_get(role, "hoist", &v) && is_true(v) ? " 1 " : " 0 ");
+    sb_add(out, " ");
     sb_u64(out, json_get(role, "permissions", &v) ? to_u64(v) : 0);
     sb_add(out, "\t");
     if (name.len)
@@ -414,11 +414,6 @@ static int role_next(const char *base, unsigned *cursor, model_role_t *out)
     p += k + (p[k] == ' ');
     out->color = (unsigned)parse_num(&p) & 0xFFFFFF;
     out->position = (int)parse_num(&p);
-    out->hoist = *p == '1';
-    if (*p == '0' || *p == '1')
-        p++;
-    if (*p == ' ')
-        p++;
     out->permissions = read_u64(&p);
     while (*p && *p != '\t' && *p != '\n')
         p++;

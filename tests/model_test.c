@@ -400,7 +400,7 @@ static void test_roles(const model_t *m)
         cursor = 0;
         while (model_role_next(b, 0, &cursor, &r))
             if (lstrcmpA(r.id, "60") == 0)
-                found = r.color == 0xFF0000 && r.position == 5 && r.hoist && r.name_len == 4;
+                found = r.color == 0xFF0000 && r.position == 5 && r.name_len == 4;
         check(found, "role fields");
         check(model_role_color(b, 0, "50,60") == 0xFF0000, "color of the only colored role");
         check(model_role_color(b, 0, "60,61") == 0x0000FF, "highest colored role wins");

@@ -149,7 +149,6 @@ typedef struct {
     char id[24];
     unsigned color;     /* 0xRRGGBB, 0 for none */
     int position;
-    int hoist;          /* shown apart in the member list */
     unsigned long long permissions;
     const char *name;
     int name_len;
