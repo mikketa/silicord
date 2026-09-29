@@ -6045,6 +6045,17 @@ static int pop_hit(int x, int y)
     return -1;
 }
 
+/* Our status becomes the k-th of k_status_codes, here and on every client. */
+static void set_status(int k)
+{
+    char fields[48];
+
+    g_ui.my_status = k_status_states[k];
+    app_set_status(k_status_codes[k], g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "");
+    wsprintfA(fields, "\"status\":\"%s\"", k_status_codes[k]);
+    app_user_settings(fields);
+}
+
 static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -6105,15 +6116,7 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (h == -2) {
             pop_menu();
         } else if (h <= -10 && h >= -13) {
-            static const char *const codes[] = {"online", "idle", "dnd", "invisible"};
-            static const int states[] = {ML_ONLINE, ML_IDLE, ML_DND, ML_OFFLINE};
-            g_ui.my_status = states[-10 - h];
-            app_set_status(codes[-10 - h], g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "");
-            {
-                char fields[48];
-                wsprintfA(fields, "\"status\":\"%s\"", codes[-10 - h]);
-                app_user_settings(fields);
-            }
+            set_status(-10 - h);
             redraw();
         }
         else if (p && h >= 0 && h < p->nbadges && p->badges[h].link.len)
@@ -9766,12 +9769,7 @@ static void settings_click(int x, int y)
             KillTimer(g_ui.wnd, TIMER_MIC);
         }
     } else if (id >= SH_STATUS && id < SH_STATUS + 4) {
-        char fields[48];
-        const char *custom = g_ui.model ? model_str(g_ui.model, g_ui.model->custom_status) : "";
-        g_ui.my_status = k_status_states[id - SH_STATUS];
-        app_set_status(k_status_codes[id - SH_STATUS], custom);
-        wsprintfA(fields, "\"status\":\"%s\"", k_status_codes[id - SH_STATUS]);
-        app_user_settings(fields);
+        set_status(id - SH_STATUS);
     } else {
         switch (id) {
         case SH_CLOSE:
