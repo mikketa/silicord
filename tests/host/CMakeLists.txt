@@ -38,6 +38,13 @@ foreach(name aes apng command dave dave_session emoji hpke inflate json md membe
   set_tests_properties(${name} PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL ")
 endforeach()
 
+# AES-GCM without AES-NI, which the machines running the tests have.
+add_executable(aes_portable_test ${ROOT}/tests/aes_test.c ${ROOT}/src/aes.c shim/main.c)
+target_compile_definitions(aes_portable_test PRIVATE AES_PORTABLE)
+target_link_libraries(aes_portable_test core)
+add_test(NAME aes_portable COMMAND aes_portable_test)
+set_tests_properties(aes_portable PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL ")
+
 # Conformance with the Opus test vectors (RFC 8251), which CI downloads: tools/opus_vectors.sh.
 add_executable(opus_vectors opus_vectors.c)
 target_link_libraries(opus_vectors core m)

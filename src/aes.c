@@ -1,4 +1,11 @@
 #include <string.h>
+#include <emmintrin.h>
+#include <wmmintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
 #include "aes.h"
 #include "sha2.h"
 
@@ -384,13 +391,241 @@ static void ctr_xor(const aes_t *a, const unsigned char nonce[12], const unsigne
     secure_wipe(ks, sizeof ks);
 }
 
+/* ---- AES-NI and PCLMULQDQ, when the CPU has them ---- */
+
+/*
+ * Every x64 CPU since about 2010 encrypts a round and multiplies carry-less
+ * in hardware, in constant time, some fifty times faster than the bit
+ * planes above; those stay for the others. Build with AES_PORTABLE to test
+ * them on any machine.
+ */
+#if defined(__GNUC__)
+#define HW __attribute__((target("aes,pclmul")))
+#else
+#define HW
+#endif
+
+static int has_hw(void)
+{
+#ifdef AES_PORTABLE
+    return 0;
+#else
+    static volatile int known; /* 0 not asked yet, 1 no, 2 yes: racing threads find the same */
+    if (!known) {
+#if defined(_MSC_VER)
+        int r[4];
+        __cpuid(r, 1);
+        known = (r[2] & (1 << 25)) && (r[2] & (1 << 1)) ? 2 : 1;
+#else
+        unsigned a, b, c, d;
+        known = __get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 25)) && (c & (1u << 1)) ? 2 : 1;
+#endif
+    }
+    return known == 2;
+#endif
+}
+
+/* One step of the key schedule: k's words xored with the ones before them, then with t's chosen word. */
+static HW __m128i expand_step(__m128i k, __m128i t)
+{
+    k = _mm_xor_si128(k, _mm_slli_si128(k, 4));
+    k = _mm_xor_si128(k, _mm_slli_si128(k, 4));
+    return _mm_xor_si128(_mm_xor_si128(k, _mm_slli_si128(k, 4)), t);
+}
+
+/* Round key i from the one before: RotWord and SubWord of its last word, xored with rcon. */
+#define EXPAND128(i, rcon)                                                                                           \
+    rk[i] = expand_step(rk[i - 1], _mm_shuffle_epi32(_mm_aeskeygenassist_si128(rk[i - 1], rcon), 0xFF))
+/* AES-256 alternates: the same from two keys back, then SubWord alone of the last word. */
+#define EXPAND256_EVEN(i, rcon)                                                                                      \
+    rk[i] = expand_step(rk[i - 2], _mm_shuffle_epi32(_mm_aeskeygenassist_si128(rk[i - 1], rcon), 0xFF))
+#define EXPAND256_ODD(i)                                                                                             \
+    rk[i] = expand_step(rk[i - 2], _mm_shuffle_epi32(_mm_aeskeygenassist_si128(rk[i - 1], 0), 0xAA))
+
+/* The round keys of a 16- or 32-byte key; returns the rounds. */
+static HW int hw_keys(const unsigned char *key, size_t n, __m128i rk[15])
+{
+    rk[0] = _mm_loadu_si128((const __m128i *)key);
+    if (n == 16) {
+        EXPAND128(1, 0x01);
+        EXPAND128(2, 0x02);
+        EXPAND128(3, 0x04);
+        EXPAND128(4, 0x08);
+        EXPAND128(5, 0x10);
+        EXPAND128(6, 0x20);
+        EXPAND128(7, 0x40);
+        EXPAND128(8, 0x80);
+        EXPAND128(9, 0x1B);
+        EXPAND128(10, 0x36);
+        return 10;
+    }
+    rk[1] = _mm_loadu_si128((const __m128i *)(key + 16));
+    EXPAND256_EVEN(2, 0x01);
+    EXPAND256_ODD(3);
+    EXPAND256_EVEN(4, 0x02);
+    EXPAND256_ODD(5);
+    EXPAND256_EVEN(6, 0x04);
+    EXPAND256_ODD(7);
+    EXPAND256_EVEN(8, 0x08);
+    EXPAND256_ODD(9);
+    EXPAND256_EVEN(10, 0x10);
+    EXPAND256_ODD(11);
+    EXPAND256_EVEN(12, 0x20);
+    EXPAND256_ODD(13);
+    EXPAND256_EVEN(14, 0x40);
+    return 14;
+}
+
+static HW __m128i hw_encrypt(const __m128i *rk, int rounds, __m128i x)
+{
+    x = _mm_xor_si128(x, rk[0]);
+    for (int r = 1; r < rounds; r++)
+        x = _mm_aesenc_si128(x, rk[r]);
+    return _mm_aesenclast_si128(x, rk[rounds]);
+}
+
+/* The 16 bytes in reverse order, with SSE2 alone: dwords, then words, then bytes. */
+static __m128i reverse16(__m128i x)
+{
+    x = _mm_shuffle_epi32(x, 0x1B);
+    x = _mm_shufflehi_epi16(_mm_shufflelo_epi16(x, 0xB1), 0xB1);
+    return _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8));
+}
+
+/*
+ * a * b in GCM's field, both byte-reversed: the carry-less product, shifted
+ * one bit left for GCM's reflected bit order, then reduced modulo
+ * x^128 + x^7 + x^2 + x + 1 (Gueron and Kounavis, Intel white paper on
+ * carry-less multiplication, algorithm 5).
+ */
+static HW __m128i gf_mult_hw(__m128i a, __m128i b)
+{
+    __m128i lo = _mm_clmulepi64_si128(a, b, 0x00), hi = _mm_clmulepi64_si128(a, b, 0x11);
+    __m128i mid = _mm_xor_si128(_mm_clmulepi64_si128(a, b, 0x10), _mm_clmulepi64_si128(a, b, 0x01));
+    __m128i c7, c8, c9;
+
+    lo = _mm_xor_si128(lo, _mm_slli_si128(mid, 8));
+    hi = _mm_xor_si128(hi, _mm_srli_si128(mid, 8));
+    /* The 256-bit product one bit to the left. */
+    c7 = _mm_srli_epi32(lo, 31);
+    c8 = _mm_srli_epi32(hi, 31);
+    lo = _mm_slli_epi32(lo, 1);
+    hi = _mm_slli_epi32(hi, 1);
+    c9 = _mm_srli_si128(c7, 12);
+    c8 = _mm_slli_si128(c8, 4);
+    c7 = _mm_slli_si128(c7, 4);
+    lo = _mm_or_si128(lo, c7);
+    hi = _mm_or_si128(_mm_or_si128(hi, c8), c9);
+    /* Reduction. */
+    c7 = _mm_xor_si128(_mm_xor_si128(_mm_slli_epi32(lo, 31), _mm_slli_epi32(lo, 30)), _mm_slli_epi32(lo, 25));
+    c8 = _mm_srli_si128(c7, 4);
+    lo = _mm_xor_si128(lo, _mm_slli_si128(c7, 12));
+    c9 = _mm_xor_si128(_mm_xor_si128(_mm_srli_epi32(lo, 1), _mm_srli_epi32(lo, 2)), _mm_srli_epi32(lo, 7));
+    return _mm_xor_si128(hi, _mm_xor_si128(lo, _mm_xor_si128(c9, c8)));
+}
+
+static HW __m128i hw_ghash(__m128i x, __m128i h, const unsigned char *p, size_t n)
+{
+    while (n) {
+        unsigned char block[16] = {0};
+        size_t take = n < 16 ? n : 16;
+        memcpy(block, p, take);
+        x = gf_mult_hw(_mm_xor_si128(x, reverse16(_mm_loadu_si128((const __m128i *)block))), h);
+        p += take;
+        n -= take;
+    }
+    return x;
+}
+
+/* GCM's tag over aad and the ciphertext ct. */
+static HW void hw_tag(const __m128i *rk, int rounds, const unsigned char nonce[12], const void *aad, size_t an,
+                      const unsigned char *ct, size_t n, unsigned char full_tag[16])
+{
+    unsigned char j0[16], len[16];
+    __m128i h = reverse16(hw_encrypt(rk, rounds, _mm_setzero_si128())), x = _mm_setzero_si128();
+
+    x = hw_ghash(x, h, aad, an);
+    x = hw_ghash(x, h, ct, n);
+    store64(len, (u64)an * 8); /* the lengths block, in bits */
+    store64(len + 8, (u64)n * 8);
+    x = gf_mult_hw(_mm_xor_si128(x, reverse16(_mm_loadu_si128((const __m128i *)len))), h);
+    memcpy(j0, nonce, 12);
+    j0[12] = j0[13] = j0[14] = 0;
+    j0[15] = 1;
+    _mm_storeu_si128((__m128i *)full_tag,
+                     _mm_xor_si128(reverse16(x), hw_encrypt(rk, rounds, _mm_loadu_si128((const __m128i *)j0))));
+    secure_wipe(&h, sizeof h);
+}
+
+/* Counter mode from the counter after J0, four blocks at a time. */
+static HW void hw_ctr(const __m128i *rk, int rounds, const unsigned char nonce[12], const unsigned char *in,
+                      unsigned char *out, size_t n)
+{
+    unsigned char ctr[16], ks[64];
+
+    memcpy(ctr, nonce, 12);
+    ctr[12] = ctr[13] = ctr[14] = 0;
+    ctr[15] = 1;
+    for (size_t off = 0; off < n; off += 64) {
+        __m128i b[4];
+        size_t take = n - off < 64 ? n - off : 64;
+        for (int k = 0; k < 4; k++) {
+            inc32(ctr);
+            b[k] = _mm_xor_si128(_mm_loadu_si128((const __m128i *)ctr), rk[0]);
+        }
+        for (int r = 1; r < rounds; r++)
+            for (int k = 0; k < 4; k++)
+                b[k] = _mm_aesenc_si128(b[k], rk[r]);
+        for (int k = 0; k < 4; k++)
+            _mm_storeu_si128((__m128i *)(ks + 16 * k), _mm_aesenclast_si128(b[k], rk[rounds]));
+        for (size_t i = 0; i < take; i++)
+            out[off + i] = (unsigned char)(in[off + i] ^ ks[i]);
+    }
+    secure_wipe(ks, sizeof ks);
+}
+
+static HW int hw_seal(const unsigned char *key, size_t kn, const unsigned char nonce[12], const void *aad, size_t an,
+                      const void *in, size_t n, void *out, unsigned char *tag, size_t tag_n)
+{
+    __m128i rk[15];
+    unsigned char full[16];
+    int rounds = hw_keys(key, kn, rk);
+
+    hw_ctr(rk, rounds, nonce, in, out, n);
+    hw_tag(rk, rounds, nonce, aad, an, out, n, full);
+    memcpy(tag, full, tag_n);
+    secure_wipe(rk, sizeof rk);
+    return 1;
+}
+
+static HW int hw_open(const unsigned char *key, size_t kn, const unsigned char nonce[12], const void *aad, size_t an,
+                      const void *in, size_t n, void *out, const unsigned char *tag, size_t tag_n)
+{
+    __m128i rk[15];
+    unsigned char full[16];
+    int rounds = hw_keys(key, kn, rk), ok;
+
+    hw_tag(rk, rounds, nonce, aad, an, in, n, full);
+    ok = ct_equal(full, tag, tag_n);
+    if (ok)
+        hw_ctr(rk, rounds, nonce, in, out, n);
+    secure_wipe(rk, sizeof rk);
+    return ok;
+}
+
+/* ---- Sealing and opening ---- */
+
 int aes_gcm_seal(const unsigned char *key, size_t kn, const unsigned char nonce[12], const void *aad, size_t an,
                  const void *in, size_t n, void *out, unsigned char *tag, size_t tag_n)
 {
     aes_t a;
     unsigned char full[16];
 
-    if (tag_n > 16 || !aes_init(&a, key, kn))
+    if (tag_n > 16 || (kn != 16 && kn != 32))
+        return 0;
+    if (has_hw())
+        return hw_seal(key, kn, nonce, aad, an, in, n, out, tag, tag_n);
+    if (!aes_init(&a, key, kn))
         return 0;
     ctr_xor(&a, nonce, in, out, n);
     gcm(&a, nonce, aad, an, out, n, full);
@@ -406,7 +641,11 @@ int aes_gcm_open(const unsigned char *key, size_t kn, const unsigned char nonce[
     unsigned char full[16];
     int ok;
 
-    if (tag_n > 16 || tag_n < 4 || !aes_init(&a, key, kn))
+    if (tag_n > 16 || tag_n < 4 || (kn != 16 && kn != 32))
+        return 0;
+    if (has_hw())
+        return hw_open(key, kn, nonce, aad, an, in, n, out, tag, tag_n);
+    if (!aes_init(&a, key, kn))
         return 0;
     gcm(&a, nonce, aad, an, in, n, full);
     ok = ct_equal(full, tag, tag_n);
