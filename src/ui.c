@@ -10511,6 +10511,9 @@ typedef struct {
     char id[24];
     char ends[24];              /* "Sep 1": when it ends, in the local time */
     unsigned name, game, publisher, reward, hero; /* offsets in g_quests.strings */
+    unsigned logo, tile, reward_art;  /* URLs: the partner's logotype, the game's tile, the reward's picture */
+    int minutes;                      /* the task: play this long */
+    int orbs;                         /* the reward is Orbs, this many */
     int state;                  /* 0 available, 1 accepted, 2 completed */
 } quest_t;
 
@@ -10595,16 +10598,52 @@ static int quests_parse(const sb_t *json)
             x->game = quest_str(msgs, "game_title");
             x->publisher = quest_str(msgs, "game_publisher");
         }
-        if (json_get(config, "assets", &assets) && json_get(assets, "hero", &v) && json_type(v) == JSON_STRING) {
-            x->hero = (unsigned)g_quests.strings.len;
-            sb_add(&g_quests.strings, "https://cdn.discordapp.com/");
-            json_str(v, &g_quests.strings);
-            sb_addn(&g_quests.strings, "", 1);
+        if (json_get(config, "assets", &assets)) {
+            /* the dark theme's pictures, as full CDN URLs */
+            static const char *const keys[3] = {"hero", "logotype_dark", "game_tile_dark"};
+            unsigned *out[3] = {&x->hero, &x->logo, &x->tile};
+            for (int k = 0; k < 3; k++)
+                if (json_get(assets, keys[k], &v) && json_type(v) == JSON_STRING) {
+                    char head[16];
+                    json_raw(v, head, sizeof head);
+                    if (!lstrcmpA(head, "PLACEHOLDER"))
+                        continue;
+                    *out[k] = (unsigned)g_quests.strings.len;
+                    sb_add(&g_quests.strings, "https://cdn.discordapp.com/");
+                    json_str(v, &g_quests.strings);
+                    sb_addn(&g_quests.strings, "", 1);
+                }
+        }
+        {
+            /* The task: "Play ... for 15 minutes", from its target in seconds. */
+            json_t tc, tasks, task;
+            json_iter_t tit;
+            if (json_get(config, "task_config_v2", &tc) && json_get(tc, "tasks", &tasks)) {
+                json_iter(tasks, &tit);
+                if (json_next(&tit, NULL, &task) && json_get(task, "target", &v)) {
+                    long long secs = 0;
+                    json_int(v, &secs);
+                    x->minutes = (int)((secs + 59) / 60);
+                }
+            }
         }
         if (json_get(config, "rewards_config", &rewards) && json_get(rewards, "rewards", &rlist)) {
             json_iter(rlist, &rit);
-            if (json_next(&rit, NULL, &r) && json_get(r, "messages", &msgs))
-                x->reward = quest_str(msgs, "name");
+            if (json_next(&rit, NULL, &r)) {
+                if (json_get(r, "messages", &msgs))
+                    x->reward = quest_str(msgs, "name");
+                if (json_get(r, "orb_quantity", &v)) {
+                    long long o = 0;
+                    json_int(v, &o);
+                    x->orbs = (int)o;
+                }
+                if (json_get(r, "asset", &v) && json_type(v) == JSON_STRING) {
+                    x->reward_art = (unsigned)g_quests.strings.len;
+                    sb_add(&g_quests.strings, "https://cdn.discordapp.com/");
+                    json_str(v, &g_quests.strings);
+                    sb_addn(&g_quests.strings, "", 1);
+                }
+            }
         }
         if (json_get(q, "user_status", &st) && json_type(st) == JSON_OBJECT) {
             if (json_get(st, "completed_at", &v) && json_type(v) == JSON_STRING)
@@ -10623,74 +10662,108 @@ static int quests_view(void)
            g_ui.home_page == HOME_QUESTS;
 }
 
-#define QUEST_MIN_W 300
-#define QUEST_BODY_H 132
+/* Discord's grid: cards 336 wide at least, 24 apart, 1310 at most in all; a card is 316 high, its picture 150. */
+#define QUEST_MIN_W 336
+#define QUEST_GAP 24
+#define QUEST_MAX_W 1310
+#define QUEST_H 316
+#define QUEST_HERO_H 150
 
-/* Lays the Quests out: paints them, or returns the card at (hx, hy) (-1 if none). */
+/* Lays the Quests out: paints them, or returns the card whose button is at (hx, hy) (-1 if none). */
 static int quests_walk(int x0, int w, int draw, int hx, int hy)
 {
-    int cw = w - 2 * S(SHOP_PAD), x = x0 + S(SHOP_PAD), y = S(HEADER_H) + S(SHOP_PAD) - g_quests.scroll;
-    int cols = (cw + S(SHOP_GAP)) / (S(QUEST_MIN_W) + S(SHOP_GAP)), cardw, ih;
+    int cw = w - 2 * S(SHOP_PAD), x, y = S(HEADER_H) + S(SHOP_PAD) - g_quests.scroll, cols, cardw;
     char title[48];
 
+    if (cw > S(QUEST_MAX_W))
+        cw = S(QUEST_MAX_W);
+    x = x0 + (w - cw) / 2;
+    cols = (cw + S(QUEST_GAP)) / (S(QUEST_MIN_W) + S(QUEST_GAP));
     if (cols < 1)
         cols = 1;
-    if (cols > 3)
-        cols = 3;
-    cardw = (cw - (cols - 1) * S(SHOP_GAP)) / cols;
-    ih = cardw * 9 / 16;
-    wsprintfA(title, "Available Quests \xE2\x80\x94 %d", g_quests.n);
+    cardw = (cw - (cols - 1) * S(QUEST_GAP)) / cols;
+    lstrcpyA(title, "All Quests");
     if (draw)
-        text(g_ui.f_h2, C_INK, rect(x, y, cw, S(28)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    y += S(44);
+        text(g_ui.f_h1x, C_INK, rect(x, y, cw, S(32)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    y += S(32) + S(24);
     for (int k = 0; k < g_quests.n; k++) {
         const quest_t *q = &g_quests.v[k];
-        int cx = x + (k % cols) * (cardw + S(SHOP_GAP)), cy = y + (k / cols) * (ih + S(QUEST_BODY_H) + S(SHOP_GAP));
-        int bx = cx + cardw - S(16) - S(128), by = cy + ih + S(QUEST_BODY_H) - S(16) - S(32);
+        int cx = x + (k % cols) * (cardw + S(QUEST_GAP)), cy = y + (k / cols) * (S(QUEST_H) + S(QUEST_GAP));
+        RECT b = rect(cx + S(16), cy + S(QUEST_H) - S(16) - S(36), cardw - S(32), S(36));
         if (!draw) {
-            if (hx >= bx && hx < bx + S(128) && hy >= by && hy < by + S(32) && hy >= S(HEADER_H))
+            if (hx >= b.left && hx < b.right && hy >= b.top && hy < b.bottom && hy >= S(HEADER_H))
                 return k;
             continue;
         }
-        if (!r_visible(cy, ih + S(QUEST_BODY_H)))
+        if (!r_visible(cy, S(QUEST_H)))
             continue;
-        r_round(cx, cy, cardw, ih + S(QUEST_BODY_H), S(8), 0xFF121214u);
-        r_round_outline(cx, cy, cardw, ih + S(QUEST_BODY_H), S(8), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        /* background-surface-high, the picture on top fading into it */
+        r_round(cx, cy, cardw, S(QUEST_H), S(10), 0xFF0A0A0Cu);
         {
             r_image_t *hero = shop_image(quest_s(q->hero), cardw);
-            r_clip(cx, cy, cardw, ih);
+            r_clip(cx, cy, cardw, S(QUEST_HERO_H));
             if (hero)
-                r_image_cover(hero, cx, cy, cardw, ih + S(8), S(8));
-            else
-                r_round(cx, cy, cardw, ih + S(8), S(8), 0xFF17181Bu);
+                r_image_cover(hero, cx, cy, cardw, S(QUEST_HERO_H) + S(10), S(10));
+            r_round_gradient(cx, cy + S(QUEST_HERO_H) * 45 / 100, cardw, S(QUEST_HERO_H) * 55 / 100 + S(1), 0, 0x000A0A0Cu,
+                             0xFF0A0A0Cu);
             r_unclip();
         }
         {
-            char line[160];
-            int ty = cy + ih + S(12);
-            /* The game above the quest's name, or its publisher when the quest is named after the game. */
-            text(g_ui.f_cat, C_MUTED, rect(cx + S(16), ty, cardw - S(32), S(16)),
-                 lstrcmpA(quest_s(q->game), quest_s(q->name)) ? quest_s(q->game) : quest_s(q->publisher),
-                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-            text(g_ui.f_h, C_INK, rect(cx + S(16), ty + S(18), cardw - S(32), S(22)), quest_s(q->name),
-                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-            wsprintfA(line, "Claim %.120s", quest_s(q->reward));
-            text(g_ui.f_section, C_TEXT, rect(cx + S(16), ty + S(42), cardw - S(32), S(20)), line,
-                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-            wsprintfA(line, "Ends %s", q->ends);
-            text(g_ui.f_section, C_FAINT, rect(cx + S(16), by, bx - cx - S(24), S(32)), line,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            /* the partner's logotype at the bottom left of the picture, the info button at the top right */
+            r_image_t *logo = shop_image(quest_s(q->logo), S(240));
+            if (logo) {
+                int iw, ih, lh = S(34), lw;
+                r_image_size(logo, &iw, &ih);
+                lw = ih ? iw * lh / ih : lh;
+                if (lw > S(121)) {
+                    lw = S(121);
+                    lh = iw ? ih * lw / iw : lh;
+                }
+                r_image(logo, cx + S(12), cy + S(QUEST_HERO_H) - S(4) - lh, lw, lh, 0);
+            }
+            r_circle(cx + cardw - S(12) - S(24), cy + S(12), S(24), 0x7A1E1F22u);
+            text_w(g_ui.f_icon, C_INK, rect(cx + cardw - S(12) - S(24), cy + S(12), S(24), S(24)), L"\xE946", -1,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
         {
-            static const char *const labels[3] = {"Accept Quest", "In Progress", "Completed"};
-            float t = tween_on(TW_QUEST, k, g_quests.hover == k, TW_FAST, bx, by, S(128), S(32));
+            char line[200];
+            int ty = cy + S(QUEST_HERO_H) + S(4);
+            wsprintfA(line, "Promoted by %.60s \xC2\xB7 Ends %s", quest_s(q->publisher), q->ends);
+            text(g_ui.f_small, C_MUTED, rect(cx + S(16), ty, cardw - S(32), S(16)), line, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            text(g_ui.f_h, C_INK, rect(cx + S(16), ty + S(18), cardw - S(32), S(22)), quest_s(q->name),
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            /* the reward: its tile and "Claim ...", in a well of the page's color */
+            {
+                int wy = ty + S(46);
+                r_image_t *art = shop_image(quest_s(q->reward_art ? q->reward_art : q->tile), S(116));
+                r_round(cx + S(16), wy, cardw - S(32), S(62), S(8), ARGB(C_MAIN));
+                if (art)
+                    r_image(art, cx + S(24), wy + S(4), S(54), S(54) - S(4), S(4));
+                else if (q->orbs) {
+                    r_round_gradient(cx + S(24), wy + S(4), S(54), S(54) - S(4), S(4), 0xFF7B5CFAu, 0xFFB45CF0u);
+                    text(g_ui.f_h, 0xFFFFFFFFu, rect(cx + S(24), wy + S(4), S(54), S(50)), "\xE2\x97\x8F", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+                wsprintfA(line, "Claim %.120s", quest_s(q->reward));
+                text(g_ui.f_small_mid, C_INK, rect(cx + S(88), wy + S(6), cardw - S(112), S(20)), line,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                if (q->minutes)
+                    wsprintfA(line, "Play %.80s for %d minutes", quest_s(q->game), q->minutes);
+                else
+                    lstrcpynA(line, quest_s(q->game), sizeof line);
+                text(g_ui.f_small, C_MUTED, rect(cx + S(88), wy + S(28), cardw - S(112), S(18)), line,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+        }
+        {
+            static const char *const labels[3] = {"Accept Quest", "In Progress", "Claimed"};
+            float t = tween_on(TW_QUEST, k, g_quests.hover == k, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
             unsigned bg = q->state == 2 ? 0xFF248045u : q->state == 1 ? lerp_argb(0xFF242426u, 0xFF2E2E31u, t)
                                                                        : lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, t);
-            r_round(bx, by, S(128), S(32), S(8), bg);
-            text(g_ui.f_small_mid, C_INK, rect(bx, by, S(128), S(32)), labels[q->state], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(8), bg);
+            text(g_ui.f_small_mid, C_INK, b, labels[q->state], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
-    g_quests.height = y + ((g_quests.n + cols - 1) / cols) * (ih + S(QUEST_BODY_H) + S(SHOP_GAP)) + g_quests.scroll - S(HEADER_H);
+    g_quests.height = y + ((g_quests.n + cols - 1) / cols) * (S(QUEST_H) + S(QUEST_GAP)) + g_quests.scroll - S(HEADER_H);
     return -1;
 }
 
