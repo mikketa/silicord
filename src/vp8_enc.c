@@ -384,11 +384,6 @@ static int sad(const unsigned char *a, int as, const unsigned char *b, int bs, i
     return _mm_cvtsi128_si32(s) + _mm_cvtsi128_si32(_mm_srli_si128(s, 8));
 }
 
-static short chroma_half(int v)
-{
-    return (short)(v < 0 ? (v - 1) / 2 : (v + 1) / 2);
-}
-
 /* The luma SAD of moving by mv from the last frame. */
 static int inter_sad(vp8_encoder_t *e, int row, int col, vp8_mv_t mv)
 {
@@ -622,7 +617,7 @@ static void encode_mb(vp8_encoder_t *e, int row, int col)
         vp8i_predict_block(v, us, 8, m->uv_mode);
         e->intras++;
     } else {
-        vp8_mv_t uv = m->mv;
+        vp8_mv_t uv = vp8i_chroma_mv(m->mv, 0);
         int pw = e->mb_cols * 16, ph = e->mb_rows * 16;
         m->uv_mode = m->y_mode;
         /* The decoder fixes the edges up for every macroblock, whatever its mode. */
@@ -637,8 +632,6 @@ static void encode_mb(vp8_encoder_t *e, int row, int col)
             vp8i_fixup_above(v, us, 8, col, m->uv_mode);
         }
         vp8i_predict_inter_block(&e->scratch, y, s, e->y[!e->cur], s, pw, ph, col * 16, row * 16, 16, 16, m->mv);
-        uv.x = chroma_half(uv.x);
-        uv.y = chroma_half(uv.y);
         for (int i = 0; i < 4; i++) {
             int bx = (i & 1) * 4, by = (i >> 1) * 4;
             vp8i_predict_inter_block(&e->scratch, u + by * us + bx, us, e->u[!e->cur], us, pw / 2, ph / 2,

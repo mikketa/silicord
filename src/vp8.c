@@ -574,13 +574,7 @@ static int read_tokens(vp8_decoder_t *d, bd_t *b, const vp8_mb_t *m, unsigned ch
     return any;
 }
 
-/* ---- Inverse transforms (section 14) ---- */
-
-
-
 /* ---- Intra prediction (section 12), in place in the frame ---- */
-
-
 
 static void predict_intra(vp8_decoder_t *d, const vp8_mb_t *m, unsigned char *y, unsigned char *u, unsigned char *v)
 {
@@ -612,11 +606,6 @@ static void predict_intra(vp8_decoder_t *d, const vp8_mb_t *m, unsigned char *y,
 
 /* ---- Inter prediction (section 18) ---- */
 
-static short chroma_half(int v)
-{
-    return (short)(v < 0 ? (v - 1) / 2 : (v + 1) / 2);
-}
-
 static void predict_inter(vp8_decoder_t *d, const vp8_mb_t *m, int row, int col, unsigned char *y, unsigned char *u,
                           unsigned char *v)
 {
@@ -626,16 +615,10 @@ static void predict_inter(vp8_decoder_t *d, const vp8_mb_t *m, int row, int col,
     vp8_mv_t uvmv[4];
 
     if (m->y_mode != SPLITMV) {
-        vp8_mv_t mv = m->mv;
-        vp8i_predict_inter_block(&d->scratch, y, s, r->y, s, pw, ph, x, yy, 16, 16, mv);
-        mv.x = chroma_half(mv.x);
-        mv.y = chroma_half(mv.y);
-        if (d->version == 3) {
-            mv.x = (short)(mv.x & ~7);
-            mv.y = (short)(mv.y & ~7);
-        }
-        for (int i = 0; i < 4; i++)
-            uvmv[i] = mv;
+        vp8i_predict_inter_block(&d->scratch, y, s, r->y, s, pw, ph, x, yy, 16, 16, m->mv);
+        uvmv[0] = vp8i_chroma_mv(m->mv, d->version == 3);
+        for (int i = 1; i < 4; i++)
+            uvmv[i] = uvmv[0];
         vp8i_iwht(c);
     } else {
         for (int b = 0; b < 16; b++)

@@ -70,6 +70,8 @@ void vp8i_fixup_above(unsigned char *p, int stride, int n, int col, int mode);
 int vp8i_mv_eq(vp8_mv_t a, vp8_mv_t b);
 int vp8i_mv_zero(vp8_mv_t a);
 vp8_mv_t vp8i_clamp_mv(vp8_mv_t mv, int left, int right, int top, int bottom);
+/* A macroblock's vector for its chroma: halved, rounding away from zero; whole pixels only with `full_pixel`. */
+vp8_mv_t vp8i_chroma_mv(vp8_mv_t mv, int full_pixel);
 /* The neighbours' vectors (above, left, above-left), weighted into best, nearest and near (section 16.3). */
 void vp8i_find_near_mvs(const int *sign_bias, const vp8_mb_t *m, const vp8_mb_t *above, const vp8_mb_t *left,
                         vp8_mv_t near_mvs[4], int cnt[4]);

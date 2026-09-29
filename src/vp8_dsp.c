@@ -270,6 +270,18 @@ vp8_mv_t vp8i_clamp_mv(vp8_mv_t mv, int left, int right, int top, int bottom)
     return mv;
 }
 
+/* A macroblock's vector for its chroma: halved, rounding away from zero; whole pixels only with `full_pixel`. */
+vp8_mv_t vp8i_chroma_mv(vp8_mv_t mv, int full_pixel)
+{
+    mv.x = (short)(mv.x < 0 ? (mv.x - 1) / 2 : (mv.x + 1) / 2);
+    mv.y = (short)(mv.y < 0 ? (mv.y - 1) / 2 : (mv.y + 1) / 2);
+    if (full_pixel) {
+        mv.x = (short)(mv.x & ~7);
+        mv.y = (short)(mv.y & ~7);
+    }
+    return mv;
+}
+
 /* The neighbours' vectors (above, left, above-left), weighted into best, nearest and near (section 16.3). */
 void vp8i_find_near_mvs(const int *sign_bias, const vp8_mb_t *m, const vp8_mb_t *above, const vp8_mb_t *left,
                         vp8_mv_t near_mvs[4],
