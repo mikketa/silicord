@@ -226,24 +226,66 @@ static void load_source(vp8_encoder_t *e, const vp8_image_t *img)
 
 /* ---- Transforms and quantization ---- */
 
-static void fdct(const short *in, short *out)
+/*
+ * Two 4x4 blocks side by side, eight 16-bit lanes: rows (or columns) 0-3
+ * of the left block, then of the right one. Swaps rows and columns.
+ */
+static void transpose_pair(__m128i *m)
 {
-    short t[16];
+    __m128i a0 = _mm_unpacklo_epi16(m[0], m[1]), a1 = _mm_unpackhi_epi16(m[0], m[1]);
+    __m128i a2 = _mm_unpacklo_epi16(m[2], m[3]), a3 = _mm_unpackhi_epi16(m[2], m[3]);
+    __m128i b0 = _mm_unpacklo_epi32(a0, a2), b1 = _mm_unpackhi_epi32(a0, a2); /* left: 0 and 1, 2 and 3 */
+    __m128i b2 = _mm_unpacklo_epi32(a1, a3), b3 = _mm_unpackhi_epi32(a1, a3); /* right */
 
-    for (int i = 0; i < 4; i++) {
-        const short *p = in + 4 * i;
-        int a1 = (p[0] + p[3]) * 8, b1 = (p[1] + p[2]) * 8, c1 = (p[1] - p[2]) * 8, d1 = (p[0] - p[3]) * 8;
-        t[4 * i] = (short)(a1 + b1);
-        t[4 * i + 2] = (short)(a1 - b1);
-        t[4 * i + 1] = (short)((c1 * 2217 + d1 * 5352 + 14500) >> 12);
-        t[4 * i + 3] = (short)((d1 * 2217 - c1 * 5352 + 7500) >> 12);
-    }
-    for (int i = 0; i < 4; i++) {
-        int a1 = t[i] + t[12 + i], b1 = t[4 + i] + t[8 + i], c1 = t[4 + i] - t[8 + i], d1 = t[i] - t[12 + i];
-        out[i] = (short)((a1 + b1 + 7) >> 4);
-        out[8 + i] = (short)((a1 - b1 + 7) >> 4);
-        out[4 + i] = (short)(((c1 * 2217 + d1 * 5352 + 12000) >> 16) + (d1 != 0));
-        out[12 + i] = (short)((d1 * 2217 - c1 * 5352 + 51000) >> 16);
+    m[0] = _mm_unpacklo_epi64(b0, b2);
+    m[1] = _mm_unpackhi_epi64(b0, b2);
+    m[2] = _mm_unpacklo_epi64(b1, b3);
+    m[3] = _mm_unpackhi_epi64(b1, b3);
+}
+
+/* (x * 2217 + y * 5352 + r) >> n, or y * -5352 (neg), in 32 bits and back. */
+static __m128i rotate(__m128i x, __m128i y, int r, int n, int neg)
+{
+    __m128i k = _mm_set1_epi32((neg ? -5352 : 5352) * 65536 + 2217);
+    __m128i lo = _mm_madd_epi16(_mm_unpacklo_epi16(x, y), k), hi = _mm_madd_epi16(_mm_unpackhi_epi16(x, y), k);
+    __m128i round = _mm_set1_epi32(r);
+
+    return _mm_packs_epi32(_mm_srai_epi32(_mm_add_epi32(lo, round), n), _mm_srai_epi32(_mm_add_epi32(hi, round), n));
+}
+
+/*
+ * The forward DCT of two blocks side by side: m[r] holds row r of both
+ * (residuals, -255..255), out gets the left block's 16 coefficients, then
+ * the right one's. Every sum fits 16 bits: the largest, 8 times the sum of
+ * a block's 16 residuals, is 32,640; the products take 32.
+ */
+static void fdct_pair(__m128i *m, short *out)
+{
+    __m128i a1, b1, c1, d1;
+
+    transpose_pair(m); /* m[k]: column k */
+    a1 = _mm_slli_epi16(_mm_add_epi16(m[0], m[3]), 3);
+    b1 = _mm_slli_epi16(_mm_add_epi16(m[1], m[2]), 3);
+    c1 = _mm_slli_epi16(_mm_sub_epi16(m[1], m[2]), 3);
+    d1 = _mm_slli_epi16(_mm_sub_epi16(m[0], m[3]), 3);
+    m[0] = _mm_add_epi16(a1, b1);
+    m[1] = rotate(c1, d1, 14500, 12, 0);
+    m[2] = _mm_sub_epi16(a1, b1);
+    m[3] = rotate(d1, c1, 7500, 12, 1);
+    transpose_pair(m); /* back to rows */
+    a1 = _mm_add_epi16(m[0], m[3]);
+    b1 = _mm_add_epi16(m[1], m[2]);
+    c1 = _mm_sub_epi16(m[1], m[2]);
+    d1 = _mm_sub_epi16(m[0], m[3]);
+    m[0] = _mm_srai_epi16(_mm_add_epi16(_mm_add_epi16(a1, b1), _mm_set1_epi16(7)), 4);
+    /* + (d1 != 0): + 1, then - 1 where d1 is 0 */
+    m[1] = _mm_add_epi16(_mm_add_epi16(rotate(c1, d1, 12000, 16, 0), _mm_set1_epi16(1)),
+                         _mm_cmpeq_epi16(d1, _mm_setzero_si128()));
+    m[2] = _mm_srai_epi16(_mm_add_epi16(_mm_sub_epi16(a1, b1), _mm_set1_epi16(7)), 4);
+    m[3] = rotate(d1, c1, 51000, 16, 1);
+    for (int r = 0; r < 4; r++) {
+        _mm_storel_epi64((__m128i *)(out + 4 * r), m[r]);
+        _mm_storel_epi64((__m128i *)(out + 16 + 4 * r), _mm_unpackhi_epi64(m[r], m[r]));
     }
 }
 
@@ -517,14 +559,15 @@ static int intra_chroma(vp8_encoder_t *e, int row, int col, unsigned char *u, un
 static int code_residual(vp8_encoder_t *e, unsigned char *y, unsigned char *u, unsigned char *v, const unsigned char *sy,
                          const unsigned char *su, const unsigned char *sv, int aw)
 {
-    short res[16], f[16], dc[16];
+    short f[32], dc[16];
     int any = 0;
 
     /* Nothing to clear: quantize() writes each block from `first`, vp8i_iwht() the Y blocks' dequantized DC;
-       their quantized DC is never read (Y2 codes it). */
-    for (int b = 0; b < 24; b++) {
+       their quantized DC is never read (Y2 codes it). Blocks go by pairs side by side. */
+    for (int b = 0; b < 24; b += 2) {
         const unsigned char *s, *p;
         int ss, ps;
+        __m128i m[4], zero = _mm_setzero_si128();
         if (b < 16) {
             s = sy + (b >> 2) * 4 * aw + (b & 3) * 4;
             p = y + (b >> 2) * 4 * e->stride + (b & 3) * 4;
@@ -532,23 +575,23 @@ static int code_residual(vp8_encoder_t *e, unsigned char *y, unsigned char *u, u
             ps = e->stride;
         } else {
             int k = (b - 16) & 3;
-            s = (b < 20 ? su : sv) + (k >> 1) * 4 * (aw / 2) + (k & 1) * 4;
-            p = (b < 20 ? u : v) + (k >> 1) * 4 * e->uv_stride + (k & 1) * 4;
+            s = (b < 20 ? su : sv) + (k >> 1) * 4 * (aw / 2);
+            p = (b < 20 ? u : v) + (k >> 1) * 4 * e->uv_stride;
             ss = aw / 2;
             ps = e->uv_stride;
         }
-        for (int r = 0; r < 4; r++) {
-            __m128i zero = _mm_setzero_si128();
-            __m128i src = _mm_unpacklo_epi8(_mm_cvtsi32_si128(vp8i_load4(s + r * ss)), zero);
-            __m128i pred = _mm_unpacklo_epi8(_mm_cvtsi32_si128(vp8i_load4(p + r * ps)), zero);
-            _mm_storel_epi64((__m128i *)(res + 4 * r), _mm_sub_epi16(src, pred));
-        }
-        fdct(res, f);
-        if (b < 16) {
-            dc[b] = f[0];
-            any |= quantize(f, e->quant + b * 16, e->coeffs + b * 16, 1, e->dq[0]);
-        } else {
-            any |= quantize(f, e->quant + b * 16, e->coeffs + b * 16, 0, e->dq[2]);
+        for (int r = 0; r < 4; r++)
+            m[r] = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(s + r * ss)), zero),
+                                 _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(p + r * ps)), zero));
+        fdct_pair(m, f);
+        for (int k = 0; k < 2; k++) {
+            int i = b + k;
+            if (i < 16) {
+                dc[i] = f[16 * k];
+                any |= quantize(f + 16 * k, e->quant + i * 16, e->coeffs + i * 16, 1, e->dq[0]);
+            } else {
+                any |= quantize(f + 16 * k, e->quant + i * 16, e->coeffs + i * 16, 0, e->dq[2]);
+            }
         }
     }
     fwht(dc, f);
