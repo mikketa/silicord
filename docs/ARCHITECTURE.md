@@ -6,6 +6,7 @@
 2. **Windows does the heavy lifting.** TLS, HTTP and WebSocket go through WinHTTP. No OpenSSL, no libcurl. DirectWrite lays out and draws the text, color emoji included, into a bitmap Silicord owns; images are decoded by WIC. Neither Direct2D nor the GPU is used.
 3. **Event-driven.** No busy loop: the thread blocks (`WaitForMultipleObjects`, `GetMessage`) until the next event.
 4. **Assembly where it measurably helps.** C first, then hot functions (JSON parsing, inflate, text) are rewritten in NASM only when a benchmark shows a gain.
+5. **SIMD in the codecs.** The VP8 decoder and encoder run their hot loops (subpixel filters, loop filter, inverse transform, quantization) with SSE2 intrinsics, which every x64 CPU has. Each one gives the same bits as the scalar code it replaced: checked on random input against it, on the test vectors, and against ffmpeg.
 
 ## Data flow
 
