@@ -348,54 +348,109 @@ extern "C" void r_round_outline(int x, int y, int w, int h, int radius, int widt
 
 /* ---- Images ---- */
 
-static inline void sample_bilinear(const r_image_t *img, float u, float v, unsigned out[4])
+/* A pixel's four bytes as 32-bit lanes. */
+static inline __m128i px_lanes(const BYTE *p)
 {
-    int x0, y0, x1, y1;
-    float fx, fy;
+    __m128i zero = _mm_setzero_si128();
+    UINT32 v;
+
+    memcpy(&v, p, 4);
+    return _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128((int)v), zero), zero);
+}
+
+/* Where a bilinear sample reads along one axis: the two source pixels and the weight of the second. */
+typedef struct {
+    int i0, i1;
+    float f;
+} tap_t;
+
+static inline tap_t bilinear_tap(float u, int size)
+{
+    tap_t t;
 
     u -= 0.5f;
-    v -= 0.5f;
     if (u < 0) u = 0;
-    if (v < 0) v = 0;
-    x0 = (int)u;
-    y0 = (int)v;
-    if (x0 > (int)img->w - 1) x0 = (int)img->w - 1;
-    if (y0 > (int)img->h - 1) y0 = (int)img->h - 1;
-    x1 = imin(x0 + 1, (int)img->w - 1);
-    y1 = imin(y0 + 1, (int)img->h - 1);
-    fx = u - (float)x0;
-    fy = v - (float)y0;
-    if (fx > 1) fx = 1;
-    if (fy > 1) fy = 1;
-    for (int c = 0; c < 4; c++) {
-        float a = img->pixels[((size_t)y0 * img->w + x0) * 4 + c], b = img->pixels[((size_t)y0 * img->w + x1) * 4 + c];
-        float d = img->pixels[((size_t)y1 * img->w + x0) * 4 + c], e = img->pixels[((size_t)y1 * img->w + x1) * 4 + c];
-        float top = a + (b - a) * fx, bot = d + (e - d) * fx;
-        out[c] = (unsigned)(top + (bot - top) * fy + 0.5f);
-    }
+    t.i0 = (int)u;
+    if (t.i0 > size - 1) t.i0 = size - 1;
+    t.i1 = imin(t.i0 + 1, size - 1);
+    t.f = u - (float)t.i0;
+    if (t.f > 1) t.f = 1;
+    return t;
+}
+
+/*
+ * Bilinear sample, the four channels at once: the same float operations in
+ * the same order as channel by channel, so the same result.
+ */
+static inline __m128i sample_bilinear(const r_image_t *img, tap_t tx, tap_t ty)
+{
+    const BYTE *r0 = img->pixels + (size_t)ty.i0 * img->w * 4, *r1 = img->pixels + (size_t)ty.i1 * img->w * 4;
+    __m128 a = _mm_cvtepi32_ps(px_lanes(r0 + tx.i0 * 4)), b = _mm_cvtepi32_ps(px_lanes(r0 + tx.i1 * 4));
+    __m128 d = _mm_cvtepi32_ps(px_lanes(r1 + tx.i0 * 4)), e = _mm_cvtepi32_ps(px_lanes(r1 + tx.i1 * 4));
+    __m128 vx = _mm_set1_ps(tx.f), vy = _mm_set1_ps(ty.f);
+    __m128 top = _mm_add_ps(a, _mm_mul_ps(_mm_sub_ps(b, a), vx)), bot = _mm_add_ps(d, _mm_mul_ps(_mm_sub_ps(e, d), vx));
+
+    return _mm_cvttps_epi32(_mm_add_ps(_mm_add_ps(top, _mm_mul_ps(_mm_sub_ps(bot, top), vy)), _mm_set1_ps(0.5f)));
 }
 
 /* Average of the source pixels under a destination pixel, when shrinking. */
-static inline void sample_box(const r_image_t *img, float u0, float v0, float u1, float v1, unsigned out[4])
+static inline __m128i sample_box(const r_image_t *img, float u0, float v0, float u1, float v1)
 {
-    int xa = (int)u0, ya = (int)v0, xb = (int)(u1 + 0.999f), yb = (int)(v1 + 0.999f), n = 0;
-    unsigned sum[4] = {0, 0, 0, 0};
+    int xa = (int)u0, ya = (int)v0, xb = (int)(u1 + 0.999f), yb = (int)(v1 + 0.999f), n;
+    __m128i sum = _mm_setzero_si128();
+    unsigned s[4];
 
     xa = imax(xa, 0);
     ya = imax(ya, 0);
     xb = imin(imax(xb, xa + 1), (int)img->w);
     yb = imin(imax(yb, ya + 1), (int)img->h);
-    for (int yy = ya; yy < yb; yy++)
-        for (int xx = xa; xx < xb; xx++, n++) {
-            const BYTE *p = img->pixels + ((size_t)yy * img->w + xx) * 4;
-            sum[0] += p[0];
-            sum[1] += p[1];
-            sum[2] += p[2];
-            sum[3] += p[3];
-        }
+    n = (xb - xa) * (yb - ya);
+    for (int yy = ya; yy < yb; yy++) {
+        const BYTE *p = img->pixels + ((size_t)yy * img->w + xa) * 4;
+        for (int xx = xa; xx < xb; xx++, p += 4)
+            sum = _mm_add_epi32(sum, px_lanes(p));
+    }
+    if (n <= 0)
+        return _mm_setzero_si128();
+    _mm_storeu_si128((__m128i *)s, sum);
     for (int c = 0; c < 4; c++)
-        out[c] = n ? (sum[c] + (unsigned)n / 2) / (unsigned)n : 0;
+        s[c] = (s[c] + (unsigned)n / 2) / (unsigned)n;
+    return _mm_loadu_si128((const __m128i *)s);
 }
+
+/* Premultiplied source s over the opaque destination pixel d, with coverage cov. */
+static inline UINT32 blend(__m128i sv, UINT32 d, float cov)
+{
+    unsigned s[4], a, out = 0;
+
+    _mm_storeu_si128((__m128i *)s, sv);
+    if (cov == 1) {
+        /* Whole coverage: s * cov + 0.5 rounds back to s, and an opaque source replaces d. */
+        a = s[3];
+        if (a == 255)
+            return s[0] | s[1] << 8 | s[2] << 16;
+        if (!a)
+            return d;
+        for (int c = 0; c < 3; c++) {
+            unsigned v2 = s[c] + (d >> (c * 8) & 0xFF) * (255 - a) / 255;
+            out |= (v2 > 255 ? 255 : v2) << (c * 8);
+        }
+        return out;
+    }
+    a = (unsigned)((float)s[3] * cov + 0.5f);
+    if (!a)
+        return d;
+    for (int c = 0; c < 3; c++) {
+        unsigned sc = (unsigned)((float)s[c] * cov + 0.5f), dc = d >> (c * 8) & 0xFF;
+        unsigned v2 = sc + dc * (255 - a) / 255;
+        out |= (v2 > 255 ? 255 : v2) << (c * 8);
+    }
+    return out;
+}
+
+/* The columns' taps of the image being drawn (painting is single-threaded); wider draws work them out per pixel. */
+#define MAX_TAPS 4096
+static tap_t g_taps[MAX_TAPS];
 
 /* Draws the source rectangle (su, sv, sw, sh) of img into (x, y, w, h), rounded by radius. */
 static void draw_image(const r_image_t *img, float su, float sv, float sw, float sh, int x, int y, int w, int h, int radius)
@@ -408,40 +463,42 @@ static void draw_image(const r_image_t *img, float su, float sv, float sw, float
         return;
     /* Drawn whole at its own size: each pixel is a source pixel, which is what filtering would give. */
     int exact = su == 0 && sv == 0 && sw == (float)w && sh == (float)h && img->w == (UINT)w && img->h == (UINT)h;
+    /* A column's horizontal taps are the same on every row: worked out once. */
+    if (!exact && !shrink)
+        for (int xx = r.left; xx < r.right && xx - r.left < MAX_TAPS; xx++)
+            g_taps[xx - r.left] = bilinear_tap(su + ((float)xx + 0.5f - (float)x) * kx, (int)img->w);
     for (int yy = r.top; yy < r.bottom; yy++) {
         UINT32 *p = row(yy) + r.left;
         float py = (float)yy + 0.5f, v = sv + (py - (float)y) * ky;
         const BYTE *src = exact ? img->pixels + ((size_t)(yy - y) * img->w + (size_t)(r.left - x)) * 4 : NULL;
         /* Rows clear of the corners are covered whole, as rr_cover() would find. */
         int plain = rad <= 0 || (py - (float)y >= rad + 1 && (float)(y + h) - py >= rad + 1);
+        int xx = r.left;
 
-        for (int xx = r.left; xx < r.right; xx++, p++) {
+        if (exact && plain) {
+            /* Four opaque pixels at a time replace the destination's, alpha byte cleared as blending leaves it. */
+            const __m128i opaque = _mm_set1_epi32(~0x00FFFFFF), rgb = _mm_set1_epi32(0x00FFFFFF);
+            for (; xx + 4 <= r.right; xx += 4, p += 4) {
+                __m128i s4 = _mm_loadu_si128((const __m128i *)(src + (size_t)(xx - r.left) * 4));
+                if (_mm_movemask_epi8(_mm_cmpeq_epi32(_mm_and_si128(s4, opaque), opaque)) != 0xFFFF)
+                    break;
+                _mm_storeu_si128((__m128i *)p, _mm_and_si128(s4, rgb));
+            }
+        }
+        tap_t ty = bilinear_tap(v, (int)img->h);
+        for (; xx < r.right; xx++, p++) {
             float px = (float)xx + 0.5f, u = su + (px - (float)x) * kx, cov = 1;
-            unsigned s[4], a, d, out = 0;
+            __m128i s;
 
             if (!plain && (cov = rr_cover(px, py, (float)x, (float)y, (float)(x + w), (float)(y + h), rad)) <= 0)
                 continue;
-            if (exact) {
-                const BYTE *q = src + (size_t)(xx - r.left) * 4;
-                s[0] = q[0];
-                s[1] = q[1];
-                s[2] = q[2];
-                s[3] = q[3];
-            } else if (shrink)
-                sample_box(img, u - kx / 2, v - ky / 2, u + kx / 2, v + ky / 2, s);
+            if (exact)
+                s = px_lanes(src + (size_t)(xx - r.left) * 4);
+            else if (shrink)
+                s = sample_box(img, u - kx / 2, v - ky / 2, u + kx / 2, v + ky / 2);
             else
-                sample_bilinear(img, u, v, s);
-            /* Premultiplied source over the opaque destination. */
-            a = (unsigned)((float)s[3] * cov + 0.5f);
-            if (!a)
-                continue;
-            d = *p;
-            for (int c = 0; c < 3; c++) {
-                unsigned sc = (unsigned)((float)s[c] * cov + 0.5f), dc = d >> (c * 8) & 0xFF;
-                unsigned v2 = sc + dc * (255 - a) / 255;
-                out |= (v2 > 255 ? 255 : v2) << (c * 8);
-            }
-            *p = out;
+                s = sample_bilinear(img, xx - r.left < MAX_TAPS ? g_taps[xx - r.left] : bilinear_tap(u, (int)img->w), ty);
+            *p = blend(s, *p, cov);
         }
     }
 }
