@@ -960,11 +960,11 @@ static void draw_layout(IDWriteTextLayout *l, int x, int y, const RECT *box, uns
 
 /* ---- Fonts ---- */
 
-extern "C" r_font_t *r_font(const wchar_t *family, int px, int weight, int italic)
+static r_font_t *make_font(const wchar_t *family, IDWriteFontCollection *coll, int px, int weight, int italic)
 {
     r_font_t *f = (r_font_t *)mem_alloc(sizeof *f);
 
-    if (FAILED(g_dw->CreateTextFormat(family, NULL, (DWRITE_FONT_WEIGHT)weight,
+    if (FAILED(g_dw->CreateTextFormat(family, coll, (DWRITE_FONT_WEIGHT)weight,
                                       italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                                       DWRITE_FONT_STRETCH_NORMAL, (float)px, L"", &f->format))) {
         mem_free(f);
@@ -972,6 +972,11 @@ extern "C" r_font_t *r_font(const wchar_t *family, int px, int weight, int itali
     }
     g_dw->CreateEllipsisTrimmingSign(f->format, &f->ellipsis);
     return f;
+}
+
+extern "C" r_font_t *r_font(const wchar_t *family, int px, int weight, int italic)
+{
+    return make_font(family, NULL, px, weight, italic);
 }
 
 /* Registered once, kept for the life of the process. */
@@ -998,16 +1003,8 @@ extern "C" r_font_t *r_font_data(const void *data, size_t n, int px, int weight)
         SUCCEEDED(f5->CreateFontSetBuilder(&builder)) && SUCCEEDED(builder->AddFontFile(file)) &&
         SUCCEEDED(builder->CreateFontSet(&set)) && SUCCEEDED(f5->CreateFontCollectionFromFontSet(set, &coll)) &&
         coll->GetFontFamilyCount() > 0 && SUCCEEDED(coll->GetFontFamily(0, &family)) &&
-        SUCCEEDED(family->GetFamilyNames(&names)) && SUCCEEDED(names->GetString(0, name, 128))) {
-        f = (r_font_t *)mem_alloc(sizeof *f);
-        if (FAILED(g_dw->CreateTextFormat(name, coll, (DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STYLE_NORMAL,
-                                          DWRITE_FONT_STRETCH_NORMAL, (float)px, L"", &f->format))) {
-            mem_free(f);
-            f = NULL;
-        } else {
-            g_dw->CreateEllipsisTrimmingSign(f->format, &f->ellipsis);
-        }
-    }
+        SUCCEEDED(family->GetFamilyNames(&names)) && SUCCEEDED(names->GetString(0, name, 128)))
+        f = make_font(name, coll, px, weight, 0);
     if (names)
         names->Release();
     if (family)
