@@ -4887,39 +4887,49 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         redraw();
         return;
     }
-    if (msg == UI_COMMANDS) {
+    if (msg == UI_GIFS) {
         if (p) {
-            on_commands(p);
+            on_gifs(p);
             sb_free(p);
             mem_free(p);
         }
+        return;
+    }
+    if (msg == UI_PROFILE) {
+        on_profile((profile_t *)lp);
+        return;
+    }
+    if (msg == UI_FONT) {
+        on_font((int)wp, p);
+        if (p) {
+            sb_free(p);
+            mem_free(p);
+        }
+        if (g_ui.pop)
+            pop_place(); /* which repaints it */
+        return;
+    }
+    if (msg == UI_ACTIVITY) {
+        on_activity((activity_t *)lp);
+        activity_free((activity_t *)lp);
         redraw();
         return;
     }
-    if (msg == UI_GIFS) {
+
+    switch (msg) {
+    case UI_COMMANDS:
         if (p)
-            on_gifs(p);
-        if (p) {
-            sb_free(p);
-            mem_free(p);
-        }
-        return;
-    }
-    if (msg == UI_FORUM) {
+            on_commands(p);
+        break;
+    case UI_FORUM:
         if (p)
             on_forum(p);
-        if (p) {
-            sb_free(p);
-            mem_free(p);
-        }
-        redraw();
-        return;
-    }
-    if (msg == UI_VIDEO) {
-        redraw();
-        return;
-    }
-    if (msg == UI_VOICE) {
+        break;
+    case UI_TYPING:
+        if (p)
+            on_typing(p);
+        break;
+    case UI_VOICE:
         /* A late report from a connection we already left changes nothing. */
         if (p && p->len >= 2 && g_ui.voice_state != VOICE_OFF) {
             g_ui.voice_state = p->data[0] - '0';
@@ -4933,47 +4943,7 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
                 KillTimer(g_ui.wnd, TIMER_VOICE);
             clamp_scroll();
         }
-        if (p) {
-            sb_free(p);
-            mem_free(p);
-        }
-        redraw();
-        return;
-    }
-    if (msg == UI_TYPING) {
-        if (p)
-            on_typing(p);
-        if (p) {
-            sb_free(p);
-            mem_free(p);
-        }
-        redraw();
-        return;
-    }
-    if (msg == UI_PROFILE) {
-        on_profile((profile_t *)lp);
-        return;
-    }
-    if (msg == UI_FONT) {
-        on_font((int)wp, p);
-        if (p) {
-            sb_free(p);
-            mem_free(p);
-        }
-        if (g_ui.pop) {
-            pop_place();
-            InvalidateRect(g_ui.pop, NULL, FALSE);
-        }
-        return;
-    }
-    if (msg == UI_ACTIVITY) {
-        on_activity((activity_t *)lp);
-        activity_free((activity_t *)lp);
-        redraw();
-        return;
-    }
-
-    switch (msg) {
+        break;
     case UI_QR:
         if (!g_ui.qr)
             g_ui.qr = mem_alloc(sizeof *g_ui.qr);
