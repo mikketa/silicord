@@ -87,10 +87,51 @@ static void discovery(void)
           "discovery response");
 }
 
+/* Our own video packets: RID and playout delay elements, sealed with the payload and dropped on opening. */
+static void our_extension(void)
+{
+    static const unsigned char ext[] = {0xB2, '1', '0', '0', 0x62, 0, 0, 0}, vp8[] = {0x90, 0x80, 0x81, 0x23, 7, 7};
+    rtp_header_t h = {7, 90000, 1234, RTP_VP8 | RTP_MARKER}, got;
+    sb_t pkt = {0}, out = {0};
+    int ok = rtp_seal_ext(k_key, &h, 5, ext, sizeof ext, vp8, sizeof vp8, &pkt);
+
+    check(ok && pkt.len == 16 + 8 + sizeof vp8 + 16 + 4 && (unsigned char)pkt.data[0] == 0x90 &&
+              (unsigned char)pkt.data[12] == 0xBE && (unsigned char)pkt.data[15] == 2,
+          "extension preamble in the clear");
+    ok = rtp_open(k_key, (const unsigned char *)pkt.data, pkt.len, &got, &out);
+    check(ok && got.type == RTP_VP8 && got.marker && out.len == sizeof vp8 && ct_equal(out.data, vp8, sizeof vp8),
+          "opens to the payload, with the marker");
+    sb_free(&pkt);
+    sb_free(&out);
+}
+
+/* RTCP: a key frame request sealed and opened, then found in a compound packet. */
+static void rtcp(void)
+{
+    unsigned char pli[12], compound[8 + 12] = {0x80, 201, 0, 1, 0, 0, 0, 9};
+    sb_t pkt = {0}, out = {0};
+    int ok;
+
+    rtcp_pli(111, 222, pli);
+    ok = rtcp_seal(k_key, pli, sizeof pli, 3, &pkt) &&
+         rtcp_open(k_key, (const unsigned char *)pkt.data, pkt.len, &out);
+    check(ok && out.len == sizeof pli && ct_equal(out.data, pli, sizeof pli), "RTCP round trip");
+    check(rtcp_key_frame_request((const unsigned char *)out.data, out.len) == 222, "a PLI names its media");
+    for (int i = 0; i < 12; i++)
+        compound[8 + i] = pli[i];
+    check(rtcp_key_frame_request(compound, sizeof compound) == 222, "after an empty receiver report");
+    pkt.data[9] ^= 1;
+    check(!rtcp_open(k_key, (const unsigned char *)pkt.data, pkt.len, &out), "a tampered RTCP packet");
+    sb_free(&pkt);
+    sb_free(&out);
+}
+
 void entry(void)
 {
     round_trip();
     extension();
+    our_extension();
+    rtcp();
     discovery();
     finish();
 }

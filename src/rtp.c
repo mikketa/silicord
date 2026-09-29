@@ -26,29 +26,43 @@ static unsigned get32(const unsigned char *p)
     return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3];
 }
 
-int rtp_seal(const unsigned char key[32], const rtp_header_t *h, unsigned long nonce, const void *payload, size_t n,
-             sb_t *out)
+int rtp_seal_ext(const unsigned char key[32], const rtp_header_t *h, unsigned long nonce, const unsigned char *ext,
+                 size_t ext_n, const void *payload, size_t n, sb_t *out)
 {
-    unsigned char head[12], iv[12] = {0};
+    unsigned char head[16], iv[12] = {0};
     unsigned char *body;
+    size_t hn = ext_n ? 16 : 12, words = (ext_n + 3) / 4, sealed = words * 4 + n;
     int ok;
 
-    head[0] = 0x80;
+    head[0] = (unsigned char)(ext_n ? 0x90 : 0x80);
     head[1] = (unsigned char)h->type;
     put16(head + 2, h->seq);
     put32(head + 4, h->timestamp);
     put32(head + 8, h->ssrc);
+    put16(head + 12, 0xBEDE); /* one-byte extension elements; the preamble stays clear */
+    put16(head + 14, (unsigned)words);
     put32(iv, nonce);
-    sb_reserve(out, 12 + n + 16 + 4);
+    sb_reserve(out, hn + sealed + 16 + 4);
     body = (unsigned char *)out->data + out->len;
-    memcpy(body, head, 12);
-    ok = aes_gcm_seal(key, 32, iv, head, 12, payload, n, body + 12, body + 12 + n, 16);
-    memcpy(body + 12 + n + 16, iv, 4);
+    memcpy(body, head, hn);
+    /* The elements (zero-padded to whole words) are sealed with the payload. */
+    memset(body + hn, 0, words * 4);
+    if (ext_n)
+        memcpy(body + hn, ext, ext_n);
+    memcpy(body + hn + words * 4, payload, n);
+    ok = aes_gcm_seal(key, 32, iv, head, hn, body + hn, sealed, body + hn, body + hn + sealed, 16);
+    memcpy(body + hn + sealed + 16, iv, 4);
     if (ok) {
-        out->len += 12 + n + 16 + 4;
+        out->len += hn + sealed + 16 + 4;
         out->data[out->len] = 0;
     }
     return ok;
+}
+
+int rtp_seal(const unsigned char key[32], const rtp_header_t *h, unsigned long nonce, const void *payload, size_t n,
+             sb_t *out)
+{
+    return rtp_seal_ext(key, h, nonce, NULL, 0, payload, n, out);
 }
 
 int rtp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, rtp_header_t *h, sb_t *payload)
@@ -103,6 +117,38 @@ int rtcp_seal(const unsigned char key[32], const unsigned char *pkt, size_t n, u
         out->data[out->len] = 0;
     }
     return ok;
+}
+
+int rtcp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, sb_t *out)
+{
+    unsigned char iv[12] = {0};
+
+    if (n < 8 + 16 + 4 || (pkt[0] >> 6) != 2 || pkt[1] < 200 || pkt[1] > 206)
+        return 0;
+    memcpy(iv, pkt + n - 4, 4);
+    sb_clear(out);
+    sb_reserve(out, n);
+    memcpy(out->data, pkt, 8);
+    if (!aes_gcm_open(key, 32, iv, pkt, 8, pkt + 8, n - 8 - 20, (unsigned char *)out->data + 8, pkt + n - 20, 16))
+        return 0;
+    out->len = n - 20;
+    out->data[out->len] = 0;
+    return 1;
+}
+
+unsigned rtcp_key_frame_request(const unsigned char *p, size_t n)
+{
+    /* Compound packets: PLI (206, format 1) and FIR (206, format 4) name the media they ask about. */
+    while (n >= 12) {
+        size_t len = 4 * ((size_t)get16(p + 2) + 1);
+        if (len > n)
+            break;
+        if (p[1] == 206 && ((p[0] & 31) == 1 || (p[0] & 31) == 4))
+            return (p[0] & 31) == 1 ? get32(p + 8) : len >= 20 ? get32(p + 12) : 0;
+        p += len;
+        n -= len;
+    }
+    return 0;
 }
 
 void rtcp_pli(unsigned sender_ssrc, unsigned media_ssrc, unsigned char out[12])

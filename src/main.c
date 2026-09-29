@@ -18,6 +18,8 @@
 #include "opus.h"
 #include "opus_math.h"
 #include "vp8.h"
+#include "vp8_enc.h"
+#include "camera.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -604,6 +606,19 @@ static void i420_to_bgra(const vp8_image_t *img, unsigned *out)
     }
 }
 
+/* A picture into view i (under g_video_lock). */
+static void view_store(int i, const vp8_image_t *img)
+{
+    if (g_views[i].w != img->w || g_views[i].h != img->h) {
+        mem_free(g_views[i].bgra);
+        g_views[i].bgra = mem_alloc((size_t)img->w * (size_t)img->h * 4);
+        g_views[i].w = img->w;
+        g_views[i].h = img->h;
+    }
+    i420_to_bgra(img, g_views[i].bgra);
+    g_views[i].serial++;
+}
+
 static void voice_video(void *ctx, unsigned long long user, const unsigned char *vp8, size_t n)
 {
     vp8_image_t img;
@@ -621,14 +636,7 @@ static void voice_video(void *ctx, unsigned long long user, const unsigned char 
         g_views[i].w = g_views[i].h = 0;
     }
     if (i >= 0 && vp8_decode(g_views[i].dec, vp8, n, &img) == 1) {
-        if (g_views[i].w != img.w || g_views[i].h != img.h) {
-            mem_free(g_views[i].bgra);
-            g_views[i].bgra = mem_alloc((size_t)img.w * (size_t)img.h * 4);
-            g_views[i].w = img.w;
-            g_views[i].h = img.h;
-        }
-        i420_to_bgra(&img, g_views[i].bgra);
-        g_views[i].serial++;
+        view_store(i, &img);
         shown = 1;
     }
     LeaveCriticalSection(&g_video_lock);
@@ -654,6 +662,64 @@ static void voice_video_state(void *ctx, unsigned long long user, int on)
     (void)ctx;
     if (!on)
         view_remove(user);
+    ui_post(UI_VIDEO, NULL);
+}
+
+/* ---- Our camera: captured, encoded and sent, and shown to us ---- */
+
+#define CAMERA_W 640
+#define CAMERA_H 360
+#define CAMERA_FPS 15
+#define CAMERA_KBPS 800
+
+static vp8_encoder_t *g_venc;    /* the capture thread's */
+static volatile LONG g_want_key, g_camera_on;
+static sb_t g_vframe;
+
+static void camera_frame(void *ctx, const vp8_image_t *img, unsigned long long ms)
+{
+    int key = (int)InterlockedExchange(&g_want_key, 0), i;
+
+    (void)ctx;
+    if (!g_venc) {
+        g_venc = vp8_encoder_new(img->w, img->h, CAMERA_KBPS, CAMERA_FPS);
+        key = 1;
+    }
+    if (g_venc && vp8_encode(g_venc, img, key, &g_vframe))
+        voice_video_send((const unsigned char *)g_vframe.data, g_vframe.len, (unsigned)(ms * 90));
+    /* Our own tile shows what we send. */
+    EnterCriticalSection(&g_video_lock);
+    i = view_find(g_vc.p.user_id);
+    if (i < 0 && g_nviews < MAX_VIEWS) {
+        i = g_nviews++;
+        g_views[i].user = g_vc.p.user_id;
+        g_views[i].dec = NULL;
+        g_views[i].bgra = NULL;
+        g_views[i].w = g_views[i].h = 0;
+    }
+    if (i >= 0)
+        view_store(i, img);
+    LeaveCriticalSection(&g_video_lock);
+    if (!InterlockedExchange(&g_video_posted, 1))
+        ui_post(UI_VIDEO, NULL);
+}
+
+static void voice_key_frame(void *ctx)
+{
+    (void)ctx;
+    InterlockedExchange(&g_want_key, 1);
+}
+
+static void camera_off(void)
+{
+    if (!InterlockedExchange(&g_camera_on, 0))
+        return;
+    camera_stop();
+    voice_video_active(0);
+    vp8_encoder_free(g_venc);
+    g_venc = NULL;
+    sb_free(&g_vframe);
+    view_remove(g_vc.p.user_id);
     ui_post(UI_VIDEO, NULL);
 }
 
@@ -718,6 +784,7 @@ static void send_voice_state(const char *guild, const char *channel)
         sb_add(&m, "null");
     }
     sb_add(&m, g_muted || g_deafened ? ",\"self_mute\":true" : ",\"self_mute\":false");
+    sb_add(&m, g_camera_on ? ",\"self_video\":true" : ",\"self_video\":false");
     sb_add(&m, g_deafened ? ",\"self_deaf\":true}}" : ",\"self_deaf\":false}}");
     gw_send(&m);
     sb_free(&m);
@@ -733,6 +800,7 @@ static void voice_try_start(void)
     ev.frame = voice_frame;
     ev.video = voice_video;
     ev.video_state = voice_video_state;
+    ev.key_frame = voice_key_frame;
     if (g_vc.active && g_vc.have_state && g_vc.have_server) {
         g_vc.have_server = 0;
         voice_start(&g_vc.p, &ev);
@@ -774,6 +842,25 @@ static void voice_state_update(void)
         send_voice_state(guild, channel);
 }
 
+int app_video_camera(int on)
+{
+    if (!on) {
+        camera_off();
+    } else if (!g_camera_on) {
+        if (!voice_video_active(1))
+            return 0;
+        InterlockedExchange(&g_want_key, 1);
+        InterlockedExchange(&g_camera_on, 1);
+        if (!camera_start(0, CAMERA_W, CAMERA_H, CAMERA_FPS, camera_frame, NULL)) {
+            InterlockedExchange(&g_camera_on, 0);
+            voice_video_active(0);
+            return 0;
+        }
+    }
+    voice_state_update();
+    return g_camera_on != 0;
+}
+
 void app_voice_set(int muted, int deafened)
 {
     app_voice_mute(muted);
@@ -791,6 +878,7 @@ void app_voice_leave(void)
     lstrcpynA(guild, g_vc.guild, sizeof guild);
     g_vc.active = 0;
     LeaveCriticalSection(&g_voice_lock);
+    camera_off();
     voice_stop();
     audio_mode(AUDIO_OFF);
     views_clear();

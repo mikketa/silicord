@@ -20,4 +20,5 @@ for i in 001 004 008 014 017; do
         fi
     done
 done
+"$tool" --speed 640 360 30
 exit $status

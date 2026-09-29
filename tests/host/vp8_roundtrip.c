@@ -2,6 +2,7 @@
  * The VP8 encoder against decoders:
  *
  *   vp8_roundtrip source.ivf kbps ours.ivf ours.yuv
+ *   vp8_roundtrip --speed width height frames
  *
  * Re-encodes a test vector's pictures at `kbps`, decodes every frame back
  * with our decoder and requires it to match the encoder's reconstruction
@@ -12,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "vp8.h"
 #include "vp8_enc.h"
 
@@ -77,6 +79,35 @@ static void write_yuv(FILE *f, const vp8_image_t *img)
         fwrite(img->v + y * img->uv_stride, 1, (size_t)(img->w + 1) / 2, f);
 }
 
+/* How fast the encoder runs on a moving synthetic picture (a camera-sized one, say). */
+static int speed(int w, int h, int frames)
+{
+    vp8_encoder_t *enc = vp8_encoder_new(w, h, 800, 30);
+    unsigned char *y = malloc((size_t)w * h), *u = malloc((size_t)w * h / 4 + w), *v = malloc((size_t)w * h / 4 + w);
+    vp8_image_t img = {w, h, y, u, v, w, (w + 1) / 2};
+    sb_t out = {0};
+    size_t bytes = 0;
+    clock_t start = clock();
+
+    for (int f = 0; f < frames; f++) {
+        for (int j = 0; j < h; j++)
+            for (int i = 0; i < w; i++)
+                y[j * w + i] = (unsigned char)(((i + 3 * f) ^ (j + f)) & 0xFF) / 2 + (unsigned char)((i * j) >> 10);
+        memset(u, 128 + f % 16, (size_t)((w + 1) / 2) * ((h + 1) / 2));
+        memset(v, 120, (size_t)((w + 1) / 2) * ((h + 1) / 2));
+        vp8_encode(enc, &img, 0, &out);
+        bytes += out.len;
+    }
+    printf("%dx%d: %.1f ms a frame, %zu bytes a frame\n", w, h,
+           (double)(clock() - start) * 1000 / CLOCKS_PER_SEC / frames, bytes / (size_t)frames);
+    vp8_encoder_free(enc);
+    free(y);
+    free(u);
+    free(v);
+    sb_free(&out);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     long n, pos;
@@ -89,6 +120,8 @@ int main(int argc, char **argv)
     double worst = 99, sum = 0;
     size_t bytes = 0;
 
+    if (argc == 5 && strcmp(argv[1], "--speed") == 0)
+        return speed(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]));
     if (argc < 5 || !(ivf = load(argv[1], &n)) || n < 32 || !(fo = fopen(argv[3], "wb")) || !(fy = fopen(argv[4], "wb"))) {
         fprintf(stderr, "usage: vp8_roundtrip source.ivf kbps ours.ivf ours.yuv\n");
         return 2;

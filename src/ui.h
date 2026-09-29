@@ -148,6 +148,8 @@ void app_call_ring(const char *channel_id, const char *stop_for);
 int app_voice_speaking(const char *user_id);
 void app_voice_deafen(int deafened);
 void app_voice_mute(int muted);
+/* Turns our camera on or off in the call; returns whether it is on. */
+int app_video_camera(int on);
 /* Mutes and deafens (deafened also mutes), and tells the others. */
 void app_voice_set(int muted, int deafened);
 /* This computer's voice settings. */

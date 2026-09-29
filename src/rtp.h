@@ -25,6 +25,13 @@ int rtp_seal(const unsigned char key[32], const rtp_header_t *h, unsigned long n
 /* Opens a packet; `payload` gets the media after any header extension. 0 for RTCP or a bad tag. */
 int rtp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, rtp_header_t *h, sb_t *payload);
 
+/* With one-byte header extension elements (ext_n bytes, padded here), sealed along with the payload. */
+int rtp_seal_ext(const unsigned char key[32], const rtp_header_t *h, unsigned long nonce, const unsigned char *ext,
+                 size_t ext_n, const void *payload, size_t n, sb_t *out);
+/* Opens an RTCP packet into `out`, its header back in front. */
+int rtcp_open(const unsigned char key[32], const unsigned char *pkt, size_t n, sb_t *out);
+/* The SSRC an opened RTCP packet asks a key frame of (PLI or FIR), or 0. */
+unsigned rtcp_key_frame_request(const unsigned char *p, size_t n);
 /* An RTCP packet (header and sender SSRC in the clear, the rest sealed), such as rtcp_pli(). */
 int rtcp_seal(const unsigned char key[32], const unsigned char *pkt, size_t n, unsigned long nonce, sb_t *out);
 /* A Picture Loss Indication: asks the sender of `media_ssrc` for a key frame. */

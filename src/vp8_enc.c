@@ -393,8 +393,12 @@ static short chroma_half(int v)
 /* The luma SAD of moving by mv from the last frame. */
 static int inter_sad(vp8_encoder_t *e, int row, int col, vp8_mv_t mv)
 {
-    int aw = e->mb_cols * 16, x = col * 16, y = row * 16;
+    int aw = e->mb_cols * 16, ah = e->mb_rows * 16, x = col * 16, y = row * 16;
+    int rx = x + (mv.x >> 3), ry = y + (mv.y >> 3);
 
+    /* Whole pixels inside the frame: compare in place. */
+    if (!(mv.x & 7) && !(mv.y & 7) && rx >= 0 && ry >= 0 && rx + 16 <= aw && ry + 16 <= ah)
+        return sad(e->y[!e->cur] + ry * e->stride + rx, e->stride, e->sy + y * aw + x, aw, 16, 16);
     vp8i_predict_inter_block(&e->scratch, e->pred, 16, e->y[!e->cur], e->stride, aw, e->mb_rows * 16, x, y, 16, 16, mv);
     return sad(e->pred, 16, e->sy + y * aw + x, aw, 16, 16);
 }

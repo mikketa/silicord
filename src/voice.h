@@ -27,6 +27,8 @@ typedef struct {
     void (*video_state)(void *ctx, unsigned long long user, int on);
     /* One decrypted VP8 frame of `user`'s video. */
     void (*video)(void *ctx, unsigned long long user, const unsigned char *vp8, size_t n);
+    /* Someone watching our video lost it: the next frame should be a key frame. */
+    void (*key_frame)(void *ctx);
     /* A line for the --debug trace (opcodes, DAVE states, the Opus modes heard). */
     void (*log)(void *ctx, const char *text);
 } voice_events_t;
@@ -38,5 +40,9 @@ void voice_stop(void);
 int voice_send(const unsigned char *opus, size_t n);
 /* Ends a burst of speech: silence frames, then not speaking. */
 void voice_quiet(void);
+/* Starts or stops sending our video (announced to the server first). */
+int voice_video_active(int on);
+/* One VP8 frame of our video; `timestamp` counts at 90 kHz. */
+int voice_video_send(const unsigned char *vp8, size_t n, unsigned timestamp);
 /* The call's end-to-end encryption code (30 digits); 0 when media is not end-to-end encrypted. */
 int voice_privacy_code(char *out, size_t size);

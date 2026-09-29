@@ -72,7 +72,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF, HIT_VOICE_CAMERA };
 
 typedef struct {
     char key[96];
@@ -229,7 +229,7 @@ typedef struct {
     char voice_channel[24];
     char voice_name[100];      /* its channel name */
     unsigned voice_speaking;   /* who spoke at the last check, one bit per member of our call */
-    int voice_muted, voice_deafened;
+    int voice_muted, voice_deafened, voice_camera;
     struct {
         char channel[24];
         int ringing;           /* we are being rung */
@@ -1216,6 +1216,7 @@ static void voice_join(const char *guild_id, const char *channel_id, const char 
 
 static void voice_leave(void)
 {
+    g_ui.voice_camera = 0;
     KillTimer(g_ui.wnd, TIMER_VOICE);
     app_voice_leave();
     g_ui.voice_state = VOICE_OFF;
@@ -1597,6 +1598,8 @@ static void hit_test(int x, int y, int *kind, int *index)
                 *kind = HIT_VOICE_DEAF;
             else if (y >= vy && y < vy + S(32) && x >= right - S(104) && x < right - S(72))
                 *kind = HIT_VOICE_MUTE;
+            else if (y >= vy && y < vy + S(32) && x >= right - S(140) && x < right - S(108))
+                *kind = HIT_VOICE_CAMERA;
             return;
         }
         if (y >= rc.bottom - S(PANEL_H)) {
@@ -2017,7 +2020,7 @@ static void paint_voice_bar(RECT rc)
     cy = y + (h - S(32)) / 2;
     fill(x0, y, S(SIDE_W), h, C_PANEL);
     fill(x0 + S(8), y, S(SIDE_W) - S(16), 1, C_LINE);
-    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(124), S(20)),
+    text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(160), S(20)),
          g_ui.voice_state == VOICE_CONNECTED ? "Voice Connected" : str_or_empty(&g_ui.voice_status),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     /* The channel, and the end-to-end encryption code others can compare. */
@@ -2028,16 +2031,16 @@ static void paint_voice_bar(RECT rc)
         lstrcatA(line, code);
         lstrcatA(line, "\xE2\x80\xA6");
     }
-    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(124), S(18)), line,
+    text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(160), S(18)), line,
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     /* Mute and deafen: the icon shows the state, red when on. */
     {
         struct {
             int hit, on, dx;
             const wchar_t *icon;
-        } b[2] = {{HIT_VOICE_MUTE, g_ui.voice_muted || g_ui.voice_deafened, 104, g_ui.voice_muted || g_ui.voice_deafened ? L"\xEC54" : L"\xE720"},
+        } b[3] = {{HIT_VOICE_CAMERA, g_ui.voice_camera, 140, L"\xE714"},{HIT_VOICE_MUTE, g_ui.voice_muted || g_ui.voice_deafened, 104, g_ui.voice_muted || g_ui.voice_deafened ? L"\xEC54" : L"\xE720"},
                   {HIT_VOICE_DEAF, g_ui.voice_deafened, 68, g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6"}};
-        for (int k = 0; k < 2; k++) {
+        for (int k = 0; k < 3; k++) {
             if (g_ui.hover_kind == b[k].hit)
                 r_round(right - S(b[k].dx), cy, S(32), S(32), S(6), ARGB(C_SELECT));
             r_text(g_ui.f_icon, b[k].on ? C_BADGE : ARGB(g_ui.hover_kind == b[k].hit ? C_INK : C_MUTED),
@@ -4597,6 +4600,10 @@ static void on_click(int kind, int index)
         break;
     case HIT_SELF:
         open_self();
+        break;
+    case HIT_VOICE_CAMERA:
+        g_ui.voice_camera = app_video_camera(!g_ui.voice_camera);
+        redraw();
         break;
     case HIT_VOICE_MUTE:
         g_ui.voice_muted = !(g_ui.voice_muted || g_ui.voice_deafened);
