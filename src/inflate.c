@@ -156,14 +156,11 @@ static int codes(inflate_t *z, bits_t *b, const inflate_code_t *lc, const inflat
         back = (size_t)dist > made ? (size_t)dist - made : 0; /* how far into earlier messages */
         if (back > WINDOW || back > z->total)
             return 0;
-        while (len--) {
-            made = out->len - start;
-            if ((size_t)dist <= made)
-                out->data[out->len] = out->data[out->len - (size_t)dist];
-            else
-                out->data[out->len] = (char)z->window[(z->total - ((size_t)dist - made)) & (WINDOW - 1)];
-            out->len++;
-        }
+        /* The bytes still in earlier messages, then the ones this message made. */
+        for (; len && (size_t)dist > made; len--, made++)
+            out->data[out->len++] = (char)z->window[(z->total - ((size_t)dist - made)) & (WINDOW - 1)];
+        for (; len; len--, out->len++)
+            out->data[out->len] = out->data[out->len - (size_t)dist];
     }
 }
 
@@ -264,7 +261,7 @@ int inflate_complete(const unsigned char *in, size_t n)
 int inflate_message(inflate_t *z, const unsigned char *in, size_t n, sb_t *out)
 {
     bits_t b = {in, in + n, 0, 0, 0};
-    size_t start = out->len, made;
+    size_t start = out->len, made, keep;
 
     if (!z->fixed_ready)
         fixed_codes(z);
@@ -289,10 +286,14 @@ int inflate_message(inflate_t *z, const unsigned char *in, size_t n, sb_t *out)
             return 0;
         z->done = last;
     }
-    /* Keep the tail for the next message's matches. */
+    /* Keep the tail for the next message's matches: the window is a ring, filled in up to two copies. */
     made = out->len - start;
-    for (size_t k = made > WINDOW ? made - WINDOW : 0; k < made; k++)
-        z->window[(z->total + k) & (WINDOW - 1)] = (unsigned char)out->data[start + k];
+    keep = made > WINDOW ? WINDOW : made;
+    if (keep) {
+        size_t at = (size_t)((z->total + made - keep) & (WINDOW - 1)), first = WINDOW - at < keep ? WINDOW - at : keep;
+        memcpy(z->window + at, out->data + out->len - keep, first);
+        memcpy(z->window, out->data + out->len - keep + first, keep - first);
+    }
     z->total += made;
     if (out->data)
         out->data[out->len] = 0;
