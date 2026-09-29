@@ -102,101 +102,34 @@ target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDO
 target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid)
 
 enable_testing()
-function(silicord_test name)
-  add_executable(${name} tests/${name}.c)
-  silicord_no_crt(${name})
-  target_include_directories(${name} PRIVATE tests)
-  target_link_options(${name} PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
-  target_link_libraries(${name} PRIVATE silicord_core kernel32 ${ARGN})
+# tests/<name>_test.c, built like the client; extra arguments are libraries to link.
+function(silicord_test_exe name)
+  add_executable(${name}_test tests/${name}_test.c)
+  silicord_no_crt(${name}_test)
+  target_include_directories(${name}_test PRIVATE tests)
+  target_link_options(${name}_test PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /MANIFEST:NO)
+  target_link_libraries(${name}_test PRIVATE silicord_core kernel32 ${ARGN})
 endfunction()
 
-silicord_test(stats_test)
-add_test(NAME stats COMMAND stats_test)
+# The same, run as test <name>.
+function(silicord_test name)
+  silicord_test_exe(${name} ${ARGN})
+  add_test(NAME ${name} COMMAND ${name}_test)
+endfunction()
 
-silicord_test(str_test)
-add_test(NAME str COMMAND str_test)
-
-silicord_test(json_test)
-add_test(NAME json COMMAND json_test)
-
-silicord_test(crypto_test bcrypt crypt32)
-add_test(NAME crypto COMMAND crypto_test)
-
-silicord_test(msg_test)
-add_test(NAME msg COMMAND msg_test)
-
-silicord_test(model_test)
-add_test(NAME model COMMAND model_test)
-
-silicord_test(md_test)
-add_test(NAME md COMMAND md_test)
-
-silicord_test(profile_test)
-add_test(NAME profile COMMAND profile_test)
-
-silicord_test(command_test)
-add_test(NAME command COMMAND command_test)
-
-silicord_test(aes_test)
-add_test(NAME aes COMMAND aes_test)
-
-silicord_test(dave_test bcrypt)
-add_test(NAME dave COMMAND dave_test)
-
-silicord_test(mls_schedule_test bcrypt)
-add_test(NAME mls_schedule COMMAND mls_schedule_test)
-silicord_test(mls_tree_test bcrypt)
-add_test(NAME mls_tree COMMAND mls_tree_test)
-silicord_test(mls_path_test bcrypt)
-add_test(NAME mls_path COMMAND mls_path_test)
-silicord_test(mls_msg_test bcrypt)
-add_test(NAME mls_msg COMMAND mls_msg_test)
-silicord_test(mls_group_test bcrypt)
-add_test(NAME mls_group COMMAND mls_group_test)
-silicord_test(dave_session_test bcrypt)
-add_test(NAME dave_session COMMAND dave_session_test)
-silicord_test(rtp_test)
-add_test(NAME rtp COMMAND rtp_test)
-silicord_test(opus_test)
-add_test(NAME opus COMMAND opus_test)
-silicord_test(vp8_rtp_test)
-add_test(NAME vp8_rtp COMMAND vp8_rtp_test)
-silicord_test(mixer_test)
-add_test(NAME mixer COMMAND mixer_test)
-
-silicord_test(mls_crypto_test bcrypt)
-add_test(NAME mls_crypto COMMAND mls_crypto_test)
-
-silicord_test(hpke_test)
-add_test(NAME hpke COMMAND hpke_test)
-
-silicord_test(p256_test)
-add_test(NAME p256 COMMAND p256_test)
-
-silicord_test(sha2_test)
-add_test(NAME sha2 COMMAND sha2_test)
-
-silicord_test(search_test)
-add_test(NAME search COMMAND search_test)
-
-silicord_test(apng_test)
-add_test(NAME apng COMMAND apng_test)
-
-silicord_test(inflate_test)
-add_test(NAME inflate COMMAND inflate_test)
-
-silicord_test(emoji_test)
-add_test(NAME emoji COMMAND emoji_test)
-
-silicord_test(memberlist_test)
-add_test(NAME memberlist COMMAND memberlist_test)
-
-silicord_test(render_test ole32 gdi32 user32 dwrite windowscodecs)
+foreach(name stats str json msg model md profile command aes rtp opus vp8_rtp mixer hpke p256 sha2 search apng inflate
+             emoji memberlist)
+  silicord_test(${name})
+endforeach()
+foreach(name dave mls_schedule mls_tree mls_path mls_msg mls_group dave_session mls_crypto)
+  silicord_test(${name} bcrypt)
+endforeach()
+silicord_test(crypto bcrypt crypt32)
+silicord_test(render ole32 gdi32 user32 dwrite windowscodecs)
 target_sources(render_test PRIVATE src/render.cpp)
-add_test(NAME render COMMAND render_test)
 
 # The QR test needs an independent decoder: pip install numpy zxing-cpp
-silicord_test(qr_test)
+silicord_test_exe(qr)
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
   add_test(NAME qr COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/qr_check.py $<TARGET_FILE:qr_test>)
