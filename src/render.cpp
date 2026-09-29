@@ -201,7 +201,6 @@ extern "C" int r_begin(HDC dc, int w, int h)
         g_active = 0;
         return 0;
     }
-    (void)dc;
     g_w = w;
     g_h = h;
     g_bh = imin(BAND, h - g_y0);
