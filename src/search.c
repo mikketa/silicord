@@ -1,19 +1,15 @@
 #include "search.h"
 #include "msg.h"
+#include "str.h"
 
 static const char *const k_keys[] = {"from", "mentions", "has", "in", "before", "after", "during", "pinned"};
-
-static int lower(int c)
-{
-    return c >= 'A' && c <= 'Z' ? c + 32 : c;
-}
 
 /* The filter named by s[0..n) ("from", "has"...), or -1. */
 static int key_of(const char *s, size_t n)
 {
     for (int k = 0; k < (int)(sizeof k_keys / sizeof *k_keys); k++) {
         size_t i = 0;
-        while (i < n && k_keys[k][i] && lower((unsigned char)s[i]) == k_keys[k][i])
+        while (i < n && k_keys[k][i] && ascii_lower((unsigned char)s[i]) == k_keys[k][i])
             i++;
         if (i == n && !k_keys[k][i])
             return k;

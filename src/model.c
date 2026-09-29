@@ -2,6 +2,7 @@
 #include "mem.h"
 #include "msg.h"
 #include "sc_asm.h"
+#include "str.h"
 
 #define PERM_ADMINISTRATOR 0x8ull
 #define PERM_VIEW_CHANNEL 0x400ull
@@ -46,15 +47,6 @@ static void get_keys(json_t obj, const char *const *keys, json_t *vals, int n)
         for (int i = 0; i < n; i++)
             if (!vals[i].p && json_str_eq(k, keys[i]))
                 vals[i] = v; /* the first one, as json_get finds */
-}
-
-static int str_eq(const char *a, const char *b)
-{
-    while (*a && *a == *b) {
-        a++;
-        b++;
-    }
-    return *a == *b;
 }
 
 static int str_eq_n(const char *a, const char *b, size_t n)

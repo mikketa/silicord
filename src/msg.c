@@ -2,6 +2,7 @@
 #include "md.h"
 #include "mem.h"
 #include "sc_asm.h"
+#include "str.h"
 
 #define REPLY_SNIPPET 100
 
@@ -37,13 +38,6 @@ static int same(const char *a, const char *b, size_t n)
 }
 
 static int get_num(json_t obj, const char *key);
-
-static int str_same(const char *a, const char *b)
-{
-    while (*a && *a == *b)
-        a++, b++;
-    return *a == *b;
-}
 
 /* Display name of a user object: global_name, else username. */
 static void user_name(json_t user, sb_t *out)
@@ -807,7 +801,7 @@ int msg_parse(json_t obj, msg_t *out)
             user_name(who, &whom);
             if (json_get(who, "id", &id))
                 json_raw(id, aid, sizeof aid);
-            self = aid[0] && str_same(aid, out->author_id);
+            self = aid[0] && str_eq(aid, out->author_id);
         }
         if (type == TYPE_RECIPIENT_REMOVE && self) {
             set_system(out, "left the group.");
@@ -973,7 +967,7 @@ msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me)
         json_raw(v, b->channel_id, sizeof b->channel_id);
     if (json_get(d, "user_id", &v))
         json_raw(v, user, sizeof user);
-    b->mine = me && me[0] && str_same(user, me);
+    b->mine = me && me[0] && str_eq(user, me);
     m->reactions = mem_alloc(sizeof *m->reactions);
     r = &m->reactions[0];
     if (json_get(emoji, "id", &v) && json_type(v) == JSON_STRING)
@@ -1000,7 +994,7 @@ msg_batch_t *msg_batch_poll_vote(json_t d, int delta, const char *me)
         json_raw(v, b->channel_id, sizeof b->channel_id);
     if (json_get(d, "user_id", &v))
         json_raw(v, user, sizeof user);
-    b->mine = me && me[0] && str_same(user, me);
+    b->mine = me && me[0] && str_eq(user, me);
     b->total = get_num(d, "answer_id");
     b->n = 1;
     return b;

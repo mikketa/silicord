@@ -1,10 +1,6 @@
 #include "emoji.h"
 #include "md.h"
-
-static char lower(char c)
-{
-    return c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c;
-}
+#include "str.h"
 
 static int name_char(char c)
 {
@@ -119,7 +115,7 @@ int emoji_matches(int i, const char *query)
         return 1;
     for (const char *start = p; *p; p++) {
         size_t k = 0;
-        while (query[k] && lower(p[k]) == lower(query[k]))
+        while (query[k] && ascii_lower(p[k]) == ascii_lower(query[k]))
             k++;
         if (!query[k]) {
             if (p == start || p[-1] == ' ')

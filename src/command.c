@@ -1,12 +1,8 @@
 #include <windows.h>
 #include "command.h"
+#include "str.h"
 
 #define MAX_OPTS 25 /* Discord's limit per command */
-
-static int lower(int c)
-{
-    return c >= 'A' && c <= 'Z' ? c + 32 : c;
-}
 
 /* The NUL-terminated `a` equals the n bytes at s, ignoring ASCII case. */
 static int same_ci(const char *a, const char *s, size_t n)
@@ -14,7 +10,7 @@ static int same_ci(const char *a, const char *s, size_t n)
     size_t k;
 
     for (k = 0; k < n && a[k]; k++)
-        if (lower((unsigned char)a[k]) != lower((unsigned char)s[k]))
+        if (ascii_lower((unsigned char)a[k]) != ascii_lower((unsigned char)s[k]))
             return 0;
     return k == n && !a[k];
 }
@@ -34,7 +30,7 @@ static int name_is(json_t v, const char *s, size_t n)
     if (json_type(v) != JSON_STRING || name_len(v) != n)
         return 0;
     for (size_t k = 0; k < n; k++)
-        if (lower((unsigned char)v.p[1 + k]) != lower((unsigned char)s[k]))
+        if (ascii_lower((unsigned char)v.p[1 + k]) != ascii_lower((unsigned char)s[k]))
             return 0;
     return 1;
 }
