@@ -470,13 +470,11 @@ unsigned model_role_color(const model_t *m, int g, const char *roles)
  * animated emoji, or a sticker's format_type. Unavailable ones are left out.
  */
 
-static int packed_next(const char *base, unsigned *cursor, model_emoji_t *out);
-
 static unsigned pack_emojis(model_t *m, json_t list, int stickers)
 {
     sb_t packed = {0};
     json_iter_t it;
-    json_t e, v;
+    json_t e, v, idv;
     unsigned off;
 
     json_iter(list, &it);
@@ -484,10 +482,9 @@ static unsigned pack_emojis(model_t *m, json_t list, int stickers)
         char id[24] = "", flag[4] = " 0 ";
         sb_t name = {0};
         long long format = 0;
-        if (!json_get(e, "id", &v) || (json_get(e, "available", &v) && json_type(v) == JSON_FALSE))
+        if (!json_get(e, "id", &idv) || (json_get(e, "available", &v) && json_type(v) == JSON_FALSE))
             continue;
-        json_get(e, "id", &v);
-        json_raw(v, id, sizeof id);
+        json_raw(idv, id, sizeof id);
         if (json_get(e, "name", &v))
             json_str(v, &name);
         if (!name.len) {
@@ -513,20 +510,6 @@ static unsigned pack_emojis(model_t *m, json_t list, int stickers)
     sb_addn(&m->strings, "", 1);
     sb_free(&packed);
     return off;
-}
-
-int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
-{
-    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].emojis)
-        return 0;
-    return packed_next(m->strings.data + m->guilds[g].emojis, cursor, out);
-}
-
-int model_sticker_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
-{
-    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].stickers)
-        return 0;
-    return packed_next(m->strings.data + m->guilds[g].stickers, cursor, out);
 }
 
 static int packed_next(const char *base, unsigned *cursor, model_emoji_t *out)
@@ -555,6 +538,20 @@ static int packed_next(const char *base, unsigned *cursor, model_emoji_t *out)
     out->name_len = (int)(p - out->name);
     *cursor = (unsigned)(p - base) + (*p == '\n');
     return 1;
+}
+
+int model_emoji_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
+{
+    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].emojis)
+        return 0;
+    return packed_next(m->strings.data + m->guilds[g].emojis, cursor, out);
+}
+
+int model_sticker_next(const model_t *m, int g, unsigned *cursor, model_emoji_t *out)
+{
+    if (g < 0 || (unsigned)g >= m->nguilds || !m->guilds[g].stickers)
+        return 0;
+    return packed_next(m->strings.data + m->guilds[g].stickers, cursor, out);
 }
 
 /*
