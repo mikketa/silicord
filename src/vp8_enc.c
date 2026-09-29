@@ -1,3 +1,4 @@
+#include <emmintrin.h>
 #include <string.h>
 #include "vp8_enc.h"
 #include "vp8_int.h"
@@ -370,14 +371,17 @@ static int write_block(be_t *e, const unsigned char (*probs)[3][11], int ctx, in
 
 /* ---- Macroblocks ---- */
 
+/* The sum of absolute differences of two w x h blocks (w is 16 or 8), a row per SSE2 instruction. */
 static int sad(const unsigned char *a, int as, const unsigned char *b, int bs, int w, int h)
 {
-    int s = 0;
+    __m128i s = _mm_setzero_si128();
 
-    for (int y = 0; y < h; y++, a += as, b += bs)
-        for (int x = 0; x < w; x++)
-            s += a[x] > b[x] ? a[x] - b[x] : b[x] - a[x];
-    return s;
+    for (int y = 0; y < h; y++, a += as, b += bs) {
+        __m128i ra = w == 16 ? _mm_loadu_si128((const __m128i *)a) : _mm_loadl_epi64((const __m128i *)a);
+        __m128i rb = w == 16 ? _mm_loadu_si128((const __m128i *)b) : _mm_loadl_epi64((const __m128i *)b);
+        s = _mm_add_epi64(s, _mm_sad_epu8(ra, rb));
+    }
+    return _mm_cvtsi128_si32(s) + _mm_cvtsi128_si32(_mm_srli_si128(s, 8));
 }
 
 static short chroma_half(int v)
