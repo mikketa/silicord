@@ -83,9 +83,39 @@ void vp8i_iwht(short *coeffs)
 }
 
 /* Adds a block's inverse DCT to the prediction already at dst. */
+/* (x * SIN) >> 16 for 16-bit x: SIN does not fit a signed 16-bit factor, so x * (SIN - 65536) >> 16, plus x. */
+static __m128i mul_sin(__m128i x)
+{
+    return _mm_add_epi16(_mm_mulhi_epi16(x, _mm_set1_epi16((short)(SIN - 65536))), x);
+}
+
+/* x + ((x * COS_M1) >> 16) */
+static __m128i mul_cos(__m128i x)
+{
+    return _mm_add_epi16(x, _mm_mulhi_epi16(x, _mm_set1_epi16(COS_M1)));
+}
+
+/* Sign-extends the four low 16-bit lanes to 32 bits. */
+static __m128i widen(__m128i x)
+{
+    return _mm_srai_epi32(_mm_unpacklo_epi16(x, x), 16);
+}
+
+/* 4x4 of 16-bit lanes, rows in the low halves of r[0..3], transposed into the same. */
+static void transpose4(__m128i r[4])
+{
+    __m128i a = _mm_unpacklo_epi16(r[0], r[1]), b = _mm_unpacklo_epi16(r[2], r[3]);
+    __m128i lo = _mm_unpacklo_epi32(a, b), hi = _mm_unpackhi_epi32(a, b);
+
+    r[0] = lo;
+    r[1] = _mm_srli_si128(lo, 8);
+    r[2] = hi;
+    r[3] = _mm_srli_si128(hi, 8);
+}
+
 void vp8i_idct_add(unsigned char *dst, int stride, const short *in)
 {
-    short tmp[16];
+    __m128i zero = _mm_setzero_si128(), r[4], a1, b1, c1, d1, out[4];
     int ac = 0;
 
     for (int i = 1; i < 16; i++)
@@ -93,30 +123,54 @@ void vp8i_idct_add(unsigned char *dst, int stride, const short *in)
     if (!ac) {
         /* No AC coefficients (none at all in a skipped macroblock): every pixel moves by the same amount. */
         int dc = (in[0] + 4) >> 3;
-        if (dc)
-            for (int i = 0; i < 4; i++, dst += stride)
-                for (int j = 0; j < 4; j++)
-                    dst[j] = vp8i_clamp255(dst[j] + dc);
+        if (dc) {
+            __m128i d = _mm_set1_epi16((short)dc);
+            for (int i = 0; i < 4; i++, dst += stride) {
+                __m128i px = _mm_unpacklo_epi8(_mm_cvtsi32_si128(vp8i_load4(dst)), zero);
+                int v = _mm_cvtsi128_si32(_mm_packus_epi16(_mm_add_epi16(px, d), zero));
+                memcpy(dst, &v, 4);
+            }
+        }
         return;
     }
-    for (int i = 0; i < 4; i++) {
-        int a1 = in[i] + in[8 + i], b1 = in[i] - in[8 + i];
-        int c1 = ((in[4 + i] * SIN) >> 16) - (in[12 + i] + ((in[12 + i] * COS_M1) >> 16));
-        int d1 = (in[4 + i] + ((in[4 + i] * COS_M1) >> 16)) + ((in[12 + i] * SIN) >> 16);
-        tmp[i] = (short)(a1 + d1);
-        tmp[12 + i] = (short)(a1 - d1);
-        tmp[4 + i] = (short)(b1 + c1);
-        tmp[8 + i] = (short)(b1 - c1);
+    /*
+     * Down the columns, on the rows as vectors: the scalar code truncates
+     * this pass to 16 bits, so 16-bit lanes wrap to the same values.
+     */
+    for (int i = 0; i < 4; i++)
+        r[i] = _mm_loadl_epi64((const __m128i *)(in + 4 * i));
+    a1 = _mm_add_epi16(r[0], r[2]);
+    b1 = _mm_sub_epi16(r[0], r[2]);
+    c1 = _mm_sub_epi16(mul_sin(r[1]), mul_cos(r[3]));
+    d1 = _mm_add_epi16(mul_cos(r[1]), mul_sin(r[3]));
+    r[0] = _mm_add_epi16(a1, d1);
+    r[1] = _mm_add_epi16(b1, c1);
+    r[2] = _mm_sub_epi16(b1, c1);
+    r[3] = _mm_sub_epi16(a1, d1);
+    /* Across the rows, in 32 bits: these sums may not fit 16 before (x + 4) >> 3. */
+    transpose4(r);
+    {
+        __m128i x0 = widen(r[0]), x2 = widen(r[2]), four = _mm_set1_epi32(4);
+        /* x + ((x * COS_M1) >> 16) reaches 42,814: that sum is made in 32 bits too. */
+        __m128i cos1 = _mm_add_epi32(widen(r[1]), widen(_mm_mulhi_epi16(r[1], _mm_set1_epi16(COS_M1))));
+        __m128i cos3 = _mm_add_epi32(widen(r[3]), widen(_mm_mulhi_epi16(r[3], _mm_set1_epi16(COS_M1))));
+        a1 = _mm_add_epi32(x0, x2);
+        b1 = _mm_sub_epi32(x0, x2);
+        c1 = _mm_sub_epi32(widen(mul_sin(r[1])), cos3);
+        d1 = _mm_add_epi32(cos1, widen(mul_sin(r[3])));
+        out[0] = _mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(a1, d1), four), 3);
+        out[1] = _mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(b1, c1), four), 3);
+        out[2] = _mm_srai_epi32(_mm_add_epi32(_mm_sub_epi32(b1, c1), four), 3);
+        out[3] = _mm_srai_epi32(_mm_add_epi32(_mm_sub_epi32(a1, d1), four), 3);
     }
+    /* Lane i of out[j] is pixel j of row i: back to rows, added to the prediction and clamped. */
+    for (int j = 0; j < 4; j++)
+        out[j] = _mm_packs_epi32(out[j], zero);
+    transpose4(out);
     for (int i = 0; i < 4; i++, dst += stride) {
-        const short *r = tmp + 4 * i;
-        int a1 = r[0] + r[2], b1 = r[0] - r[2];
-        int c1 = ((r[1] * SIN) >> 16) - (r[3] + ((r[3] * COS_M1) >> 16));
-        int d1 = (r[1] + ((r[1] * COS_M1) >> 16)) + ((r[3] * SIN) >> 16);
-        dst[0] = vp8i_clamp255(dst[0] + ((a1 + d1 + 4) >> 3));
-        dst[3] = vp8i_clamp255(dst[3] + ((a1 - d1 + 4) >> 3));
-        dst[1] = vp8i_clamp255(dst[1] + ((b1 + c1 + 4) >> 3));
-        dst[2] = vp8i_clamp255(dst[2] + ((b1 - c1 + 4) >> 3));
+        __m128i px = _mm_unpacklo_epi8(_mm_cvtsi32_si128(vp8i_load4(dst)), zero);
+        int v = _mm_cvtsi128_si32(_mm_packus_epi16(_mm_add_epi16(px, out[i]), zero));
+        memcpy(dst, &v, 4);
     }
 }
 
