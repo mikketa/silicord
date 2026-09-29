@@ -99,17 +99,20 @@ static int ranges_ok(const dave_range_t *ranges, int nranges, size_t n)
     return 1;
 }
 
-/* Splits a frame into its unencrypted bytes (the AAD) and the rest, in order. */
-static void split(const unsigned char *frame, size_t n, const dave_range_t *ranges, int nranges, sb_t *aad, sb_t *rest)
+/* The frame's unencrypted bytes (the AAD) then the others, in order, into `buf`; returns the AAD's size. */
+static size_t split(const unsigned char *frame, size_t n, const dave_range_t *ranges, int nranges, sb_t *buf)
 {
-    size_t at = 0;
+    size_t at = 0, an;
 
+    for (int i = 0; i < nranges; i++)
+        sb_addn(buf, (const char *)frame + ranges[i].offset, ranges[i].length);
+    an = buf->len;
     for (int i = 0; i < nranges; i++) {
-        sb_addn(rest, (const char *)frame + at, ranges[i].offset - at);
-        sb_addn(aad, (const char *)frame + ranges[i].offset, ranges[i].length);
+        sb_addn(buf, (const char *)frame + at, ranges[i].offset - at);
         at = ranges[i].offset + ranges[i].length;
     }
-    sb_addn(rest, (const char *)frame + at, n - at);
+    sb_addn(buf, (const char *)frame + at, n - at);
+    return an;
 }
 
 /* Puts the processed bytes back around the unencrypted ranges. */
@@ -132,36 +135,35 @@ int dave_encrypt(const unsigned char key[16], unsigned long nonce, const unsigne
                  const dave_range_t *ranges, int nranges, sb_t *out)
 {
     unsigned char iv[12], tag[16];
-    sb_t aad = {0}, plain = {0}, cipher = {0}, supp = {0};
+    sb_t buf = {0}; /* the AAD, then the plaintext encrypted in place */
+    size_t an, start = out->len;
     int ok = 0;
 
     if (!ranges_ok(ranges, nranges, n))
         return 0;
-    split(frame, n, ranges, nranges, &aad, &plain);
+    an = split(frame, n, ranges, nranges, &buf);
     full_nonce(nonce, iv);
-    sb_reserve(&cipher, plain.len);
-    if (aes_gcm_seal(key, 16, iv, aad.data ? aad.data : "", aad.len, plain.data ? plain.data : "", plain.len,
-                     cipher.data, tag, TAG)) {
-        cipher.len = plain.len;
-        interleave(frame, n, ranges, nranges, (const unsigned char *)(cipher.data ? cipher.data : ""), out);
-        sb_addn(&supp, (const char *)tag, TAG);
-        uleb(&supp, nonce);
+    if (aes_gcm_seal(key, 16, iv, buf.data, an, buf.data + an, buf.len - an, buf.data + an, tag, TAG)) {
+        size_t supp;
+        interleave(frame, n, ranges, nranges, (const unsigned char *)buf.data + an, out);
+        supp = out->len;
+        sb_addn(out, (const char *)tag, TAG);
+        uleb(out, nonce);
         for (int i = 0; i < nranges; i++) {
-            uleb(&supp, ranges[i].offset);
-            uleb(&supp, ranges[i].length);
+            uleb(out, ranges[i].offset);
+            uleb(out, ranges[i].length);
         }
-        if (supp.len + 3 <= 255) {
-            unsigned char tail[3] = {(unsigned char)(supp.len + 3), MAGIC, MAGIC};
-            sb_addn(out, supp.data, supp.len);
+        supp = out->len - supp + 3;
+        if (supp <= 255) {
+            unsigned char tail[3] = {(unsigned char)supp, MAGIC, MAGIC};
             sb_addn(out, (const char *)tail, 3);
             ok = 1;
+        } else {
+            out->len = start;
+            out->data[start] = 0;
         }
     }
-    secure_wipe(plain.data, plain.len);
-    sb_free(&aad);
-    sb_free(&plain);
-    sb_free(&cipher);
-    sb_free(&supp);
+    sb_free(&buf);
     return ok;
 }
 
@@ -207,28 +209,21 @@ int dave_frame_nonce(const unsigned char *in, size_t n, unsigned long *nonce)
 int dave_decrypt(dave_ratchet_t *r, const unsigned char *in, size_t n, sb_t *out)
 {
     dave_range_t ranges[16];
-    int nranges, ok = 0;
-    size_t media;
+    int nranges, ok;
+    size_t media, an;
     unsigned long nonce;
     unsigned char key[16], iv[12];
-    sb_t aad = {0}, cipher = {0}, plain = {0};
+    sb_t buf = {0}; /* the AAD, then the ciphertext decrypted in place */
 
     if (!parse(in, n, &nonce, ranges, &nranges, &media) || !dave_ratchet_key(r, nonce >> 24, key))
         return 0;
-    split(in, media, ranges, nranges, &aad, &cipher);
+    an = split(in, media, ranges, nranges, &buf);
     full_nonce(nonce, iv);
-    sb_reserve(&plain, cipher.len);
-    if (aes_gcm_open(key, 16, iv, aad.data ? aad.data : "", aad.len, cipher.data ? cipher.data : "", cipher.len,
-                     plain.data, in + media, TAG)) {
-        plain.len = cipher.len;
-        interleave(in, media, ranges, nranges, (const unsigned char *)(plain.data ? plain.data : ""), out);
-        ok = 1;
-    }
+    ok = aes_gcm_open(key, 16, iv, buf.data, an, buf.data + an, buf.len - an, buf.data + an, in + media, TAG);
+    if (ok)
+        interleave(in, media, ranges, nranges, (const unsigned char *)buf.data + an, out);
     secure_wipe(key, sizeof key);
-    secure_wipe(plain.data, plain.len);
-    sb_free(&aad);
-    sb_free(&cipher);
-    sb_free(&plain);
+    sb_free(&buf);
     return ok;
 }
 
