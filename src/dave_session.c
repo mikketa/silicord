@@ -6,9 +6,6 @@
 
 static const char k_media_label[] = "Discord Secure Frames v0";
 
-/* Opcode 26 carries the KeyPackage as libdave sends it, bare; the protocol text shows it in an MLSMessage. */
-#define KEY_PACKAGE_IN_MLSMESSAGE 0
-
 /* ---- Keys ---- */
 
 static void keyring_free(dave_keyring_t *k)
@@ -134,11 +131,8 @@ static void send_key_package(dave_session_t *s)
     s->has_member = mls_member_create(&s->member, id, 8);
     if (!s->has_member)
         return;
+    /* Bare, as libdave sends it; the protocol text shows it in an MLSMessage. */
     tls_u8(&m, 26);
-    if (KEY_PACKAGE_IN_MLSMESSAGE) {
-        tls_u16(&m, 1);
-        tls_u16(&m, MLS_WIRE_KEY_PACKAGE);
-    }
     sb_addn(&m, s->member.key_package.data, s->member.key_package.len);
     s->send(s->ctx, 1, m.data, m.len);
     sb_free(&m);
@@ -171,7 +165,7 @@ static int group_valid(const dave_session_t *s, const mls_group_t *g, int strict
                 return 0;
     }
     if (strict) {
-        mls_bytes_t list, want;
+        mls_bytes_t list;
         sb_t one = {0};
         int ok;
         mls_bytes_t exts = {(const unsigned char *)g->extensions.data, g->extensions.len};
@@ -179,9 +173,7 @@ static int group_valid(const dave_session_t *s, const mls_group_t *g, int strict
             !mls_extension_find(exts, MLS_EXT_EXTERNAL_SENDERS, &list))
             return 0;
         tls_vec(&one, s->external_sender.data, s->external_sender.len);
-        want.p = (const unsigned char *)one.data;
-        want.n = one.len;
-        ok = list.n == want.n && ct_equal(list.p, want.p, want.n);
+        ok = list.n == one.len && ct_equal(list.p, one.data, one.len);
         sb_free(&one);
         return ok;
     }
@@ -206,13 +198,7 @@ static void execute(dave_session_t *s)
 static void prepare(dave_session_t *s, int transition_id, unsigned long long now_ms)
 {
     new_keyring(s, now_ms);
-    s->pending_transition = transition_id;
-    s->pending_version = s->protocol;
-    s->has_pending = 1;
-    if (transition_id == 0)
-        execute(s);
-    else
-        send_json(s, 23, transition_id);
+    dave_on_prepare_transition(s, transition_id, s->protocol, now_ms);
 }
 
 /* ---- Opcodes ---- */
