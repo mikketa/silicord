@@ -61,6 +61,7 @@ add_library(silicord_core STATIC
   src/vp8_tables.c
   src/model.c
   src/p256.c
+  src/picture.c
   src/msg.c
   src/profile.c
   src/qr.c
@@ -118,7 +119,7 @@ function(silicord_test name)
 endfunction()
 
 foreach(name stats str json msg model md profile command aes rtp opus vp8_rtp mixer hpke p256 sha2 search apng inflate
-             emoji memberlist)
+             emoji memberlist picture)
   silicord_test(${name})
 endforeach()
 foreach(name dave mls_schedule mls_tree mls_path mls_msg mls_group dave_session mls_crypto)

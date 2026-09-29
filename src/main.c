@@ -1,6 +1,5 @@
 /* Silicord - native Discord client for Windows. No C runtime: entry point is `entry`. */
 #include <windows.h>
-#include <emmintrin.h>
 #include "console.h"
 #include "cred.h"
 #include "gw.h"
@@ -18,6 +17,7 @@
 #include "mixer.h"
 #include "opus.h"
 #include "opus_math.h"
+#include "picture.h"
 #include "vp8.h"
 #include "vp8_enc.h"
 #include "camera.h"
@@ -563,9 +563,11 @@ static struct {
     vp8_decoder_t *dec;   /* the UDP thread's alone */
     unsigned *bgra;       /* under g_video_lock */
     int w, h;
+    int tile_w, tile_h;   /* the size the UI shows it at, 0 before it has */
     unsigned serial;      /* bumped with each new picture */
 } g_views[MAX_VIEWS];
 static int g_nviews;
+static picture_scratch_t g_picture_scratch; /* under g_video_lock */
 static CRITICAL_SECTION g_video_lock;
 static volatile LONG g_video_posted;
 
@@ -588,88 +590,28 @@ static int view_get(unsigned long long user)
         g_views[i].dec = NULL;
         g_views[i].bgra = NULL;
         g_views[i].w = g_views[i].h = 0;
+        g_views[i].tile_w = g_views[i].tile_h = 0;
     }
     return i;
 }
 
-static unsigned char clamp8(int v)
-{
-    return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
-}
-
-/* BT.601 studio range, as VP8 video is. */
-/* R, G and B of 8 pixels, 16-bit Y - 16 and the chroma d = U - 128, e = V - 128 of each, clamped to bytes. */
-static __m128i yuv_channel(__m128i y, __m128i a, __m128i b, __m128i k)
-{
-    /* k pairs a factor for y with one for a, then one for b with the rounding. */
-    __m128i one = _mm_set1_epi16(1), kya = _mm_shuffle_epi32(k, 0x00), kb1 = _mm_shuffle_epi32(k, 0xAA);
-    __m128i lo = _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(y, a), kya), _mm_madd_epi16(_mm_unpacklo_epi16(b, one), kb1));
-    __m128i hi = _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(y, a), kya), _mm_madd_epi16(_mm_unpackhi_epi16(b, one), kb1));
-
-    lo = _mm_packs_epi32(_mm_srai_epi32(lo, 8), _mm_srai_epi32(hi, 8));
-    return _mm_packus_epi16(lo, lo);
-}
-
-static __m128i pair16(int a, int b)
-{
-    return _mm_set1_epi32((int)((unsigned)(unsigned short)a | (unsigned)(unsigned short)b << 16));
-}
-
 /*
- * BT.601 video range to BGRA, eight pixels at a time: the products summed in
- * 32 bits by pmaddwd, (sum + 128) >> 8 and clamped by the packs, the same
- * integers as pixel by pixel.
+ * A picture into view i (under g_video_lock), at the size its tile shows
+ * it once the UI has said: the UI then draws it by copying.
  */
-static void i420_to_bgra(const vp8_image_t *img, unsigned *out)
-{
-    const __m128i zero = _mm_setzero_si128(), bias_y = _mm_set1_epi16(16), bias_c = _mm_set1_epi16(128);
-    const __m128i alpha = _mm_set1_epi8(-1);
-    const __m128i kr = _mm_unpacklo_epi64(pair16(298, 409), pair16(0, 128)); /* 298 y + 409 e + 0 d + 128 */
-    const __m128i kg = _mm_unpacklo_epi64(pair16(298, -100), pair16(-208, 128));
-    const __m128i kb = _mm_unpacklo_epi64(pair16(298, 516), pair16(0, 128));
-
-    for (int y = 0; y < img->h; y++) {
-        const unsigned char *py = img->y + y * img->y_stride, *pu = img->u + (y >> 1) * img->uv_stride,
-                            *pv = img->v + (y >> 1) * img->uv_stride;
-        unsigned *o = out + (size_t)y * (size_t)img->w;
-        int x = 0;
-        for (; x + 8 <= img->w; x += 8) {
-            __m128i yy = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(py + x)), zero), bias_y);
-            int u4, v4;
-            __m128i u, v, d, e, r, g, b, bg, ra;
-            memcpy(&u4, pu + (x >> 1), 4);
-            memcpy(&v4, pv + (x >> 1), 4);
-            u = _mm_cvtsi32_si128(u4);
-            v = _mm_cvtsi32_si128(v4);
-            /* Each chroma sample covers two pixels. */
-            d = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_unpacklo_epi8(u, u), zero), bias_c);
-            e = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_unpacklo_epi8(v, v), zero), bias_c);
-            r = yuv_channel(yy, e, d, kr);
-            g = yuv_channel(yy, d, e, kg);
-            b = yuv_channel(yy, d, d, kb);
-            bg = _mm_unpacklo_epi8(b, g);
-            ra = _mm_unpacklo_epi8(r, alpha);
-            _mm_storeu_si128((__m128i *)(o + x), _mm_unpacklo_epi16(bg, ra));
-            _mm_storeu_si128((__m128i *)(o + x + 4), _mm_unpackhi_epi16(bg, ra));
-        }
-        for (; x < img->w; x++) {
-            int c = 298 * (py[x] - 16), d = pu[x >> 1] - 128, e = pv[x >> 1] - 128;
-            o[x] = 0xFF000000u | (unsigned)clamp8((c + 409 * e + 128) >> 8) << 16 |
-                   (unsigned)clamp8((c - 100 * d - 208 * e + 128) >> 8) << 8 | clamp8((c + 516 * d + 128) >> 8);
-        }
-    }
-}
-
-/* A picture into view i (under g_video_lock). */
 static void view_store(int i, const vp8_image_t *img)
 {
-    if (g_views[i].w != img->w || g_views[i].h != img->h) {
+    int w = img->w, h = img->h;
+
+    if (g_views[i].tile_w > 0 && g_views[i].tile_h > 0)
+        picture_fit(img->w, img->h, g_views[i].tile_w, g_views[i].tile_h, &w, &h);
+    if (g_views[i].w != w || g_views[i].h != h) {
         mem_free(g_views[i].bgra);
-        g_views[i].bgra = mem_alloc((size_t)img->w * (size_t)img->h * 4);
-        g_views[i].w = img->w;
-        g_views[i].h = img->h;
+        g_views[i].bgra = mem_alloc((size_t)w * (size_t)h * 4);
+        g_views[i].w = w;
+        g_views[i].h = h;
     }
-    i420_to_bgra(img, g_views[i].bgra);
+    picture_to_bgra(img, w, h, g_views[i].bgra, &g_picture_scratch);
     g_views[i].serial++;
 }
 
@@ -778,17 +720,24 @@ static void views_clear(void)
 {
     while (g_nviews)
         view_remove(g_views[0].user);
+    EnterCriticalSection(&g_video_lock);
+    picture_scratch_free(&g_picture_scratch);
+    LeaveCriticalSection(&g_video_lock);
 }
 
-int app_video_take(const char *user_id, unsigned *serial, void (*take)(void *ctx, const unsigned *bgra, int w, int h),
-                   void *ctx)
+int app_video_take(const char *user_id, int tile_w, int tile_h, unsigned *serial,
+                   void (*take)(void *ctx, const unsigned *bgra, int w, int h), void *ctx)
 {
     unsigned long long u = parse_id(user_id);
     int i, fresh = 0;
 
     InterlockedExchange(&g_video_posted, 0);
     EnterCriticalSection(&g_video_lock);
-    if ((i = view_find(u)) >= 0 && g_views[i].bgra && g_views[i].serial != *serial) {
+    if ((i = view_find(u)) >= 0) {
+        g_views[i].tile_w = tile_w;
+        g_views[i].tile_h = tile_h;
+    }
+    if (i >= 0 && g_views[i].bgra && g_views[i].serial != *serial) {
         *serial = g_views[i].serial;
         take(ctx, g_views[i].bgra, g_views[i].w, g_views[i].h);
         fresh = 1;

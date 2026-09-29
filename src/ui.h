@@ -163,10 +163,11 @@ int app_voice_mic_test(int on);
 /*
  * Someone's latest video picture in our call: calls take() with it (BGRA)
  * when it changed since *serial. Returns 0 without video from them, 1 when
- * unchanged, 2 when copied.
+ * unchanged, 2 when copied. The tile it is shown in (pixels) sets the size
+ * of the next pictures: the one they are drawn at, by copying.
  */
-int app_video_take(const char *user_id, unsigned *serial, void (*take)(void *ctx, const unsigned *bgra, int w, int h),
-                   void *ctx);
+int app_video_take(const char *user_id, int tile_w, int tile_h, unsigned *serial,
+                   void (*take)(void *ctx, const unsigned *bgra, int w, int h), void *ctx);
 /* Someone's volume in calls, in percent (0 to 200; 0 mutes them for you). */
 void app_voice_user_volume(const char *user_id, int percent);
 /* This session's presence: "online", "idle", "dnd" or "invisible", and custom status text (NULL or empty for none). */

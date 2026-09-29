@@ -17,6 +17,7 @@
 #include "img.h"
 #include "md.h"
 #include "memberlist.h"
+#include "picture.h"
 #include "command.h"
 #include "search.h"
 #include "stats.h"
@@ -1344,8 +1345,8 @@ static void copy_picture(void *ctx, const unsigned *bgra, int w, int h)
         memcpy(r_image_bits(*img), bgra, (size_t)w * (size_t)h * 4);
 }
 
-/* Someone's current video picture, or NULL when they show none. */
-static r_image_t *video_picture(const char *user)
+/* Someone's current video picture, or NULL when they show none; tile_w x tile_h is where it goes. */
+static r_image_t *video_picture(const char *user, int tile_w, int tile_h)
 {
     int i, free_slot = -1;
 
@@ -1362,7 +1363,7 @@ static r_image_t *video_picture(const char *user)
         lstrcpynA(g_ui.video[i].user, user, sizeof g_ui.video[i].user);
         g_ui.video[i].serial = 0;
     }
-    if (!app_video_take(user, &g_ui.video[i].serial, copy_picture, &g_ui.video[i].img)) {
+    if (!app_video_take(user, tile_w, tile_h, &g_ui.video[i].serial, copy_picture, &g_ui.video[i].img)) {
         r_image_free(g_ui.video[i].img);
         g_ui.video[i].img = NULL;
         g_ui.video[i].user[0] = 0;
@@ -1374,17 +1375,14 @@ static r_image_t *video_picture(const char *user)
 /* A participant: their video letterboxed in the tile, or their avatar; name, mute state and speaking ring. */
 static void paint_tile(const voice_t *v, const char *name, const char *avatar, int x, int y, int w, int h, int speaking)
 {
-    r_image_t *pic = video_picture(v->user);
+    r_image_t *pic = video_picture(v->user, w, h);
     int d = (w < h ? w : h) / 2;
 
     r_round(x, y, w, h, S(8), 0xFF111111);
     if (pic) {
-        int pw, ph, fw = w, fh = h;
+        int pw, ph, fw, fh;
         r_image_size(pic, &pw, &ph);
-        if ((long long)pw * h > (long long)ph * w)
-            fh = (int)((long long)w * ph / pw);
-        else
-            fw = (int)((long long)h * pw / ph);
+        picture_fit(pw, ph, w, h, &fw, &fh);
         r_image(pic, x + (w - fw) / 2, y + (h - fh) / 2, fw, fh, S(8));
     } else {
         r_image_t *img = avatar && avatar[0] ? user_avatar(v->user, avatar) : NULL;

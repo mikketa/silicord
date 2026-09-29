@@ -38,6 +38,8 @@ Display name fonts are the only files fetched outside Discord: they come from a 
 
 A frame is drawn in bands of 256 rows through one bitmap as wide as the window: the UI repeats its paint for each band and anything outside it is skipped before any work is done. The bitmap stays around 2 MB instead of a full-window back buffer, and there is no Direct2D device or WARP rasterizer, whose caches used to take 20 to 30 MB.
 
+Video from a call is converted from YUV at the size its tile shows it (`picture.c`: boxes of 2 or 4 pixels averaged in YUV first, then area or bilinear resampling in fixed point), on the thread that decodes it, so the UI draws each picture by copying it.
+
 DirectWrite does not clip to a rectangle, so the pixels a text layout can touch outside the visible area are saved before drawing it and put back after; the same copy gives translucent text. Styled display names are drawn as a coverage mask (white glyphs, grayscale anti-aliasing) and composited with their gradient or effect.
 
 ## Testing
