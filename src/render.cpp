@@ -407,17 +407,28 @@ static void draw_image(const r_image_t *img, float su, float sv, float sw, float
 
     if (!img || !img->pixels || w <= 0 || h <= 0 || !intersect(&r, x, y, w, h))
         return;
+    /* Drawn whole at its own size: each pixel is a source pixel, which is what filtering would give. */
+    int exact = su == 0 && sv == 0 && sw == (float)w && sh == (float)h && img->w == (UINT)w && img->h == (UINT)h;
     for (int yy = r.top; yy < r.bottom; yy++) {
         UINT32 *p = row(yy) + r.left;
         float py = (float)yy + 0.5f, v = sv + (py - (float)y) * ky;
+        const BYTE *src = exact ? img->pixels + ((size_t)(yy - y) * img->w + (size_t)(r.left - x)) * 4 : NULL;
+        /* Rows clear of the corners are covered whole, as rr_cover() would find. */
+        int plain = rad <= 0 || (py - (float)y >= rad + 1 && (float)(y + h) - py >= rad + 1);
 
         for (int xx = r.left; xx < r.right; xx++, p++) {
             float px = (float)xx + 0.5f, u = su + (px - (float)x) * kx, cov = 1;
             unsigned s[4], a, d, out = 0;
 
-            if (rad > 0 && (cov = rr_cover(px, py, (float)x, (float)y, (float)(x + w), (float)(y + h), rad)) <= 0)
+            if (!plain && (cov = rr_cover(px, py, (float)x, (float)y, (float)(x + w), (float)(y + h), rad)) <= 0)
                 continue;
-            if (shrink)
+            if (exact) {
+                const BYTE *q = src + (size_t)(xx - r.left) * 4;
+                s[0] = q[0];
+                s[1] = q[1];
+                s[2] = q[2];
+                s[3] = q[3];
+            } else if (shrink)
                 sample_box(img, u - kx / 2, v - ky / 2, u + kx / 2, v + ky / 2, s);
             else
                 sample_bilinear(img, u, v, s);
