@@ -11,12 +11,41 @@ typedef char role_id_t[24];
 
 /* ---- JSON helpers ---- */
 
-/* READY for user sessions may nest guild fields under "properties". */
+/* READY for user sessions may nest guild fields under "properties". One pass over obj, which can be big. */
 static int field(json_t obj, const char *key, json_t *out)
 {
-    json_t props;
+    json_iter_t it;
+    json_t k, v, props = {0};
 
-    return json_get(obj, key, out) || (json_get(obj, "properties", &props) && json_get(props, key, out));
+    if (json_type(obj) != JSON_OBJECT)
+        return 0;
+    json_iter(obj, &it);
+    while (json_next(&it, &k, &v)) {
+        if (json_str_eq(k, key)) {
+            *out = v;
+            return 1;
+        }
+        if (!props.p && json_str_eq(k, "properties"))
+            props = v;
+    }
+    return json_get(props, key, out);
+}
+
+/* json_get of n keys in one pass over obj: vals[i] is keys[i]'s value, empty (p NULL) if it is missing. */
+static void get_keys(json_t obj, const char *const *keys, json_t *vals, int n)
+{
+    json_iter_t it;
+    json_t k, v;
+
+    for (int i = 0; i < n; i++)
+        vals[i] = (json_t){0};
+    if (json_type(obj) != JSON_OBJECT)
+        return;
+    json_iter(obj, &it);
+    while (json_next(&it, &k, &v))
+        for (int i = 0; i < n; i++)
+            if (!vals[i].p && json_str_eq(k, keys[i]))
+                vals[i] = v; /* the first one, as json_get finds */
 }
 
 static int str_eq(const char *a, const char *b)
@@ -110,13 +139,13 @@ static void copy_id(char *dst, const char *src, size_t size)
  * kept for every channel, the hidden ones too, so that a change of our roles
  * or of the permissions shows or hides channels without asking Discord.
  */
-static unsigned pack_overwrites(model_t *m, json_t ch)
+static unsigned pack_overwrites(model_t *m, json_t ows)
 {
-    json_t ows, ow, v;
+    json_t ow, v;
     json_iter_t it;
     unsigned off;
 
-    if (!json_get(ch, "permission_overwrites", &ows) || json_type(ows) != JSON_ARRAY || !json_count(ows))
+    if (json_type(ows) != JSON_ARRAY || !json_count(ows))
         return 0;
     off = (unsigned)m->strings.len;
     json_iter(ows, &it);
@@ -562,22 +591,24 @@ static int is_voice(int type)
 
 static channel_t make_channel(model_t *m, json_t ch)
 {
+    enum { C_ID, C_PARENT, C_LAST, C_TYPE, C_POSITION, C_NAME, C_TOPIC, C_OVERWRITES, C_COUNT };
+    static const char *const keys[C_COUNT] = {"id",       "parent_id", "last_message_id", "type",
+                                              "position", "name",      "topic",           "permission_overwrites"};
     channel_t c = {0};
-    json_t v;
+    json_t k[C_COUNT];
 
-    if (json_get(ch, "id", &v))
-        json_raw(v, c.id, sizeof c.id);
-    if (json_get(ch, "parent_id", &v))
-        json_raw(v, c.parent, sizeof c.parent);
-    if (json_get(ch, "last_message_id", &v))
-        json_raw(v, c.last_message, sizeof c.last_message);
-    c.type = json_get(ch, "type", &v) ? (int)to_i64(v) : 0;
-    c.position = json_get(ch, "position", &v) ? to_i64(v) : 0;
-    if (json_get(ch, "name", &v) && json_type(v) == JSON_STRING)
-        c.name = add_str(m, v);
-    if (json_get(ch, "topic", &v) && json_type(v) == JSON_STRING && v.end - v.p > 2)
-        c.topic = add_str(m, v);
-    c.overwrites = pack_overwrites(m, ch);
+    /* READY has thousands of channels: one pass over each. Missing keys read as empty or 0. */
+    get_keys(ch, keys, k, C_COUNT);
+    json_raw(k[C_ID], c.id, sizeof c.id);
+    json_raw(k[C_PARENT], c.parent, sizeof c.parent);
+    json_raw(k[C_LAST], c.last_message, sizeof c.last_message);
+    c.type = (int)to_i64(k[C_TYPE]);
+    c.position = to_i64(k[C_POSITION]);
+    if (json_type(k[C_NAME]) == JSON_STRING)
+        c.name = add_str(m, k[C_NAME]);
+    if (json_type(k[C_TOPIC]) == JSON_STRING && k[C_TOPIC].end - k[C_TOPIC].p > 2)
+        c.topic = add_str(m, k[C_TOPIC]);
+    c.overwrites = pack_overwrites(m, k[C_OVERWRITES]);
     return c;
 }
 
@@ -804,30 +835,38 @@ static void joined_set(model_t *m, const char *id, int member)
 static void build_guild(model_t *m, unsigned *cap, json_t merged, json_t g, unsigned index, int from_ready,
                         guild_t *out)
 {
-    json_t v, chans, ch;
+    enum { G_ID, G_CHANNELS, G_THREADS, G_PROPS, G_ICON, G_NAME, G_ROLES, G_EMOJIS, G_NOTIFY, G_STICKERS, G_OWNER, G_COUNT };
+    static const char *const keys[G_COUNT] = {"id", "channels", "threads", "properties", "icon", "name", "roles",
+                                              "emojis", "default_message_notifications", "stickers", "owner_id"};
+    json_t k[G_COUNT], ch;
     json_iter_t it;
     role_id_t mine[MAX_ROLES];
     int nmine;
     unsigned total, n = 0;
     channel_t *all;
 
+    /* A guild with its channels is big: one pass over its keys, then field()'s fallback to "properties". */
+    get_keys(g, keys, k, G_COUNT);
+    for (int i = G_ICON; i < G_COUNT; i++)
+        if (!k[i].p)
+            json_get(k[G_PROPS], keys[i], &k[i]);
     *out = (guild_t){0};
     out->folder = -1;
     out->rank = -1;
-    if (json_get(g, "id", &v))
-        json_raw(v, out->id, sizeof out->id);
-    if (field(g, "icon", &v))
-        json_raw(v, out->icon, sizeof out->icon);
-    if (field(g, "name", &v))
-        out->name = add_str(m, v);
-    if (field(g, "roles", &v))
-        out->roles = pack_roles(m, v);
-    if (field(g, "emojis", &v))
-        out->emojis = pack_emojis(m, v, 0);
-    out->default_notify = field(g, "default_message_notifications", &v) && to_i64(v) == 1 ? NOTIFY_MENTIONS : NOTIFY_ALL;
-    if (field(g, "stickers", &v))
-        out->stickers = pack_emojis(m, v, 1);
-    out->owner = field(g, "owner_id", &v) && id_eq(v, m->user_id);
+    if (k[G_ID].p)
+        json_raw(k[G_ID], out->id, sizeof out->id);
+    if (k[G_ICON].p)
+        json_raw(k[G_ICON], out->icon, sizeof out->icon);
+    if (k[G_NAME].p)
+        out->name = add_str(m, k[G_NAME]);
+    if (k[G_ROLES].p)
+        out->roles = pack_roles(m, k[G_ROLES]);
+    if (k[G_EMOJIS].p)
+        out->emojis = pack_emojis(m, k[G_EMOJIS], 0);
+    out->default_notify = k[G_NOTIFY].p && to_i64(k[G_NOTIFY]) == 1 ? NOTIFY_MENTIONS : NOTIFY_ALL;
+    if (k[G_STICKERS].p)
+        out->stickers = pack_emojis(m, k[G_STICKERS], 1);
+    out->owner = k[G_OWNER].p && id_eq(k[G_OWNER], m->user_id);
     nmine = my_roles(merged, g, index, m->user_id, mine);
     if (nmine < 0 && !from_ready)
         nmine = 0; /* just joined: no roles yet */
@@ -835,27 +874,21 @@ static void build_guild(model_t *m, unsigned *cap, json_t merged, json_t g, unsi
     out->my_roles = roles_string(m, mine, nmine);
     compute_perms(m, out);
 
-    total = json_get(g, "channels", &chans) ? (unsigned)json_count(chans) : 0;
-    if (json_get(g, "threads", &v))
-        total += (unsigned)json_count(v);
+    total = (unsigned)json_count(k[G_CHANNELS]) + (unsigned)json_count(k[G_THREADS]);
     all = mem_alloc((total + 1) * sizeof *all);
-    if (json_get(g, "channels", &chans)) {
-        json_iter(chans, &it);
-        while (n < total && json_next(&it, NULL, &ch))
-            all[n++] = make_channel(m, ch);
-    }
+    json_iter(k[G_CHANNELS], &it);
+    while (n < total && json_next(&it, NULL, &ch))
+        all[n++] = make_channel(m, ch);
     /* Active threads we joined; they show when their channel does. */
-    if (json_get(g, "threads", &chans)) {
-        json_iter(chans, &it);
-        while (n < total && json_next(&it, NULL, &ch)) {
-            json_t member, meta, arch;
-            if (!json_get(ch, "member", &member))
-                continue;
-            all[n] = make_channel(m, ch);
-            joined_set(m, all[n].id, 1);
-            if (!(json_get(ch, "thread_metadata", &meta) && json_get(meta, "archived", &arch) && is_true(arch)))
-                n++;
-        }
+    json_iter(k[G_THREADS], &it);
+    while (n < total && json_next(&it, NULL, &ch)) {
+        json_t member, meta, arch;
+        if (!json_get(ch, "member", &member))
+            continue;
+        all[n] = make_channel(m, ch);
+        joined_set(m, all[n].id, 1);
+        if (!(json_get(ch, "thread_metadata", &meta) && json_get(meta, "archived", &arch) && is_true(arch)))
+            n++;
     }
     place_channels(m, cap, out, all, n);
     mem_free(all);
@@ -1055,17 +1088,17 @@ static const char *dm_key(const channel_t *c)
     return c->last_message[0] ? c->last_message : c->id;
 }
 
-static void add_dms(model_t *m, unsigned *cap, json_t d)
+/* READY's private_channels, whose recipient ids point into its `users`. */
+static void add_dms(model_t *m, unsigned *cap, json_t list, json_t users)
 {
-    json_t list, ch, users = {0};
+    json_t ch;
     json_iter_t it;
     unsigned total, n = 0;
     channel_t *tmp;
 
     m->dm_first = m->nchannels;
-    if (!json_get(d, "private_channels", &list))
+    if (!list.p)
         return;
-    json_get(d, "users", &users);
     total = (unsigned)json_count(list);
     tmp = mem_alloc((total + 1) * sizeof *tmp);
     json_iter(list, &it);
@@ -1198,12 +1231,10 @@ int model_unread(const model_t *m, unsigned i)
 
 /* ---- Read state and mutes ---- */
 
-/* READY sends these either as {"entries": [...]} or as a bare array. */
-static int entries(json_t d, const char *key, json_t *out)
+/* READY sends its read states and settings either as {"entries": [...]} or as a bare array; v is empty if missing. */
+static int entries(json_t v, json_t *out)
 {
-    json_t v;
-
-    if (!json_get(d, key, &v))
+    if (!v.p)
         return 0;
     if (json_type(v) == JSON_OBJECT)
         return json_get(v, "entries", out);
@@ -1225,8 +1256,8 @@ static int read_entry(const chan_index_t *ix, const char *id, json_t last, json_
     return 1;
 }
 
-/* Read states of unknown channels are kept when some servers are unavailable: they may be theirs. */
-static void apply_read_state(model_t *m, json_t d)
+/* READY's read_state. Those of unknown channels are kept when some servers are unavailable: they may be theirs. */
+static void apply_read_state(model_t *m, json_t reads)
 {
     json_t list, e, v, last, mentions;
     json_iter_t it;
@@ -1234,7 +1265,7 @@ static void apply_read_state(model_t *m, json_t d)
     sb_t orphans = {0};
     chan_index_t ix;
 
-    if (!entries(d, "read_state", &list))
+    if (!entries(reads, &list))
         return;
     index_build(&ix, m);
     json_iter(list, &it);
@@ -1348,13 +1379,14 @@ static void apply_settings_entry(const chan_index_t *ix, json_t e)
     }
 }
 
-static void apply_mutes(model_t *m, json_t d)
+/* READY's user_guild_settings. */
+static void apply_mutes(model_t *m, json_t settings)
 {
     json_t list, e;
     json_iter_t it;
     chan_index_t ix;
 
-    if (!entries(d, "user_guild_settings", &list))
+    if (!entries(settings, &list))
         return;
     index_build(&ix, m);
     json_iter(list, &it);
@@ -1434,15 +1466,15 @@ static void read_user_settings(model_t *m, json_t s)
 
 /* ---- READY ---- */
 
-/* Keeps an unavailable server's settings entry ("id\tJSON\n") until it comes back. */
-static void add_pending(sb_t *pending, json_t d, const char *id)
+/* Keeps an unavailable server's entry of READY's user_guild_settings ("id\tJSON\n") until it comes back. */
+static void add_pending(sb_t *pending, json_t settings, const char *id)
 {
     json_t list, e, v;
     json_iter_t it;
 
     sb_add(pending, id);
     sb_add(pending, "\t");
-    if (entries(d, "user_guild_settings", &list)) {
+    if (entries(settings, &list)) {
         json_iter(list, &it);
         while (json_next(&it, NULL, &e))
             if (json_get(e, "guild_id", &v) && id_eq(v, id)) {
@@ -1459,15 +1491,20 @@ static void add_pending(sb_t *pending, json_t d, const char *id)
 
 model_t *model_from_ready(json_t d)
 {
+    enum { R_USER, R_SETTINGS, R_GUILDS, R_MERGED, R_DMS, R_USERS, R_READS, R_GUILD_SETTINGS, R_COUNT };
+    static const char *const keys[R_COUNT] = {"user", "user_settings", "guilds", "merged_members",
+                                              "private_channels", "users", "read_state", "user_guild_settings"};
     model_t *m = mem_alloc(sizeof *m);
-    json_t user, guilds, g, v, merged = {0};
+    json_t r[R_COUNT], user, g, v;
     json_iter_t it;
     unsigned cap = 0, total, i = 0;
     sb_t pending = {0};
 
+    /* READY is megabytes: one pass over its keys, instead of a json_get (a scan) per key. */
+    get_keys(d, keys, r, R_COUNT);
+    user = r[R_USER];
     sb_addn(&m->strings, "", 1); /* offset 0 is the empty string */
-    json_get(d, "merged_members", &merged); /* looked up once: READY is megabytes */
-    if (json_get(d, "user", &user)) {
+    if (user.p) {
         if (json_get(user, "id", &v))
             json_raw(v, m->user_id, sizeof m->user_id);
         if (json_get(user, "avatar", &v))
@@ -1477,23 +1514,23 @@ model_t *model_from_ready(json_t d)
         if (json_get(user, "premium_type", &v))
             m->premium = (int)to_i64(v);
     }
-    if (json_get(d, "user_settings", &v) && json_type(v) == JSON_OBJECT)
-        keep_folder_json(m, v);
+    if (json_type(r[R_SETTINGS]) == JSON_OBJECT)
+        keep_folder_json(m, r[R_SETTINGS]);
 
-    total = json_get(d, "guilds", &guilds) ? (unsigned)json_count(guilds) : 0;
+    total = (unsigned)json_count(r[R_GUILDS]);
     m->guilds = mem_alloc((total + 1) * sizeof *m->guilds);
     if (total) {
-        json_iter(guilds, &it);
+        json_iter(r[R_GUILDS], &it);
         while (json_next(&it, NULL, &g)) {
             if (field(g, "name", &v)) {
                 guild_t *gd = &m->guilds[m->nguilds++];
-                build_guild(m, &cap, merged, g, i, 1, gd);
+                build_guild(m, &cap, r[R_MERGED], g, i, 1, gd);
                 gd->rank = guild_rank(m, gd->id);
                 gd->folder = guild_folder(m, gd->id);
             } else if (json_get(g, "id", &v)) { /* unavailable (an outage): keep its settings for GUILD_CREATE */
                 char id[24];
                 json_raw(v, id, sizeof id);
-                add_pending(&pending, d, id);
+                add_pending(&pending, r[R_GUILD_SETTINGS], id);
             }
             i++;
         }
@@ -1504,11 +1541,11 @@ model_t *model_from_ready(json_t d)
         sb_addn(&m->strings, pending.data, pending.len + 1);
     }
     sb_free(&pending);
-    add_dms(m, &cap, d);
-    apply_read_state(m, d);
-    apply_mutes(m, d);
-    if (json_get(d, "user_settings", &v) && json_type(v) == JSON_OBJECT)
-        read_user_settings(m, v);
+    add_dms(m, &cap, r[R_DMS], r[R_USERS]);
+    apply_read_state(m, r[R_READS]);
+    apply_mutes(m, r[R_GUILD_SETTINGS]);
+    if (json_type(r[R_SETTINGS]) == JSON_OBJECT)
+        read_user_settings(m, r[R_SETTINGS]);
     return m;
 }
 
