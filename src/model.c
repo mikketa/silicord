@@ -1132,6 +1132,60 @@ static channel_t *find_any(model_t *m, const char *id)
     return NULL;
 }
 
+/*
+ * The same lookup through a hash table, for the loops that look up every read
+ * state or notification override: READY has thousands of each, and of channels.
+ * Build it once the channels are in place; they must not move while it is used.
+ */
+typedef struct {
+    model_t *m;
+    unsigned *slot;     /* 1 + the channel's index, the hidden ones after the shown ones; 0 when empty */
+    unsigned mask;
+} chan_index_t;
+
+static unsigned id_hash(const char *id)
+{
+    unsigned h = 2166136261u; /* FNV-1a */
+
+    while (*id)
+        h = (h ^ (unsigned char)*id++) * 16777619u;
+    return h;
+}
+
+static channel_t *index_at(const chan_index_t *ix, unsigned slot)
+{
+    unsigned i = ix->slot[slot] - 1;
+
+    return i < ix->m->nchannels ? &ix->m->channels[i] : &ix->m->hidden[i - ix->m->nchannels];
+}
+
+static void index_build(chan_index_t *ix, model_t *m)
+{
+    unsigned total = m->nchannels + m->nhidden, size = 16;
+
+    while (size < 2 * total)
+        size *= 2;
+    ix->m = m;
+    ix->mask = size - 1;
+    ix->slot = mem_alloc(size * sizeof *ix->slot);
+    for (unsigned i = 0; i < total; i++) {
+        const char *id = i < m->nchannels ? m->channels[i].id : m->hidden[i - m->nchannels].id;
+        unsigned h = id_hash(id) & ix->mask;
+        while (ix->slot[h] && !str_eq(index_at(ix, h)->id, id))
+            h = (h + 1) & ix->mask;
+        if (!ix->slot[h])
+            ix->slot[h] = i + 1; /* a repeated id keeps its first channel, as find_any finds */
+    }
+}
+
+static channel_t *index_find(const chan_index_t *ix, const char *id)
+{
+    for (unsigned h = id_hash(id) & ix->mask; ix->slot[h]; h = (h + 1) & ix->mask)
+        if (str_eq(index_at(ix, h)->id, id))
+            return index_at(ix, h);
+    return NULL;
+}
+
 int model_unread(const model_t *m, unsigned i)
 {
     const channel_t *c = &m->channels[i];
@@ -1158,9 +1212,9 @@ static int entries(json_t d, const char *key, json_t *out)
 }
 
 /* One read state: false when its channel is unknown. */
-static int read_entry(model_t *m, const char *id, json_t last, json_t mentions)
+static int read_entry(const chan_index_t *ix, const char *id, json_t last, json_t mentions)
 {
-    channel_t *c = find_any(m, id);
+    channel_t *c = index_find(ix, id);
 
     if (!c)
         return 0;
@@ -1178,9 +1232,11 @@ static void apply_read_state(model_t *m, json_t d)
     json_iter_t it;
     char id[24];
     sb_t orphans = {0};
+    chan_index_t ix;
 
     if (!entries(d, "read_state", &list))
         return;
+    index_build(&ix, m);
     json_iter(list, &it);
     while (json_next(&it, NULL, &e)) {
         if (!json_get(e, "id", &v))
@@ -1189,7 +1245,7 @@ static void apply_read_state(model_t *m, json_t d)
         last = mentions = (json_t){0};
         json_get(e, "last_message_id", &last);
         json_get(e, "mention_count", &mentions);
-        if (!read_entry(m, id, last, mentions) && m->pending) {
+        if (!read_entry(&ix, id, last, mentions) && m->pending) {
             char raw[24] = "";
             json_raw(last, raw, sizeof raw);
             sb_add(&orphans, id);
@@ -1200,6 +1256,7 @@ static void apply_read_state(model_t *m, json_t d)
             sb_add(&orphans, "\n");
         }
     }
+    mem_free(ix.slot);
     if (orphans.len) {
         m->pending_reads = (unsigned)m->strings.len;
         sb_addn(&m->strings, orphans.data, orphans.len + 1);
@@ -1236,9 +1293,13 @@ static int read_mute(json_t obj, long long *until)
     return 1;
 }
 
-/* One user_guild_settings entry; guild_id null holds the DM overrides. Replaces what was there. */
-static void apply_settings_entry(model_t *m, json_t e)
+/*
+ * One user_guild_settings entry, into the model `ix` indexes; guild_id null holds
+ * the DM overrides. Replaces what was there.
+ */
+static void apply_settings_entry(const chan_index_t *ix, json_t e)
 {
+    model_t *m = ix->m;
     json_t v, overrides, o;
     json_iter_t it;
     char id[24] = "";
@@ -1280,7 +1341,7 @@ static void apply_settings_entry(model_t *m, json_t e)
         if (!json_get(o, "channel_id", &v))
             continue;
         json_raw(v, id, sizeof id);
-        if (!(c = find_any(m, id)))
+        if (!(c = index_find(ix, id)))
             continue;
         c->muted = read_mute(o, &c->mute_until);
         c->notify = notify_level(o);
@@ -1291,12 +1352,15 @@ static void apply_mutes(model_t *m, json_t d)
 {
     json_t list, e;
     json_iter_t it;
+    chan_index_t ix;
 
     if (!entries(d, "user_guild_settings", &list))
         return;
+    index_build(&ix, m);
     json_iter(list, &it);
     while (json_next(&it, NULL, &e))
-        apply_settings_entry(m, e);
+        apply_settings_entry(&ix, e);
+    mem_free(ix.slot);
 }
 
 static int mute_active(int muted, long long until, long long now_ms)
@@ -1561,11 +1625,9 @@ static model_t *replace_guild(model_t *n, const model_t *m, int gi, const guild_
     return with_guild(n, m, gi, g, all, k);
 }
 
-/* Keeps what we knew about a channel (read state, mute) across an update. */
-static void carry_state(channel_t *c, const model_t *m)
+/* Keeps what we knew about a channel (read state, mute) across an update: `o` is its old version, if any. */
+static void carry_state(channel_t *c, const channel_t *o)
 {
-    const channel_t *o = find_any((model_t *)m, c->id);
-
     if (!o)
         return;
     copy_id(c->read, o->read, sizeof c->read);
@@ -1609,7 +1671,7 @@ static model_t *apply_channel(const model_t *m, json_t d, int deleted)
             model_free(n);
             return NULL;
         } else {
-            carry_state(&c, m);
+            carry_state(&c, find_any((model_t *)m, c.id));
             copy_dms(n, &cap, m, old >= 0 ? id : NULL, old >= 0 ? &c : NULL, old >= 0 ? NULL : &c);
         }
         return n;
@@ -1621,7 +1683,7 @@ static model_t *apply_channel(const model_t *m, json_t d, int deleted)
     all = all_channels(m, (unsigned)gi, id, 1, &k);
     if (!deleted) {
         all[k] = make_channel(n, d);
-        carry_state(&all[k], m);
+        carry_state(&all[k], find_any((model_t *)m, all[k].id));
         k++;
     }
     return with_guild(n, m, gi, &m->guilds[gi], all, k);
@@ -1664,6 +1726,7 @@ static void apply_pending(model_t *n, const char *id)
     sb_t rest = {0}, entry = {0}, reads = {0};
     size_t idn = sc_strlen(id);
     json_t e;
+    chan_index_t ix;
 
     while (*p) {
         const char *tab = p, *end;
@@ -1684,8 +1747,9 @@ static void apply_pending(model_t *n, const char *id)
         n->pending = (unsigned)n->strings.len;
         sb_addn(&n->strings, rest.data, rest.len + 1);
     }
+    index_build(&ix, n);
     if (entry.len && json_parse(entry.data, entry.len, &e))
-        apply_settings_entry(n, e);
+        apply_settings_entry(&ix, e);
     /* "channel last_message mentions" lines; last_message "-" when there was none. */
     for (const char *r = reads.data ? reads.data : ""; *r;) {
         char cid[24], last[24];
@@ -1698,12 +1762,13 @@ static void apply_pending(model_t *n, const char *id)
             r++;
         if (*r)
             r++;
-        if ((c = find_any(n, cid)) != NULL) {
+        if ((c = index_find(&ix, cid)) != NULL) {
             if (last[0] != '-')
                 copy_id(c->read, last, sizeof c->read);
             c->mentions = (int)count;
         }
     }
+    mem_free(ix.slot);
     sb_free(&rest);
     sb_free(&entry);
     sb_free(&reads);
@@ -1731,6 +1796,7 @@ static model_t *apply_guild_create(const model_t *m, json_t d)
         unsigned tcap = 0;
         channel_t *all;
         unsigned k;
+        chan_index_t ix;
         build_guild(tmp, &tcap, none, d, 0, 0, &fresh);
         /* The strings it added go to n at the same offsets: n is a copy of m's strings too. */
         sb_addn(&n->strings, tmp->strings.data + m->strings.len, tmp->strings.len - m->strings.len);
@@ -1741,8 +1807,10 @@ static model_t *apply_guild_create(const model_t *m, json_t d)
             all[i] = tmp->channels[fresh.first + i];
         for (unsigned i = 0; i < fresh.hidden_count; i++)
             all[fresh.count + i] = tmp->hidden[fresh.hidden_first + i];
+        index_build(&ix, (model_t *)m);
         for (unsigned i = 0; i < k; i++)
-            carry_state(&all[i], m);
+            carry_state(&all[i], index_find(&ix, all[i].id));
+        mem_free(ix.slot);
         model_free(tmp);
         if (gi >= 0) {
             fresh.muted = m->guilds[gi].muted;
@@ -1903,8 +1971,11 @@ static model_t *apply_emojis(const model_t *m, json_t d, int stickers)
 static model_t *apply_settings(const model_t *m, json_t d)
 {
     model_t *n = clone(m);
+    chan_index_t ix;
 
-    apply_settings_entry(n, d);
+    index_build(&ix, n);
+    apply_settings_entry(&ix, d);
+    mem_free(ix.slot);
     return n;
 }
 
