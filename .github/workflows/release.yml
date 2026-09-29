@@ -86,5 +86,7 @@ jobs:
           A native Discord client for Windows: a single portable ``silicord.exe``, see the [README](https://github.com/mikketa/silicord#readme) for what it does and how to use it.
 
           Built by GitHub Actions from $env:GITHUB_SHA. $signed See the [Code Signing Policy](https://github.com/mikketa/silicord#code-signing-policy).
+
+          Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
           "@
           gh release create $env:GITHUB_REF_NAME dist/silicord.exe --title "Silicord $env:VERSION" --notes $notes
