@@ -163,15 +163,24 @@ static void cache_init(void)
 
 /* ---- Workers ---- */
 
+/* Whether s starts with prefix; stops at the first difference, so s may be shorter. */
+static int starts_with(const char *s, const char *prefix)
+{
+    while (*prefix && *s == *prefix)
+        s++, prefix++;
+    return !*prefix;
+}
+
 /* Downloads a CDN path ("/avatars/...") or a full https URL (media proxy). */
 static int fetch(const char *path, http_resp_t *resp)
 {
-    const char *p = path + 8, *slash;
+    const char *p, *slash;
     wchar_t host[128];
     int n;
 
-    if (CompareStringA(LOCALE_INVARIANT, 0, path, 8, "https://", 8) != CSTR_EQUAL)
+    if (!starts_with(path, "https://"))
         return http_cdn_get(path, resp);
+    p = path + 8;
     for (slash = p; *slash && *slash != '/'; slash++)
         ;
     n = (int)(slash - p);
