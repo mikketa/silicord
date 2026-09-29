@@ -126,16 +126,7 @@ static int rand_next(int seed)
 
 static int clz32(int in)
 {
-    unsigned x = (unsigned)in;
-    int n = 0;
-
-    if (!x)
-        return 32;
-    while (!(x & 0x80000000u)) {
-        x <<= 1;
-        n++;
-    }
-    return n;
+    return 32 - rc_ilog((unsigned)in);
 }
 
 static int ror32(int a, int rot)
@@ -293,7 +284,6 @@ static void resampler_init(silk_resampler_t *s, int fs_in_hz)
     memset(s, 0, sizeof *s);
     s->input_delay = delay[fs_in_hz == 8000 ? 0 : fs_in_hz == 12000 ? 1 : 2];
     s->fs_in_kHz = fs_in_hz / 1000;
-    s->fs_out_kHz = 48;
     s->batch_size = s->fs_in_kHz * 10;
     s->inv_ratio_Q16 = lsh((lsh(fs_in_hz, 15)) / 48000, 2);
     while (smulww(s->inv_ratio_Q16, 48000) < lsh(fs_in_hz, 1))
@@ -378,7 +368,7 @@ static void resample(silk_resampler_t *s, short *out, const short *in, int len)
 
     memcpy(&s->delay_buf[s->input_delay], in, sizeof(short) * (size_t)n);
     iir_fir(s, out, s->delay_buf, s->fs_in_kHz);
-    iir_fir(s, &out[s->fs_out_kHz], &in[n], len - s->fs_in_kHz);
+    iir_fir(s, &out[48], &in[n], len - s->fs_in_kHz);
     memcpy(s->delay_buf, &in[len - s->input_delay], sizeof(short) * (size_t)s->input_delay);
 }
 
@@ -419,10 +409,8 @@ static void set_fs(silk_channel_t *ch, int fs_kHz)
 
     ch->subfr_length = 5 * fs_kHz;
     frame_length = ch->nb_subfr * ch->subfr_length;
-    if (ch->fs_kHz != fs_kHz || ch->fs_api_hz != 48000) {
+    if (ch->fs_kHz != fs_kHz)
         resampler_init(&ch->resampler, fs_kHz * 1000);
-        ch->fs_api_hz = 48000;
-    }
     if (ch->fs_kHz != fs_kHz || frame_length != ch->frame_length) {
         if (fs_kHz == 8)
             ch->pitch_contour_iCDF = ch->nb_subfr == MAX_NB_SUBFR ? k_pitch_contour_NB_iCDF : k_pitch_contour_10_ms_NB_iCDF;
@@ -1381,12 +1369,11 @@ int silk_decode(silk_decoder_t *d, opus_rc_t *rc, int channels_api, int channels
             set_fs(&ch[n], fs_kHz);
         }
     }
-    if (channels_api == 2 && channels_internal == 2 && (d->channels_api == 1 || d->channels_internal == 1)) {
+    if (channels_api == 2 && channels_internal == 2 && d->channels_internal == 1) {
         memset(d->pred_prev_Q13, 0, sizeof d->pred_prev_Q13);
         memset(d->s_side, 0, sizeof d->s_side);
         ch[1].resampler = ch[0].resampler;
     }
-    d->channels_api = channels_api;
     d->channels_internal = channels_internal;
 
     if (!lost && ch[0].frames_decoded == 0) {

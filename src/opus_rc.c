@@ -49,7 +49,6 @@ void rc_init(opus_rc_t *rc, const unsigned char *buf, unsigned n)
     rc->rem = read_byte(rc);
     rc->val = rc->rng - 1 - (unsigned)(rc->rem >> 1);
     rc->ext = 0;
-    rc->error = 0;
     normalize(rc);
 }
 
@@ -139,10 +138,7 @@ unsigned rc_uint(opus_rc_t *rc, unsigned ft)
         s = rc_decode(rc, ft1);
         rc_update(rc, s, s + 1, ft1);
         t = s << ftb | rc_bits(rc, (unsigned)ftb);
-        if (t <= ft)
-            return t;
-        rc->error = 1;
-        return ft;
+        return t <= ft ? t : ft; /* a corrupt value saturates */
     }
     ft++;
     s = rc_decode(rc, ft);

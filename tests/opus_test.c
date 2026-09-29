@@ -55,7 +55,7 @@ static void range_decoder(void)
     check(rc_tell(&rc) == 1 && rc_tell_frac(&rc) == 8, "a new decoder has used one bit");
     /* All-zero input is the lowest coded value: the first symbol every time. */
     check(rc_icdf(&rc, icdf, 8) == 0 && rc_bit_logp(&rc, 1) == 0 && rc_uint(&rc, 1000) == 0, "zeros decode low");
-    check(rc_bits(&rc, 4) == 0 && !rc.error, "raw bits of a zero frame");
+    check(rc_bits(&rc, 4) == 0, "raw bits of a zero frame");
     check(rc_ilog(0) == 0 && rc_ilog(1) == 1 && rc_ilog(255) == 8 && rc_ilog(256) == 9, "ilog");
 }
 

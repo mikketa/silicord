@@ -18,7 +18,6 @@ typedef struct {
     unsigned rng, val;
     unsigned ext;         /* rng / ft from the last rc_decode() */
     int rem;              /* the last byte read, whose low bit is still pending */
-    int error;
 } opus_rc_t;
 
 void rc_init(opus_rc_t *rc, const unsigned char *buf, unsigned n);

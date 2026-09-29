@@ -15,7 +15,7 @@ typedef struct {
     int sIIR[6];
     short sFIR[8];
     short delay_buf[16];
-    int batch_size, inv_ratio_Q16, fs_in_kHz, fs_out_kHz, input_delay;
+    int batch_size, inv_ratio_Q16, fs_in_kHz, input_delay;
 } silk_resampler_t;
 
 typedef struct {
@@ -50,7 +50,7 @@ typedef struct {
     short out_buf[SILK_MAX_FRAME + 2 * SILK_MAX_SUBFR];
     int lag_prev;
     signed char last_gain_index;
-    int fs_kHz, fs_api_hz, nb_subfr, frame_length, subfr_length, ltp_mem_length, lpc_order;
+    int fs_kHz, nb_subfr, frame_length, subfr_length, ltp_mem_length, lpc_order;
     short prev_NLSF_Q15[SILK_MAX_ORDER];
     int first_frame_after_reset;
     const unsigned char *pitch_lag_low_bits_iCDF, *pitch_contour_iCDF;
@@ -81,7 +81,7 @@ typedef struct {
 typedef struct {
     silk_channel_t ch[2];
     short pred_prev_Q13[2], s_mid[2], s_side[2];
-    int channels_api, channels_internal, prev_decode_only_middle;
+    int channels_internal, prev_decode_only_middle;
     silk_scratch_t tmp;
 } silk_decoder_t;
 

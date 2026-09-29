@@ -142,14 +142,6 @@ void opus_decoder_init(opus_decoder_t *d, int channels)
     silk_init(&d->silk);
 }
 
-/* The last CELT band for each bandwidth. */
-static int celt_end_band(int bandwidth)
-{
-    static const int end[5] = {13, 17, 17, 19, 21};
-
-    return end[bandwidth];
-}
-
 /* A 2.5 ms crossfade with the CELT window squared: from in1 to in2. */
 static void smooth_fade(const float *in1, const float *in2, float *out, int channels)
 {
@@ -171,6 +163,7 @@ static void smooth_fade(const float *in1, const float *in2, float *out, int chan
 /* Section 4.5: SILK, hybrid and CELT frames, and the redundant 5 ms CELT frames that smooth mode switches. */
 static int decode_frame(opus_decoder_t *d, const unsigned char *data, int len, float *pcm, int frame_size)
 {
+    static const int end_band[5] = {13, 17, 17, 19, 21}; /* the last CELT band for each bandwidth */
     const int F20 = 960, F5 = 240, F2_5 = 120, cc = d->channels;
     opus_rc_t dec;
     int audiosize, mode, transition = 0, redundancy = 0, redundancy_bytes = 0, celt_to_silk = 0, celt_ret = 0;
@@ -251,7 +244,7 @@ static int decode_frame(opus_decoder_t *d, const unsigned char *data, int len, f
             dec.storage -= (unsigned)redundancy_bytes;
         }
     }
-    d->celt.end = celt_end_band(d->bandwidth);
+    d->celt.end = end_band[d->bandwidth];
     d->celt.stream_channels = d->stream_channels;
     if (redundancy)
         transition = 0;
