@@ -216,15 +216,18 @@ static int read_roles(json_t list, role_id_t *out)
     return n;
 }
 
-/* Our role ids from merged_members[index] or the guild's member list; -1 if we are not listed. */
-static int my_roles(json_t d, json_t guild, unsigned index, const char *user_id, role_id_t *out)
+/*
+ * Our role ids from READY's merged_members[index] (`merged`, empty outside READY)
+ * or the guild's member list; -1 if we are not listed.
+ */
+static int my_roles(json_t merged, json_t guild, unsigned index, const char *user_id, role_id_t *out)
 {
-    json_t merged, list, v, roles, member = {0};
+    json_t list, v, roles, member = {0};
     json_iter_t it;
     unsigned i = 0;
     int found = 0;
 
-    if (json_get(d, "merged_members", &merged)) {
+    if (merged.p) {
         json_iter(merged, &it);
         while (json_next(&it, NULL, &list) && i++ < index)
             ;
@@ -795,9 +798,11 @@ static void joined_set(model_t *m, const char *id, int member)
 
 /*
  * Fills `out` and appends the guild's channels, the ones we cannot see to the
- * hidden list. from_ready: roles come from READY. Joined threads are recorded.
+ * hidden list. from_ready: roles come from READY, `merged` is its merged_members.
+ * Joined threads are recorded.
  */
-static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned index, int from_ready, guild_t *out)
+static void build_guild(model_t *m, unsigned *cap, json_t merged, json_t g, unsigned index, int from_ready,
+                        guild_t *out)
 {
     json_t v, chans, ch;
     json_iter_t it;
@@ -823,7 +828,7 @@ static void build_guild(model_t *m, unsigned *cap, json_t d, json_t g, unsigned 
     if (field(g, "stickers", &v))
         out->stickers = pack_emojis(m, v, 1);
     out->owner = field(g, "owner_id", &v) && id_eq(v, m->user_id);
-    nmine = my_roles(d, g, index, m->user_id, mine);
+    nmine = my_roles(merged, g, index, m->user_id, mine);
     if (nmine < 0 && !from_ready)
         nmine = 0; /* just joined: no roles yet */
     out->roles_known = nmine >= 0;
@@ -970,10 +975,10 @@ static void sort_guilds(guild_t *g, unsigned n)
 
 /* ---- Direct messages ---- */
 
-/* Recipients come as full user objects, or as ids pointing into READY's "users". */
-static int next_recipient(json_t d, json_iter_t *it, int by_id, json_t *user)
+/* Recipients come as full user objects, or as ids pointing into `users` (READY's; empty if none). */
+static int next_recipient(json_t users, json_iter_t *it, int by_id, json_t *user)
 {
-    json_t v, users, u, uid;
+    json_t v, u, uid;
     json_iter_t uit;
 
     if (!by_id)
@@ -981,7 +986,7 @@ static int next_recipient(json_t d, json_iter_t *it, int by_id, json_t *user)
     while (json_next(it, NULL, &v)) {
         char id[24];
         json_raw(v, id, sizeof id);
-        if (!json_get(d, "users", &users))
+        if (!users.p)
             return 0;
         json_iter(users, &uit);
         while (json_next(&uit, NULL, &u))
@@ -1001,8 +1006,8 @@ static void add_user_name(model_t *m, json_t user)
         json_str(v, &m->strings);
 }
 
-/* Returns 0 if `ch` is not a DM or group DM. */
-static int make_dm(model_t *m, json_t d, json_t ch, channel_t *out)
+/* Returns 0 if `ch` is not a DM or group DM. `users`: the user objects recipient ids point to. */
+static int make_dm(model_t *m, json_t users, json_t ch, channel_t *out)
 {
     json_t v, list, user;
     json_iter_t it;
@@ -1028,7 +1033,7 @@ static int make_dm(model_t *m, json_t d, json_t ch, channel_t *out)
     } else {
         it.p = it.end = NULL;
     }
-    while (it.p && next_recipient(d, &it, by_id, &user)) {
+    while (it.p && next_recipient(users, &it, by_id, &user)) {
         if (n++)
             sb_add(&m->strings, ", ");
         add_user_name(m, user);
@@ -1052,7 +1057,7 @@ static const char *dm_key(const channel_t *c)
 
 static void add_dms(model_t *m, unsigned *cap, json_t d)
 {
-    json_t list, ch;
+    json_t list, ch, users = {0};
     json_iter_t it;
     unsigned total, n = 0;
     channel_t *tmp;
@@ -1060,11 +1065,12 @@ static void add_dms(model_t *m, unsigned *cap, json_t d)
     m->dm_first = m->nchannels;
     if (!json_get(d, "private_channels", &list))
         return;
+    json_get(d, "users", &users);
     total = (unsigned)json_count(list);
     tmp = mem_alloc((total + 1) * sizeof *tmp);
     json_iter(list, &it);
     while (n < total && json_next(&it, NULL, &ch))
-        if (make_dm(m, d, ch, &tmp[n]))
+        if (make_dm(m, users, ch, &tmp[n]))
             n++;
     /* Most recent conversation first; one without messages by when it was created, like Discord. */
     for (unsigned a = 1; a < n; a++) {
@@ -1390,12 +1396,13 @@ static void add_pending(sb_t *pending, json_t d, const char *id)
 model_t *model_from_ready(json_t d)
 {
     model_t *m = mem_alloc(sizeof *m);
-    json_t user, guilds, g, v;
+    json_t user, guilds, g, v, merged = {0};
     json_iter_t it;
     unsigned cap = 0, total, i = 0;
     sb_t pending = {0};
 
     sb_addn(&m->strings, "", 1); /* offset 0 is the empty string */
+    json_get(d, "merged_members", &merged); /* looked up once: READY is megabytes */
     if (json_get(d, "user", &user)) {
         if (json_get(user, "id", &v))
             json_raw(v, m->user_id, sizeof m->user_id);
@@ -1416,7 +1423,7 @@ model_t *model_from_ready(json_t d)
         while (json_next(&it, NULL, &g)) {
             if (field(g, "name", &v)) {
                 guild_t *gd = &m->guilds[m->nguilds++];
-                build_guild(m, &cap, d, g, i, 1, gd);
+                build_guild(m, &cap, merged, g, i, 1, gd);
                 gd->rank = guild_rank(m, gd->id);
                 gd->folder = guild_folder(m, gd->id);
             } else if (json_get(g, "id", &v)) { /* unavailable (an outage): keep its settings for GUILD_CREATE */
@@ -1589,14 +1596,16 @@ static model_t *apply_channel(const model_t *m, json_t d, int deleted)
 
     if (gi < 0) {
         channel_t c;
+        json_t users = {0};
         if (deleted && old < 0)
             return NULL;
         n = clone_empty(m, 0);
         for (unsigned g = 0; g < m->nguilds; g++)
             copy_guild(n, &cap, m, g);
+        json_get(d, "users", &users);
         if (deleted) {
             copy_dms(n, &cap, m, id, NULL, NULL);
-        } else if (!make_dm(n, d, d, &c)) {
+        } else if (!make_dm(n, users, d, &c)) {
             model_free(n);
             return NULL;
         } else {
