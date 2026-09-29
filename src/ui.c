@@ -3029,7 +3029,8 @@ static emb_text_t *emb_text(msg_t *m, int slot, const sb_t *src, int width)
     msg_view_t *v;
     emb_text_t *t;
 
-    msg_rich(m, text_w_px()); /* makes sure the view exists */
+    if (!m->ui)
+        msg_rich(m, text_w_px()); /* makes the view */
     v = m->ui;
     if (!v->emb) {
         v->nemb = m->nembeds * 32;
@@ -3046,10 +3047,9 @@ static emb_text_t *emb_text(msg_t *m, int slot, const sb_t *src, int width)
     return t;
 }
 
-static int msg_height(msg_t *m)
+/* Height of message m in the message list, whose text is w wide (text_w_px()). */
+static int msg_height_at(msg_t *m, int w)
 {
-    int w = text_w_px();
-
     if (m->height_w != w) {
         int h = m->text.len || m->edited ? r_rich_height(msg_rich(m, w)) : 0;
         h += msg_extras(m, 0, 0, w, 0, 0, 0, NULL);
@@ -3066,12 +3066,17 @@ static int msg_height(msg_t *m)
     return m->height;
 }
 
+static int msg_height(msg_t *m)
+{
+    return msg_height_at(m, text_w_px());
+}
+
 static int messages_height(void)
 {
-    int h = S(16);
+    int h = S(16), w = text_w_px();
 
     for (int i = 0; i < g_ui.nmsgs; i++)
-        h += msg_height(&g_ui.msgs[i]);
+        h += msg_height_at(&g_ui.msgs[i], w);
     if (!g_ui.msgs_has_more)
         h += S(WELCOME_H);
     return h;
@@ -3691,14 +3696,15 @@ static void paint_message(int i, int x0, int y, int w)
             r_circle(x0 + S(16), ny, S(40), ARGB(C_ITEM));
         nr = rect(tx, ny, tw, S(22));
         {
+            const char *author = author_name(m);
             unsigned color = author_color(m);
-            wchar_t *wn = utf8_to_wide(author_name(m), lstrlenA(author_name(m)));
+            wchar_t *wn = utf8_to_wide(author, lstrlenA(author));
             r_text(g_ui.f_h, color ? 0xFF000000u | color : ARGB(C_INK), nr.left, nr.top, nr.right - nr.left,
                    nr.bottom - nr.top, wn, -1, R_LEFT | R_SINGLE | R_ELLIPSIS);
+            nr.left += r_text_width(g_ui.f_h, wn, -1) + S(10);
             mem_free(wn);
         }
         format_time(m->id, when, ARRAYSIZE(when));
-        nr.left += text_width(g_ui.f_h, author_name(m)) + S(10);
         text_w(g_ui.f_small, C_FAINT, rect(nr.left, ny + S(3), tw, S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
         y = ny + S(22);
     } else {
