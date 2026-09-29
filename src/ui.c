@@ -10716,7 +10716,7 @@ static void on_forum(const sb_t *p)
 {
     const char *channel = p->data, *body = channel + lstrlenA(channel) + 1;
     size_t n = p->len - (size_t)(body - p->data);
-    json_t root, threads, firsts, t, v, m;
+    json_t root, threads, firsts = {0}, t, v, m;
     json_iter_t it, fit;
 
     if (lstrcmpA(channel, g_ui.msgs_channel) != 0)
@@ -10725,6 +10725,7 @@ static void on_forum(const sb_t *p)
     g_ui.forum_loaded = 1;
     if (!n || !json_parse(body, n, &root) || !json_get(root, "threads", &threads))
         return;
+    json_get(root, "first_messages", &firsts);
     g_ui.posts = mem_alloc((json_count(threads) + 1) * sizeof(post_t));
     json_iter(threads, &it);
     while (json_next(&it, NULL, &t)) {
@@ -10739,12 +10740,18 @@ static void on_forum(const sb_t *p)
             json_int(v, &count);
         pt->count = (int)count;
         sb_addn(&pt->raw, t.p, (size_t)(t.end - t.p));
-        /* The post's first message has the thread's id. */
-        if (json_get(root, "first_messages", &firsts)) {
+        /* The post's first message has the thread's id: only that one is parsed. */
+        if (firsts.p) {
             json_iter(firsts, &fit);
             while (json_next(&fit, NULL, &m)) {
                 msg_t msg = {0};
-                if (msg_parse(m, &msg) && lstrcmpA(msg.id, pt->id) == 0) {
+                char id[sizeof msg.id];
+                if (!json_get(m, "id", &v))
+                    continue;
+                json_raw(v, id, sizeof id);
+                if (lstrcmpA(id, pt->id) != 0)
+                    continue;
+                if (msg_parse(m, &msg)) {
                     sb_addn(&pt->preview, msg.text.data ? msg.text.data : "", msg.text.len);
                     sb_addn(&pt->author, msg.author.data ? msg.author.data : "", msg.author.len);
                     lstrcpynA(pt->author_id, msg.author_id, sizeof pt->author_id);
