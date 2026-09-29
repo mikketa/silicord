@@ -612,10 +612,18 @@ static void i420_to_bgra(const vp8_image_t *img, unsigned *out)
         const unsigned char *py = img->y + y * img->y_stride, *pu = img->u + (y >> 1) * img->uv_stride,
                             *pv = img->v + (y >> 1) * img->uv_stride;
         unsigned *o = out + (size_t)y * (size_t)img->w;
+        int r = 0, g = 0, b = 0;
         for (int x = 0; x < img->w; x++) {
-            int c = 298 * (py[x] - 16), d = pu[x >> 1] - 128, e = pv[x >> 1] - 128;
-            o[x] = 0xFF000000u | (unsigned)clamp8((c + 409 * e + 128) >> 8) << 16 |
-                   (unsigned)clamp8((c - 100 * d - 208 * e + 128) >> 8) << 8 | clamp8((c + 516 * d + 128) >> 8);
+            int c = 298 * (py[x] - 16);
+            /* Two pixels share their chroma: work it out once for both. */
+            if (!(x & 1)) {
+                int d = pu[x >> 1] - 128, e = pv[x >> 1] - 128;
+                r = 409 * e + 128;
+                g = -100 * d - 208 * e + 128;
+                b = 516 * d + 128;
+            }
+            o[x] = 0xFF000000u | (unsigned)clamp8((c + r) >> 8) << 16 | (unsigned)clamp8((c + g) >> 8) << 8 |
+                   clamp8((c + b) >> 8);
         }
     }
 }
