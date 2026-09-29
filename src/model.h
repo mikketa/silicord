@@ -72,6 +72,7 @@ typedef struct {
     char user_id[24];
     char avatar[40];
     int members;        /* group DMs: its recipients and us */
+    int pinned;         /* DMs: pinned on top of the list (its override's FAVORITED flag) */
     unsigned recipients; /* group DMs: "id\tavatar\tname\n" for each recipient, 0 if none */
     /* Read state: unread when last_message > read, mentions counts pings (and DMs). */
     char last_message[24];

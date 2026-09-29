@@ -266,6 +266,24 @@ static void test_joined_threads(const model_t *m)
     model_free(b);
 }
 
+/* A DM pinned (its override's FAVORITED flag) goes on top and stays there as others move. */
+static void test_pinned_dms(const model_t *m)
+{
+    model_t *a = apply(m, "USER_GUILD_SETTINGS_UPDATE", "{\"guild_id\":null,\"channel_overrides\":["
+                                                         "{\"channel_id\":\"20\",\"flags\":2048}]}");
+    model_t *b = a ? apply(a, "CHANNEL_CREATE", "{\"id\":\"23\",\"type\":1,\"last_message_id\":\"950\","
+                                                "\"recipients\":[{\"id\":\"9\",\"username\":\"fresh\"}]}")
+                   : NULL;
+
+    check(a && a->channels[a->dm_first].pinned && lstrcmpA(a->channels[a->dm_first].id, "20") == 0 &&
+              lstrcmpA(a->channels[a->dm_first + 1].id, "21") == 0,
+          "a pinned DM goes on top, the others keep their order");
+    check(b && lstrcmpA(b->channels[b->dm_first].id, "20") == 0 && lstrcmpA(b->channels[b->dm_first + 1].id, "23") == 0,
+          "a new DM goes under the pinned ones");
+    model_free(a);
+    model_free(b);
+}
+
 /* Mutes and notification levels reach threads through their channel's category. */
 static void test_category_mute(const model_t *m)
 {
@@ -501,6 +519,7 @@ void entry(void)
     test_visibility(m);
     test_joined_threads(m);
     test_category_mute(m);
+    test_pinned_dms(m);
     test_outage_and_folders();
     model_free(m);
     finish();

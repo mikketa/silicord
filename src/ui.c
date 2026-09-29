@@ -2558,7 +2558,7 @@ static void paint_channel_row(unsigned i, int y)
         (void)img;
         paint_dm_icon(c, x + S(8), y + S(6), S(32), bg);
         {
-            int unread = channel_unread(i), badge = c->mentions ? S(30) : 0;
+            int unread = channel_unread(i), badge = c->mentions ? S(30) : c->pinned ? S(26) : 0;
             presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
             if (c->type == CH_DM && c->user_id[0])
                 paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE, bg);
@@ -2586,6 +2586,9 @@ static void paint_channel_row(unsigned i, int y)
             }
             if (c->mentions)
                 paint_badge(x + w - S(8), y + S(DM_ROW_H) / 2, c->mentions);
+            else if (c->pinned) /* Discord's pin at the right of a pinned DM */
+                r_text(g_ui.f_icon, hov ? ARGB(C_INK) : ARGB(C_MUTED), x + w - S(8) - S(20), y, S(20), S(DM_ROW_H), L"\xE718", -1,
+                       R_CENTER | R_VCENTER | R_SINGLE);
         }
         return;
     }

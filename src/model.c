@@ -1442,6 +1442,7 @@ static void apply_settings_entry(const chan_index_t *ix, json_t e)
         m->channels[i].muted = 0;
         m->channels[i].mute_until = 0;
         m->channels[i].notify = NOTIFY_DEFAULT;
+        m->channels[i].pinned = 0;
     }
     for (unsigned i = g >= 0 ? m->guilds[g].hidden_first : 0; g >= 0 && i < m->guilds[g].hidden_first + m->guilds[g].hidden_count; i++) {
         m->hidden[i].muted = 0;
@@ -1460,7 +1461,30 @@ static void apply_settings_entry(const chan_index_t *ix, json_t e)
             continue;
         c->muted = read_mute(o, &c->mute_until);
         c->notify = notify_level(o);
+        if (g < 0 && json_get(o, "flags", &v)) {
+            long long flags = 0;
+            json_int(v, &flags);
+            c->pinned = (flags & 2048) != 0; /* FAVORITED: a pinned DM */
+        }
     }
+}
+
+/* The pinned DMs on top, in the order they were; the others after them, as they were. */
+static void pin_dms(model_t *m)
+{
+    unsigned n = m->dm_count, k = 0;
+    channel_t *tmp;
+
+    if (n < 2)
+        return;
+    tmp = mem_alloc(n * sizeof *tmp);
+    for (int pass = 0; pass < 2; pass++)
+        for (unsigned i = 0; i < n; i++)
+            if (!m->channels[m->dm_first + i].pinned == pass)
+                tmp[k++] = m->channels[m->dm_first + i];
+    for (unsigned i = 0; i < n; i++)
+        m->channels[m->dm_first + i] = tmp[i];
+    mem_free(tmp);
 }
 
 /* READY's user_guild_settings. */
@@ -1623,6 +1647,7 @@ model_t *model_from_ready(json_t d)
     add_dms(m, &cap, r[R_DMS], r[R_USERS]);
     apply_read_state(m, r[R_READS]);
     apply_mutes(m, r[R_GUILD_SETTINGS]);
+    pin_dms(m);
     if (json_type(r[R_SETTINGS]) == JSON_OBJECT)
         read_user_settings(m, r[R_SETTINGS]);
     link_parents(m);
@@ -1684,15 +1709,29 @@ static void copy_guild(model_t *n, unsigned *cap, const model_t *m, unsigned g)
 static void copy_dms(model_t *n, unsigned *cap, const model_t *m, const char *id, const channel_t *with,
                      const channel_t *front)
 {
+    int front_done = 0;
+
     n->dm_first = n->nchannels;
-    if (front)
-        push(n, cap, front);
-    for (unsigned i = m->dm_first; i < m->dm_first + m->dm_count; i++) {
-        if (id && str_eq(m->channels[i].id, id)) {
-            if (with)
-                push(n, cap, with);
-        } else {
-            push(n, cap, &m->channels[i]);
+    /* The pinned ones stay on top in their place; `front` goes first below them, or in its pinned place. */
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1 && front && !front_done) {
+            push(n, cap, front);
+            front_done = 1;
+        }
+        for (unsigned i = m->dm_first; i < m->dm_first + m->dm_count; i++) {
+            const channel_t *c = &m->channels[i];
+            if (!c->pinned != pass) /* pinned ones in the first pass, the others in the second */
+                continue;
+            if (id && str_eq(c->id, id)) {
+                if (front && front->pinned && pass == 0) {
+                    push(n, cap, front);
+                    front_done = 1;
+                } else if (with) {
+                    push(n, cap, with);
+                }
+            } else {
+                push(n, cap, c);
+            }
         }
     }
     n->dm_count = n->nchannels - n->dm_first;
@@ -1752,6 +1791,7 @@ static void carry_state(channel_t *c, const channel_t *o)
     c->muted = o->muted;
     c->mute_until = o->mute_until;
     c->notify = o->notify;
+    c->pinned = o->pinned;
     if (id_cmp(o->last_message, c->last_message) > 0)
         copy_id(c->last_message, o->last_message, sizeof c->last_message);
 }
@@ -2098,6 +2138,7 @@ static model_t *apply_settings(const model_t *m, json_t d)
     index_build(&ix, n);
     apply_settings_entry(&ix, d);
     mem_free(ix.slot);
+    pin_dms(n);
     return n;
 }
 
