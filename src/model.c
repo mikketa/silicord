@@ -1212,6 +1212,16 @@ static channel_t *index_at(const chan_index_t *ix, unsigned slot)
     return i < ix->m->nchannels ? &ix->m->channels[i] : &ix->m->hidden[i - ix->m->nchannels];
 }
 
+/* The slot holding `id`, or the empty one where it would go. */
+static unsigned index_slot(const chan_index_t *ix, const char *id)
+{
+    unsigned h = id_hash(id) & ix->mask;
+
+    while (ix->slot[h] && !str_eq(index_at(ix, h)->id, id))
+        h = (h + 1) & ix->mask;
+    return h;
+}
+
 static void index_build(chan_index_t *ix, model_t *m)
 {
     unsigned total = m->nchannels + m->nhidden, size = 16;
@@ -1222,10 +1232,7 @@ static void index_build(chan_index_t *ix, model_t *m)
     ix->mask = size - 1;
     ix->slot = mem_alloc(size * sizeof *ix->slot);
     for (unsigned i = 0; i < total; i++) {
-        const char *id = i < m->nchannels ? m->channels[i].id : m->hidden[i - m->nchannels].id;
-        unsigned h = id_hash(id) & ix->mask;
-        while (ix->slot[h] && !str_eq(index_at(ix, h)->id, id))
-            h = (h + 1) & ix->mask;
+        unsigned h = index_slot(ix, i < m->nchannels ? m->channels[i].id : m->hidden[i - m->nchannels].id);
         if (!ix->slot[h])
             ix->slot[h] = i + 1; /* a repeated id keeps its first channel, as find_any finds */
     }
@@ -1233,10 +1240,28 @@ static void index_build(chan_index_t *ix, model_t *m)
 
 static channel_t *index_find(const chan_index_t *ix, const char *id)
 {
-    for (unsigned h = id_hash(id) & ix->mask; ix->slot[h]; h = (h + 1) & ix->mask)
-        if (str_eq(index_at(ix, h)->id, id))
-            return index_at(ix, h);
-    return NULL;
+    unsigned h = index_slot(ix, id);
+
+    return ix->slot[h] ? index_at(ix, h) : NULL;
+}
+
+/*
+ * Sets the shown channels' parent_index to what model_find_channel finds for
+ * their parent: model_muted and model_notify follow it for every channel the
+ * UI draws. Done last, on a complete model.
+ */
+static void link_parents(model_t *m)
+{
+    chan_index_t ix;
+
+    index_build(&ix, m);
+    for (unsigned i = 0; i < m->nchannels; i++) {
+        channel_t *c = &m->channels[i];
+        unsigned h = index_slot(&ix, c->parent);
+        /* The first channel of that id, if it is a shown one. */
+        c->parent_index = c->parent[0] && ix.slot[h] && ix.slot[h] <= m->nchannels ? (int)ix.slot[h] - 1 : -1;
+    }
+    mem_free(ix.slot);
 }
 
 int model_unread(const model_t *m, unsigned i)
@@ -1420,11 +1445,6 @@ static int mute_active(int muted, long long until, long long now_ms)
     return muted && (!until || until > now_ms);
 }
 
-static int parent_index(const model_t *m, unsigned i)
-{
-    return m->channels[i].parent[0] ? model_find_channel(m, m->channels[i].parent) : -1;
-}
-
 int model_guild_muted(const model_t *m, int g, long long now_ms)
 {
     return g >= 0 && (unsigned)g < m->nguilds && mute_active(m->guilds[g].muted, m->guilds[g].mute_until, now_ms);
@@ -1433,7 +1453,7 @@ int model_guild_muted(const model_t *m, int g, long long now_ms)
 /* A channel, then its parent, then the parent's parent (thread, channel, category). */
 int model_muted(const model_t *m, unsigned i, long long now_ms)
 {
-    for (int k = (int)i, depth = 0; k >= 0 && depth < 3; k = parent_index(m, (unsigned)k), depth++)
+    for (int k = (int)i, depth = 0; k >= 0 && depth < 3; k = m->channels[k].parent_index, depth++)
         if (mute_active(m->channels[k].muted, m->channels[k].mute_until, now_ms))
             return 1;
     return model_guild_muted(m, model_channel_guild(m, i), now_ms);
@@ -1445,7 +1465,7 @@ int model_notify(const model_t *m, unsigned i)
 
     if (g < 0)
         return NOTIFY_ALL;
-    for (int k = (int)i, depth = 0; k >= 0 && depth < 3; k = parent_index(m, (unsigned)k), depth++)
+    for (int k = (int)i, depth = 0; k >= 0 && depth < 3; k = m->channels[k].parent_index, depth++)
         if (m->channels[k].notify != NOTIFY_DEFAULT)
             return m->channels[k].notify;
     if (m->guilds[g].notify != NOTIFY_DEFAULT)
@@ -1566,6 +1586,7 @@ model_t *model_from_ready(json_t d)
     apply_mutes(m, r[R_GUILD_SETTINGS]);
     if (json_type(r[R_SETTINGS]) == JSON_OBJECT)
         read_user_settings(m, r[R_SETTINGS]);
+    link_parents(m);
     return m;
 }
 
@@ -2121,7 +2142,7 @@ static model_t *apply_thread_members(const model_t *m, const char *event, json_t
 
 unsigned long long model_permissions(const model_t *m, unsigned i)
 {
-    int gi = model_channel_guild(m, i), p;
+    int gi = model_channel_guild(m, i);
     const channel_t *c = &m->channels[i];
     const guild_t *g;
     role_id_t mine[MAX_ROLES];
@@ -2131,12 +2152,12 @@ unsigned long long model_permissions(const model_t *m, unsigned i)
     g = &m->guilds[gi];
     if (g->sees_all)
         return ~0ull; /* owner, administrator, or roles not known yet */
-    if (model_is_thread(c->type) && c->parent[0] && (p = model_find_channel(m, c->parent)) >= 0)
-        c = &m->channels[p];
+    if (model_is_thread(c->type) && c->parent_index >= 0)
+        c = &m->channels[c->parent_index];
     return channel_perms(m, c, g, mine, parse_roles(m, g->my_roles, mine));
 }
 
-model_t *model_apply(const model_t *m, const char *event, json_t d)
+static model_t *apply_event(const model_t *m, const char *event, json_t d)
 {
     if (str_eq(event, "THREAD_CREATE") || str_eq(event, "THREAD_UPDATE")) {
         json_t v, member, owner, meta, arch;
@@ -2179,4 +2200,13 @@ model_t *model_apply(const model_t *m, const char *event, json_t d)
     if (str_eq(event, "GUILD_UPDATE") || str_eq(event, "GUILD_DELETE") || str_eq(event, "GUILD_MEMBER_UPDATE"))
         return apply_guild_patch(m, event, d);
     return NULL;
+}
+
+model_t *model_apply(const model_t *m, const char *event, json_t d)
+{
+    model_t *n = apply_event(m, event, d);
+
+    if (n)
+        link_parents(n);
+    return n;
 }

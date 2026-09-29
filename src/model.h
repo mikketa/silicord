@@ -79,6 +79,7 @@ typedef struct {
     long long mute_until;
     int notify;         /* NOTIFY_*: NOTIFY_DEFAULT follows the category, then the server */
     unsigned overwrites; /* permission overwrites, packed "id allow deny\n"; 0 if none */
+    int parent_index;   /* shown channels: index of `parent` in model_t.channels, -1 if it is not there */
 } channel_t;
 
 typedef struct {
