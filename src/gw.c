@@ -78,7 +78,12 @@ static int send_identify(gw_t *g)
 
     sb_add(&msg, "{\"op\":2,\"d\":{\"token\":");
     sb_json_str(&msg, g->token, sc_strlen(g->token));
-    sb_add(&msg, ",\"properties\":{\"os\":\"Windows\",\"browser\":\"Silicord\",\"device\":\"Silicord\"}}}");
+    /*
+     * Capabilities 48: user objects deduplicated (DEDUPE_USER_OBJECTS) and READY
+     * split in two (PRIORITIZED_READY_PAYLOAD). READY_SUPPLEMENTAL then carries
+     * every friend's presence, which READY alone leaves out for those in servers.
+     */
+    sb_add(&msg, ",\"capabilities\":48,\"properties\":{\"os\":\"Windows\",\"browser\":\"Silicord\",\"device\":\"Silicord\"}}}");
     ok = ws_send(&g->ws, &msg);
     sb_free(&msg);
     return ok;

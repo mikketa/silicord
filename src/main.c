@@ -1434,6 +1434,52 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
         forward_event(s, t, d);
         return;
     }
+    if (json_str_eq(t, "READY_SUPPLEMENTAL")) {
+        /*
+         * {merged_presences: {friends: [...], guilds: [[...] per server]},
+         *  guilds: [{id, voice_states}]}: statuses, and who sits in voice.
+         */
+        json_t merged, list, guilds, g, id, states;
+        json_iter_t it;
+        int n = 0;
+        if (!current(s))
+            return;
+        if (json_get(d, "merged_presences", &merged)) {
+            if (json_get(merged, "friends", &list)) {
+                n += (int)json_count(list);
+                post_event("PRESENCES", list.p, (size_t)(list.end - list.p));
+            }
+            if (json_get(merged, "guilds", &guilds)) {
+                json_iter(guilds, &it);
+                while (json_next(&it, NULL, &list))
+                    if (json_count(list)) {
+                        n += (int)json_count(list);
+                        post_event("PRESENCES", list.p, (size_t)(list.end - list.p));
+                    }
+            }
+        }
+        if (json_get(d, "guilds", &guilds)) {
+            json_iter(guilds, &it);
+            while (json_next(&it, NULL, &g))
+                if (json_get(g, "id", &id) && json_get(g, "voice_states", &states) && json_count(states)) {
+                    sb_t *p = mem_alloc(sizeof *p);
+                    sb_add(p, "VOICE_STATES");
+                    sb_addn(p, "", 1);
+                    sb_add(p, "{\"guild_id\":");
+                    sb_addn(p, id.p, (size_t)(id.end - id.p));
+                    sb_add(p, ",\"voice_states\":");
+                    sb_addn(p, states.p, (size_t)(states.end - states.p));
+                    sb_add(p, "}");
+                    ui_post(UI_EVENT, p);
+                }
+        }
+        {
+            char line[64];
+            wsprintfA(line, "%d presences", n);
+            log_line("ready supplemental: ", line);
+        }
+        return;
+    }
     if (json_str_eq(t, "TYPING_START")) {
         json_t v, member, user;
         char channel[24] = "", user_id[24] = "";
