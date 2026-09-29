@@ -7776,8 +7776,6 @@ static void ac_add_user(const char *id, const char *name, const char *avatar)
 
 /* ---- Slash commands ---- */
 
-static void ac_update(void);
-
 /* `s` starts with `prefix`, ignoring case. */
 static int starts_ci(const char *s, const char *prefix)
 {
