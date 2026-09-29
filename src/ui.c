@@ -11713,95 +11713,71 @@ static void paint_active_now(RECT rc, int x, int w)
         const relation_t *r = &g_ui.rels[i];
         const presence_t *pr = presence_find(r->id);
         r_image_t *img;
-        int rich, h, ih;
+        char sub[160], lines[3][300];
+        int nlines = 0, h, bh = 0, rad = S(12), hh = S(68);
+        long long now = now_ms();
         if (r->type != REL_FRIEND || !pr || !pr->game.len || pr->status == ML_OFFLINE)
             continue; /* activities only, as Discord: not a custom status */
-        /* a game with more to say gets Discord's inner card: its picture, name, details, state and time */
-        rich = pr->game.len && (pr->details.len || pr->state.len || pr->image.len || pr->start);
-        ih = pr->listening && pr->details.len && pr->end > pr->start && pr->start ? S(120) : S(92);
-        h = S(72) + (rich ? ih + S(8) : 0);
-        r_round(x, y, w, h, S(16), ARGB(C_MAIN));
-        r_round_outline(x, y, w, h, S(16), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
-        img = user_avatar(r->id, r->avatar);
-        if (img)
-            r_image(img, x + S(16), y + S(16), S(40), S(40), S(20));
-        else
-            r_circle(x + S(16), y + S(16), S(40), ARGB(C_ITEM));
-        paint_status(x + S(16), y + S(16), S(40), pr->status, ARGB(C_MAIN));
-        text(g_ui.f_h, C_INK, rect(x + S(68), y + S(14), w - S(84), S(22)), r->name.data ? r->name.data : "",
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(38), w - S(84), S(18)), pr->activity.data,
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        if (rich) {
-            int cx = x + S(12), cy = y + S(72), cw = w - S(24), tx = cx + S(12), line = cy + S(14);
-            r_image_t *art = pr->image.len ? shop_image(pr->image.data, S(64)) : NULL;
-            r_round(cx, cy, cw, ih, S(8), 0xFF121214u);
-            if (art) {
-                r_image_cover(art, cx + S(14), cy + S(14), S(64), S(64), S(8));
-                tx = cx + S(14) + S(64) + S(12);
-            } else if (pr->image.len) {
-                r_round(cx + S(14), cy + S(14), S(64), S(64), S(8), 0xFF1E1E20u);
-                tx = cx + S(14) + S(64) + S(12);
-            }
-            if (pr->listening && pr->details.len) {
-                /* Discord's listening card: the song, "by" the artist, "on" the album, and how far it is */
-                char by[300];
-                text(g_ui.f_small_mid, C_INK, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->details.data,
-                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                line += S(18);
-                if (pr->state.len) {
-                    wsprintfA(by, "by %.280s", pr->state.data);
-                    text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), by, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    line += S(18);
-                }
-                if (pr->album.len) {
-                    wsprintfA(by, "on %.280s", pr->album.data);
-                    text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), by, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                }
-                if (pr->start && pr->end > pr->start) {
-                    long long len = (pr->end - pr->start) / 1000, at = (now_ms() - pr->start) / 1000;
-                    int bw = cw - S(28), by0 = cy + ih - S(14);
-                    char a[16], b[16];
-                    if (at < 0)
-                        at = 0;
-                    if (at > len)
-                        at = len;
-                    r_round(cx + S(14), by0, bw, S(4), S(2), 0xFF3A3A3Fu);
-                    r_round(cx + S(14), by0, (int)(bw * at / (len ? len : 1)), S(4), S(2), 0xFFDCDCDFu);
-                    wsprintfA(a, "%d:%02d", (int)(at / 60), (int)(at % 60));
-                    wsprintfA(b, "%d:%02d", (int)(len / 60), (int)(len % 60));
-                    text(g_ui.f_gif, C_MUTED, rect(cx + S(14), by0 - S(16), S(60), S(14)), a, DT_LEFT | DT_SINGLELINE);
-                    text(g_ui.f_gif, C_MUTED, rect(cx + cw - S(14) - S(60), by0 - S(16), S(60), S(14)), b, DT_RIGHT | DT_SINGLELINE);
-                    SetTimer(g_ui.wnd, TIMER_ACTIVE, 1000, NULL);
-                }
-            } else {
-                text(g_ui.f_small_mid, C_INK, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->game.data,
-                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                line += S(18);
-                if (pr->details.len) {
-                    text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->details.data,
-                         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    line += S(18);
-                }
-                if (pr->state.len && line < cy + S(62)) {
-                    text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), pr->state.data,
-                         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    line += S(18);
-                }
-                if (pr->start && line < cy + S(78)) {
-                    /* "01:23:45 elapsed", ticking */
-                    long long el = (now_ms() - pr->start) / 1000;
-                    char elapsed[48];
-                    if (el < 0)
-                        el = 0;
-                    wsprintfA(elapsed, "%02d:%02d:%02d elapsed", (int)(el / 3600), (int)(el / 60 % 60), (int)(el % 60));
-                    text(g_ui.f_small, C_TEXT, rect(tx, line, cx + cw - S(12) - tx, S(18)), elapsed,
-                         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    SetTimer(g_ui.wnd, TIMER_ACTIVE, 1000, NULL);
-                }
+        /*
+         * Discord's card: a head on #0C0C0C (the face, the name, what they do
+         * and for how long), then the activity itself: its 32px picture and up
+         * to three lines. Measured on Discord's own window.
+         */
+        if (pr->listening)
+            wsprintfA(sub, "Listening to %.100s", pr->game.data);
+        else if (pr->start && now > pr->start) {
+            long long mins = (now - pr->start) / 60000;
+            if (mins >= 60)
+                wsprintfA(sub, "%.100s - %dh", pr->game.data, (int)(mins / 60));
+            else
+                wsprintfA(sub, "%.100s - %dm", pr->game.data, (int)(mins > 0 ? mins : 1));
+        } else
+            wsprintfA(sub, "Playing %.100s", pr->game.data);
+        if (pr->listening) {
+            if (pr->details.len)
+                lstrcpynA(lines[nlines++], pr->details.data, 300);
+            if (pr->state.len)
+                lstrcpynA(lines[nlines++], pr->state.data, 300);
+        } else if (pr->details.len || pr->state.len || pr->image.len) {
+            lstrcpynA(lines[nlines++], pr->details.len ? pr->details.data : pr->game.data, 300);
+            if (pr->state.len)
+                lstrcpynA(lines[nlines++], pr->state.data, 300);
+            if (pr->start && now > pr->start) {
+                long long el = (now - pr->start) / 1000;
+                wsprintfA(lines[nlines++], "%02d:%02d:%02d", (int)(el / 3600), (int)(el / 60 % 60), (int)(el % 60));
+                SetTimer(g_ui.wnd, TIMER_ACTIVE, 1000, NULL);
             }
         }
-        y += h + S(8);
+        if (nlines)
+            bh = (nlines * S(17) > S(32) ? nlines * S(17) : S(32)) + S(32);
+        h = hh + bh;
+        /* the card: its head, its body on the page's black, a 1px border round both */
+        r_round(x, y, w, h, rad, ARGB(C_MAIN));
+        r_round(x, y, w, bh ? hh + rad : hh, rad, 0xFF0C0C0Cu);
+        if (bh)
+            r_fill(x, y + hh, w, rad, ARGB(C_MAIN));
+        r_round_outline(x, y, w, h, rad, S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        img = user_avatar(r->id, r->avatar);
+        if (img)
+            r_image(img, x + S(16), y + (hh - S(40)) / 2, S(40), S(40), S(20));
+        else
+            r_circle(x + S(16), y + (hh - S(40)) / 2, S(40), ARGB(C_ITEM));
+        paint_status(x + S(16), y + (hh - S(40)) / 2, S(40), pr->status, 0xFF0C0C0Cu);
+        text(g_ui.f_h, C_INK, rect(x + S(68), y + S(13), w - S(84), S(22)), r->name.data ? r->name.data : "",
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(35), w - S(84), S(18)), sub, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (bh) {
+            int by = y + hh + S(16), tx = x + S(16) + S(32) + S(12), ty = by + (S(32) > nlines * S(17) ? (S(32) - nlines * S(17)) / 2 : 0);
+            r_image_t *art = pr->image.len ? shop_image(pr->image.data, S(32)) : NULL;
+            if (art)
+                r_image_cover(art, x + S(16), by, S(32), S(32), S(4));
+            else
+                r_round(x + S(16), by, S(32), S(32), S(4), 0xFF1E1E20u);
+            for (int k = 0; k < nlines; k++)
+                text(k ? g_ui.f_small : g_ui.f_small_mid, k ? C_MUTED : C_INK, rect(tx, ty + k * S(17), x + w - S(16) - tx, S(17)),
+                     lines[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        y += h + S(12);
         shown++;
     }
     if (!shown) {
