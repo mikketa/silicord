@@ -2875,6 +2875,33 @@ void app_run_command(const char *guild_id, const char *channel_id, const char *a
     CloseHandle(CreateThread(NULL, 0, command_main, j, 0, NULL));
 }
 
+/* The Shop's categories, each with its products, as Discord's own Shop page loads them. */
+static DWORD WINAPI shop_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t *p = mem_alloc(sizeof *p);
+
+    get_rate_limited("/collectibles-categories?include_bundles=true&variants_return_style=2&include_unpublished=false",
+                     j->token.data, &resp);
+    if (g_debug) {
+        char line[64];
+        wsprintfA(line, "HTTP %u, %u bytes", resp.status, (unsigned)resp.body.len);
+        log_line("[shop] ", line);
+    }
+    if (resp.status == 200)
+        sb_addn(p, resp.body.data, resp.body.len);
+    ui_post(UI_SHOP, p);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_shop(void)
+{
+    CloseHandle(CreateThread(NULL, 0, shop_main, new_job(""), 0, NULL));
+}
+
 void app_fetch_gifs(const char *query)
 {
     rest_job_t *j = new_job("");
