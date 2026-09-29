@@ -55,15 +55,6 @@ static sb_t *copy(const char *s, size_t n)
     return sb;
 }
 
-static void join(HANDLE *thread)
-{
-    if (*thread) {
-        WaitForSingleObject(*thread, JOIN_TIMEOUT);
-        CloseHandle(*thread);
-        *thread = NULL;
-    }
-}
-
 /* ---- QR login ---- */
 
 static void on_qr(void *ctx, const char *url)
@@ -117,7 +108,9 @@ static void stop_login(void)
     InterlockedExchange(&g_login_stop, 1);
     SetEvent(g_login_wake);
     ra_cancel();
-    join(&g_login_thread);
+    WaitForSingleObject(g_login_thread, JOIN_TIMEOUT);
+    CloseHandle(g_login_thread);
+    g_login_thread = NULL;
 }
 
 static void start_login(void)
@@ -476,19 +469,6 @@ static void audio_capture(void *ctx, const float *in)
         voice_send(packet, (size_t)n);
     if (--g_mic_hang == 0)
         voice_quiet();
-}
-
-static void app_voice_deafen(int deafened)
-{
-    InterlockedExchange(&g_deafened, deafened);
-    EnterCriticalSection(&g_mix_lock);
-    g_mixer.deafened = deafened;
-    LeaveCriticalSection(&g_mix_lock);
-}
-
-static void app_voice_mute(int muted)
-{
-    InterlockedExchange(&g_muted, muted);
 }
 
 /* The microphone test: what it hears, played back. */
@@ -883,8 +863,11 @@ int app_video_camera(int on)
 
 void app_voice_set(int muted, int deafened)
 {
-    app_voice_mute(muted);
-    app_voice_deafen(deafened);
+    InterlockedExchange(&g_muted, muted);
+    InterlockedExchange(&g_deafened, deafened);
+    EnterCriticalSection(&g_mix_lock);
+    g_mixer.deafened = deafened;
+    LeaveCriticalSection(&g_mix_lock);
     voice_state_update();
 }
 
