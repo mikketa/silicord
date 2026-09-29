@@ -8423,7 +8423,9 @@ static int row_actions(const relation_t *r, int *acts)
 static void paint_friends(RECT rc, int x0, int w)
 {
     static const char *const tabs[TAB_COUNT] = {"Online", "All", "Pending", "Blocked", "Add Friend"};
-    int x = x0 + S(16), rows[512], n, y;
+    static int rows[512], n;
+    static unsigned rows_frame;
+    int x = x0 + S(16), y;
 
     /* Header: title and tabs. */
     text_w(g_ui.f_icon, C_MUTED, rect(x, 0, S(24), S(HEADER_H)), L"\xE716", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -8467,7 +8469,11 @@ static void paint_friends(RECT rc, int x0, int w)
         return;
     }
 
-    n = friend_rows(rows, 512);
+    /* The frame is painted in bands: look up statuses and sort once, not for each band. */
+    if (rows_frame != g_ui.frame) {
+        n = friend_rows(rows, 512);
+        rows_frame = g_ui.frame;
+    }
     {
         char title[64];
         static const char *const names[] = {"ONLINE", "ALL FRIENDS", "PENDING", "BLOCKED"};
