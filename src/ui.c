@@ -138,6 +138,7 @@ typedef struct {
     int type;           /* 1 friend, 2 blocked, 3 incoming request, 4 outgoing request */
     sb_t name, username;
     char avatar[48];
+    char tag[24], tag_badge[48], tag_guild[24]; /* their server tag, as Discord shows it beside the name */
 } relation_t;
 
 typedef struct {
@@ -465,6 +466,7 @@ static void anim_schedule(void);
 static int friends_view(void);
 static void rel_store(json_t obj);
 static relation_t *rel_find(const char *id);
+static int tag_chip(int x, int cy, const char *tag, const char *guild, const char *badge, int draw);
 static void rel_remove(const char *id);
 
 #define WM_TRAY (WM_APP + 60)
@@ -2571,6 +2573,14 @@ static void paint_channel_row(unsigned i, int y)
             text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
                  rect(x + S(52), y, w - S(58) - badge, S(DM_ROW_H)), name,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (c->type == CH_DM && c->user_id[0]) {
+                /* their server tag after the name, as in Discord's list */
+                const relation_t *rl = rel_find(c->user_id);
+                r_font_t *nf = unread ? g_ui.f_h : g_ui.f_body;
+                int nw = text_width(nf, name), two = pr && (pr->activity.len || pr->game.len) && pr->status != ML_OFFLINE;
+                if (rl && rl->tag[0] && nw + S(6) + tag_chip(0, 0, rl->tag, rl->tag_guild, rl->tag_badge, 0) < w - S(58) - badge)
+                    tag_chip(x + S(52) + nw + S(6), two ? y + S(13) : y + S(DM_ROW_H) / 2, rl->tag, rl->tag_guild, rl->tag_badge, 1);
+            }
             if (c->mentions)
                 paint_badge(x + w - S(8), y + S(DM_ROW_H) / 2, c->mentions);
         }
@@ -7370,6 +7380,32 @@ static r_image_t *pop_banner(const profile_t *p)
     return image_get(key, path, S(POP_W));
 }
 
+static r_image_t *cdn_image(const char *prefix, const char *path_fmt, const char *a, const char *b, int max_px);
+
+/*
+ * A server tag as Discord shows it beside a name: its badge then its letters
+ * on #272729, 16 high, centered on `cy`. Returns its width (0 if no tag).
+ */
+static int tag_chip(int x, int cy, const char *tag, const char *guild, const char *badge, int draw)
+{
+    int tw, w, y = cy - S(8);
+
+    if (!tag || !tag[0])
+        return 0;
+    tw = text_width(g_ui.f_cat, tag);
+    w = S(4) + (badge[0] ? S(12) + S(3) : 0) + tw + S(4);
+    if (!draw)
+        return w;
+    r_round(x, y, w, S(16), S(4), 0xFF272729u);
+    if (badge[0] && guild[0]) {
+        r_image_t *tb = cdn_image("gt", "/guild-tag-badges/%s/%s.png?size=32", guild, badge, S(12));
+        if (tb)
+            r_image(tb, x + S(4), y + S(2), S(12), S(12), 0);
+    }
+    text(g_ui.f_cat, C_TEXT, rect(x + S(4) + (badge[0] ? S(15) : 0), y, tw + S(2), S(16)), tag, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    return w;
+}
+
 static r_image_t *cdn_image(const char *prefix, const char *path_fmt, const char *a, const char *b, int max_px)
 {
     char key[96], path[200];
@@ -11601,6 +11637,19 @@ static void rel_store(json_t obj)
     r->avatar[0] = 0;
     if (json_get(user, "avatar", &v) && json_type(v) == JSON_STRING)
         json_raw(v, r->avatar, sizeof r->avatar);
+    r->tag[0] = r->tag_badge[0] = r->tag_guild[0] = 0;
+    {
+        json_t pg, on;
+        if (json_get(user, "primary_guild", &pg) && json_type(pg) == JSON_OBJECT &&
+            !(json_get(pg, "identity_enabled", &on) && json_type(on) == JSON_FALSE)) {
+            if (json_get(pg, "tag", &v) && json_type(v) == JSON_STRING)
+                json_raw(v, r->tag, sizeof r->tag);
+            if (json_get(pg, "badge", &v) && json_type(v) == JSON_STRING)
+                json_raw(v, r->tag_badge, sizeof r->tag_badge);
+            if (json_get(pg, "identity_guild_id", &v))
+                json_raw(v, r->tag_guild, sizeof r->tag_guild);
+        }
+    }
 }
 
 static void rel_remove(const char *id)
@@ -11947,9 +11996,12 @@ static void paint_friends(RECT rc, int x0, int w)
             paint_status(ax, y + S(15), S(32), st == ML_UNKNOWN ? ML_OFFLINE : st, bg);
         {
             /* The name, then on hover the username beside it, as Discord does. */
-            int nw = text_width(g_ui.f_h, r->name.data ? r->name.data : "");
+            int nw = text_width(g_ui.f_h, r->name.data ? r->name.data : ""), cw;
             text(g_ui.f_h, C_INK, rect(ax + S(44), y + S(10), lw - S(260), S(22)), r->name.data ? r->name.data : "",
                  DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            cw = nw + S(80) < lw - S(260) ? tag_chip(ax + S(44) + nw + S(6), y + S(21), r->tag, r->tag_guild, r->tag_badge, 1) : 0;
+            if (cw)
+                nw += S(6) + cw;
             if (hov && r->username.data && nw < lw - S(360))
                 text(g_ui.f_section, C_MUTED, rect(ax + S(44) + nw + S(6), y + S(11), S(200), S(22)), r->username.data,
                      DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
