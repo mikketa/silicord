@@ -41,6 +41,8 @@ void mls_path_free(mls_update_path_t *p);
 
 /* Sets a node's private key from its path secret; fails if it does not match the node's public key. */
 int mls_node_set_secret(mls_node_t *node, const unsigned char path_secret[32]);
+/* The next path secret up the tree, in place. */
+int mls_path_next_secret(unsigned char secret[32]);
 
 /* Merges a received path into the tree and checks the leaf's parent hash (not its signature). */
 int mls_path_merge(mls_tree_t *t, unsigned sender, const mls_update_path_t *p);

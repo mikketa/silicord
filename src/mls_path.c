@@ -84,8 +84,7 @@ int mls_node_set_secret(mls_node_t *node, const unsigned char path_secret[32])
     return node->has_priv;
 }
 
-/* The next path secret, in place. */
-static int next_secret(unsigned char secret[32])
+int mls_path_next_secret(unsigned char secret[32])
 {
     unsigned char next[32];
     int ok = mls_derive_secret(secret, "path", next);
@@ -98,12 +97,7 @@ static int next_secret(unsigned char secret[32])
 /* Blanks the direct path of `leaf` and puts fresh keys on its filtered part. */
 static void reset_path(mls_tree_t *t, unsigned leaf, const unsigned *path, int n)
 {
-    unsigned x = 2 * leaf, root = mls_root(t->nleaves);
-
-    while (x != root) {
-        x = mls_parent(x);
-        mls_node_clear(&t->nodes[x]);
-    }
+    mls_tree_blank_path(t, leaf);
     for (int k = 0; k < n; k++)
         t->nodes[path[k]].present = 1;
 }
@@ -199,7 +193,7 @@ int mls_path_decrypt(mls_tree_t *t, unsigned me, unsigned sender, const mls_upda
     if (path_secret)
         memcpy(path_secret, secret, 32);
     for (; ok && k < n; k++)
-        ok = mls_node_set_secret(&t->nodes[path[k]], secret) && next_secret(secret);
+        ok = mls_node_set_secret(&t->nodes[path[k]], secret) && mls_path_next_secret(secret);
     if (ok)
         memcpy(commit_secret, secret, 32);
     secure_wipe(secret, sizeof secret);
@@ -227,7 +221,7 @@ int mls_path_create(mls_tree_t *t, unsigned me, const unsigned char sig_priv[32]
         unsigned char ns[32];
         memcpy(ps->secret[k], secret, 32);
         if (!mls_derive_secret(secret, "node", ns) || !hpke_derive_keypair(ns, 32, node->priv, node->key) ||
-            !next_secret(secret))
+            !mls_path_next_secret(secret))
             return 0;
         node->has_priv = 1;
         secure_wipe(ns, sizeof ns);

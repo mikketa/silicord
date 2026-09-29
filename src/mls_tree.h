@@ -58,6 +58,8 @@ int mls_tree_copy(mls_tree_t *dst, const mls_tree_t *src);
 void mls_tree_extend(mls_tree_t *t, unsigned nleaves);
 /* Drops the right half while it is all blank. */
 void mls_tree_truncate(mls_tree_t *t);
+/* Blanks the parents on a leaf's direct path. */
+void mls_tree_blank_path(mls_tree_t *t, unsigned leaf);
 
 /* A leaf's filtered direct path (bottom up) and the copath child under each; returns its length. */
 int mls_filtered_path(const mls_tree_t *t, unsigned leaf, unsigned *path, unsigned *copath);

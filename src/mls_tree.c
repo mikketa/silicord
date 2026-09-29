@@ -248,6 +248,16 @@ void mls_tree_truncate(mls_tree_t *t)
     }
 }
 
+void mls_tree_blank_path(mls_tree_t *t, unsigned leaf)
+{
+    unsigned x = 2 * leaf, root = mls_root(t->nleaves);
+
+    while (x != root) {
+        x = mls_parent(x);
+        mls_node_clear(&t->nodes[x]);
+    }
+}
+
 int mls_tree_parse(mls_tree_t *t, const unsigned char *data, size_t n)
 {
     tls_reader_t r, v;

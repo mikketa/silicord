@@ -249,16 +249,6 @@ static int psk_secret_of(const mls_group_t *g, const mls_bytes_t *ids, int n, un
     return mls_psk_secret(ids, secrets, n, out);
 }
 
-static int next_secret(unsigned char secret[32])
-{
-    unsigned char next[32];
-    int ok = mls_derive_secret(secret, "path", next);
-
-    memcpy(secret, next, 32);
-    secure_wipe(next, sizeof next);
-    return ok;
-}
-
 int mls_group_join(mls_group_t *g, const mls_member_t *m, const void *welcome, size_t n, const void *tree, size_t tn,
                    const mls_psk_t *psks, int npsks)
 {
@@ -343,7 +333,7 @@ int mls_group_join(mls_group_t *g, const mls_member_t *m, const void *welcome, s
         memcpy(secret, gs.path_secret.p, 32);
         for (;;) {
             if (g->tree.nodes[x].present &&
-                (!mls_node_set_secret(&g->tree.nodes[x], secret) || !next_secret(secret)))
+                (!mls_node_set_secret(&g->tree.nodes[x], secret) || !mls_path_next_secret(secret)))
                 goto out;
             if (x == root)
                 break;
@@ -400,16 +390,6 @@ static void applied_free(applied_t *a)
 {
     mem_free(a->added);
     mem_free(a->added_kp);
-}
-
-static void blank_path(mls_tree_t *t, unsigned leaf)
-{
-    unsigned x = 2 * leaf, root = mls_root(t->nleaves);
-
-    while (x != root) {
-        x = mls_parent(x);
-        mls_node_clear(&t->nodes[x]);
-    }
 }
 
 /* Adds `leaf` to a parent's unmerged leaves, in order. */
@@ -502,7 +482,7 @@ static int apply_proposals(const mls_group_t *g, mls_tree_t *t, const resolved_t
             touched[rp->sender] = 1;
             mls_node_clear(&t->nodes[2 * rp->sender]);
             t->nodes[2 * rp->sender] = leaf;
-            blank_path(t, rp->sender);
+            mls_tree_blank_path(t, rp->sender);
         } else {
             mls_node_clear(&leaf);
         }
@@ -522,7 +502,7 @@ static int apply_proposals(const mls_group_t *g, mls_tree_t *t, const resolved_t
             touched[removed] = 1;
             a->removed_me |= removed == g->me;
             mls_node_clear(&t->nodes[2 * removed]);
-            blank_path(t, removed);
+            mls_tree_blank_path(t, removed);
         }
     }
     if (ok)
