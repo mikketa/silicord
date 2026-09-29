@@ -7757,15 +7757,23 @@ static int ac_has(const char *id)
     return 0;
 }
 
+/* A blank suggestion at the end of the list; callers check there is room. */
+static ac_item_t *ac_new(void)
+{
+    ac_item_t *it = &g_ui.ac[g_ui.ac_n++];
+
+    *it = (ac_item_t){0};
+    it->emoji = -1;
+    return it;
+}
+
 static void ac_add_user(const char *id, const char *name, const char *avatar)
 {
     ac_item_t *it;
 
     if (g_ui.ac_n == AC_MAX || !id[0] || !name || !name[0] || ac_has(id) || !ci_contains(name, g_ui.ac_query))
         return;
-    it = &g_ui.ac[g_ui.ac_n++];
-    *it = (ac_item_t){0};
-    it->emoji = -1;
+    it = ac_new();
     lstrcpynA(it->id, id, sizeof it->id);
     lstrcpynA(it->label, name, sizeof it->label);
     wsprintfA(it->insert, "@%.80s ", name);
@@ -7872,9 +7880,7 @@ static void ac_add_command(json_t index, json_t cmd, const char *label, const ch
 
     if (g_ui.ac_n == AC_MAX)
         return;
-    it = &g_ui.ac[g_ui.ac_n++];
-    *it = (ac_item_t){0};
-    it->emoji = -1;
+    it = ac_new();
     lstrcpynA(it->label, label, sizeof it->label);
     lstrcpynA(it->insert, insert, sizeof it->insert);
     if (json_get(cmd, "description", &v) && json_str(v, &s))
@@ -7924,9 +7930,7 @@ static int ac_commands(const wchar_t *w, int end)
             ac_item_t *b;
             if (!starts_ci(k_builtin[k].name, q + 1))
                 continue;
-            b = &g_ui.ac[g_ui.ac_n++];
-            *b = (ac_item_t){0};
-            b->emoji = -1;
+            b = ac_new();
             wsprintfA(b->label, "/%s", k_builtin[k].name);
             wsprintfA(b->insert, "/%s ", k_builtin[k].name);
             lstrcpynA(b->detail, k_builtin[k].description, sizeof b->detail);
@@ -7954,7 +7958,7 @@ static int ac_commands(const wchar_t *w, int end)
         if (opts.p && !find_str(q, ":")) {
             json_iter(opts, &it);
             while (g_ui.ac_n < AC_MAX && json_next(&it, NULL, &o)) {
-                char name[40], label[48], insert[48], mark[44];
+                char name[40], insert[48], mark[44];
                 if (!json_get(o, "name", &v))
                     continue;
                 json_raw(v, name, sizeof name);
@@ -7963,9 +7967,8 @@ static int ac_commands(const wchar_t *w, int end)
                 wsprintfA(mark, "%s:", name);
                 if (leaf && alen && find_str(args, mark)) /* already given */
                     continue;
-                lstrcpynA(label, name, sizeof label);
                 wsprintfA(insert, leaf ? "%s:" : "%s ", name);
-                ac_add_command(index, o, label, insert);
+                ac_add_command(index, o, name, insert);
                 {
                     ac_item_t *it2 = &g_ui.ac[g_ui.ac_n - 1];
                     it2->id[0] = it2->avatar[0] = 0;
@@ -8076,9 +8079,7 @@ static void ac_update(void)
             ac_item_t *it;
             if (ch->type == CH_CATEGORY || !ci_contains(name, g_ui.ac_query))
                 continue;
-            it = &g_ui.ac[g_ui.ac_n++];
-            *it = (ac_item_t){0};
-            it->emoji = -1;
+            it = ac_new();
             lstrcpynA(it->id, ch->id, sizeof it->id);
             lstrcpynA(it->label, name, sizeof it->label);
             wsprintfA(it->insert, "#%.80s ", name);
@@ -8092,9 +8093,7 @@ static void ac_update(void)
             lstrcpynA(name, e.name, e.name_len + 1 < (int)sizeof name ? e.name_len + 1 : (int)sizeof name);
             if (!ci_contains(name, g_ui.ac_query))
                 continue;
-            it = &g_ui.ac[g_ui.ac_n++];
-            *it = (ac_item_t){0};
-            it->emoji = -1;
+            it = ac_new();
             lstrcpynA(it->custom, e.id, sizeof it->custom);
             wsprintfA(it->label, ":%s:", name);
             wsprintfA(it->insert, ":%s: ", name);
@@ -8105,8 +8104,7 @@ static void ac_update(void)
             char name[48];
             if (emoji_matches(i, g_ui.ac_query) != pass)
                 continue;
-            it = &g_ui.ac[g_ui.ac_n++];
-            *it = (ac_item_t){0};
+            it = ac_new();
             it->emoji = i;
             emoji_main_name(i, name, sizeof name);
             wsprintfA(it->label, ":%s:", name);
