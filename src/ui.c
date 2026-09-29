@@ -6510,6 +6510,18 @@ static void confirm_close(int do_delete)
     redraw();
 }
 
+/* Adds our reaction r to message m, or takes it back when we already reacted so. */
+static void toggle_reaction(msg_t *m, const msg_reaction_t *r)
+{
+    int k, add;
+
+    for (k = 0; k < m->nreactions && !same_reaction(&m->reactions[k], r); k++)
+        ;
+    add = !(k < m->nreactions && m->reactions[k].me);
+    app_react(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, r, add);
+    apply_reaction(m, r, add ? 1 : -1, 1);
+}
+
 static void run_tool(int action)
 {
     int i = g_ui.hover_msg;
@@ -6523,13 +6535,8 @@ static void run_tool(int action)
     case TOOL_REACT1:
     case TOOL_REACT2: {
         msg_reaction_t r = {0};
-        int k, add;
         wide_to_utf8(k_quick[action], (size_t)lstrlenW(k_quick[action]), &r.emoji);
-        for (k = 0; k < m->nreactions && !same_reaction(&m->reactions[k], &r); k++)
-            ;
-        add = !(k < m->nreactions && m->reactions[k].me);
-        app_react(m->channel_id[0] ? m->channel_id : g_ui.msgs_channel, m->id, &r, add);
-        apply_reaction(m, &r, add ? 1 : -1, 1);
+        toggle_reaction(m, &r);
         sb_free(&r.emoji);
         break;
     }
@@ -7181,18 +7188,13 @@ static void picker_choose(int i)
         int m = find_msg(g_ui.picker_msg);
         if (m >= 0) {
             msg_reaction_t r = {0};
-            int k, add;
             if (it->kind == PI_CUSTOM) {
                 lstrcpynA(r.emoji_id, it->id, sizeof r.emoji_id);
                 sb_add(&r.emoji, it->name);
             } else {
                 sb_add(&r.emoji, k_emoji[it->index].emoji);
             }
-            for (k = 0; k < g_ui.msgs[m].nreactions && !same_reaction(&g_ui.msgs[m].reactions[k], &r); k++)
-                ;
-            add = !(k < g_ui.msgs[m].nreactions && g_ui.msgs[m].reactions[k].me);
-            app_react(g_ui.msgs[m].channel_id[0] ? g_ui.msgs[m].channel_id : g_ui.msgs_channel, g_ui.msgs[m].id, &r, add);
-            apply_reaction(&g_ui.msgs[m], &r, add ? 1 : -1, 1);
+            toggle_reaction(&g_ui.msgs[m], &r);
             sb_free(&r.emoji);
         }
         picker_close();
