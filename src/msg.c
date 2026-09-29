@@ -232,17 +232,17 @@ static void plain_text(const char *s, size_t n, sb_t *out)
 
 static void parse_reply(json_t obj, sb_t *out)
 {
-    json_t ref, author, content, mref, v;
+    json_t ref = {0}, author, content, mref, v;
     sb_t raw = {0}, formatted = {0}, plain = {0};
 
     /* A reply whose message is gone: Discord sends referenced_message null. */
-    if (json_get(obj, "referenced_message", &ref) && json_type(ref) == JSON_NULL &&
-        json_get(obj, "message_reference", &mref) && !(json_get(mref, "type", &v) && json_type(v) == JSON_NUMBER &&
-                                                       get_num(mref, "type") != 0)) {
+    json_get(obj, "referenced_message", &ref);
+    if (json_type(ref) == JSON_NULL && json_get(obj, "message_reference", &mref) &&
+        !(json_get(mref, "type", &v) && json_type(v) == JSON_NUMBER && get_num(mref, "type") != 0)) {
         sb_add(out, "Original message was deleted");
         return;
     }
-    if (!json_get(obj, "referenced_message", &ref) || json_type(ref) != JSON_OBJECT) {
+    if (json_type(ref) != JSON_OBJECT) {
         /* A bot's answer to a slash command: "name used /command", like a reply. */
         json_t in, name;
         if (((json_get(obj, "interaction", &in) && json_type(in) == JSON_OBJECT) ||
@@ -658,6 +658,14 @@ static void parse_reactions(json_t list, msg_t *out)
     }
 }
 
+/* Makes the message a system notice: `text` follows the author's name ("pinned a message."). */
+static void set_system(msg_t *out, const char *text)
+{
+    out->system = 1;
+    sb_clear(&out->text);
+    sb_add(&out->text, text);
+}
+
 /* A poll's end: its result embed's fields become a line of text ("'s poll ..." follows the name). */
 static void poll_result(json_t obj, msg_t *out)
 {
@@ -685,9 +693,7 @@ static void poll_result(json_t obj, msg_t *out)
     for (int i = 0; i < out->nembeds; i++)
         msg_embed_free(&out->embeds[i]);
     out->nembeds = 0;
-    out->system = 1;
-    sb_clear(&out->text);
-    sb_add(&out->text, "'s poll ");
+    set_system(out, "'s poll ");
     sb_addn(&out->text, question.data ? question.data : "", question.len);
     sb_add(&out->text, " has closed");
     if (winner.len) {
@@ -722,17 +728,18 @@ int msg_parse(json_t obj, msg_t *out)
         json_int(v, &type);
 
     if (json_get(obj, "author", &author)) {
-        json_t member, nick;
+        json_t member = {0}, nick;
         if (json_get(author, "id", &v))
             json_raw(v, out->author_id, sizeof out->author_id);
         if (json_get(author, "avatar", &v))
             json_raw(v, out->avatar, sizeof out->avatar);
         /* Gateway messages carry the server nickname and roles. */
-        if (json_get(obj, "member", &member) && json_get(member, "nick", &nick) && json_type(nick) == JSON_STRING)
+        json_get(obj, "member", &member);
+        if (json_get(member, "nick", &nick) && json_type(nick) == JSON_STRING)
             json_str(nick, &out->author);
         else
             user_name(author, &out->author);
-        if (json_get(obj, "member", &member) && json_get(member, "roles", &v)) {
+        if (json_get(member, "roles", &v)) {
             json_iter_t rit;
             json_t role;
             char id[24];
@@ -803,49 +810,34 @@ int msg_parse(json_t obj, msg_t *out)
                 json_raw(id, aid, sizeof aid);
             self = aid[0] && str_same(aid, out->author_id);
         }
-        out->system = 1;
-        sb_clear(&out->text);
         if (type == TYPE_RECIPIENT_REMOVE && self) {
-            sb_add(&out->text, "left the group.");
+            set_system(out, "left the group.");
         } else {
-            sb_add(&out->text, type == TYPE_RECIPIENT_ADD ? "added " : "removed ");
+            set_system(out, type == TYPE_RECIPIENT_ADD ? "added " : "removed ");
             sb_addn(&out->text, whom.data ? whom.data : "someone", whom.data ? whom.len : 7);
             sb_add(&out->text, type == TYPE_RECIPIENT_ADD ? " to the group." : " from the group.");
         }
         sb_free(&whom);
     } else if (type == TYPE_CALL) {
-        out->system = 1;
-        sb_clear(&out->text);
-        sb_add(&out->text, "started a call.");
+        set_system(out, "started a call.");
     } else if (type == TYPE_CHANNEL_NAME || type == TYPE_THREAD_CREATED) {
         /* The content is the new name. */
-        out->system = 1;
-        sb_clear(&out->text);
-        sb_add(&out->text, type == TYPE_CHANNEL_NAME ? "changed the channel name: " : "started a thread: ");
+        set_system(out, type == TYPE_CHANNEL_NAME ? "changed the channel name: " : "started a thread: ");
         sb_addn(&out->text, out->content.data ? out->content.data : "", out->content.len);
     } else if (type == TYPE_CHANNEL_ICON) {
-        out->system = 1;
-        sb_clear(&out->text);
-        sb_add(&out->text, "changed the channel icon.");
+        set_system(out, "changed the channel icon.");
     } else if (type == TYPE_POLL_RESULT) {
         poll_result(obj, out);
     } else if (type == TYPE_JOIN) {
-        out->system = 1;
-        sb_clear(&out->text);
-        sb_add(&out->text, "joined the server.");
+        set_system(out, "joined the server.");
     } else if (type >= TYPE_BOOST && type <= TYPE_BOOST_TIER_3) {
-        out->system = 1;
-        sb_clear(&out->text);
-        sb_add(&out->text, "boosted the server.");
+        set_system(out, "boosted the server.");
     } else if (type == TYPE_PIN) {
-        out->system = 1;
-        sb_clear(&out->text);
-        sb_add(&out->text, "pinned a message.");
+        set_system(out, "pinned a message.");
     } else if (type != TYPE_DEFAULT && type != TYPE_REPLY && type != TYPE_SLASH_COMMAND &&
                type != TYPE_CONTEXT_COMMAND && !out->text.len && !out->nfiles && !out->nembeds &&
                !out->sticker_id[0] && !out->poll && !out->ncomponents) {
-        out->system = 1;
-        sb_add(&out->text, "sent a system message.");
+        set_system(out, "sent a system message.");
     }
     parse_reply(obj, &out->reply);
     if (json_get(obj, "message_reference", &v) && json_get(v, "message_id", &name))
@@ -982,7 +974,7 @@ msg_batch_t *msg_batch_reaction(json_t d, int delta, const char *me)
         json_raw(v, b->channel_id, sizeof b->channel_id);
     if (json_get(d, "user_id", &v))
         json_raw(v, user, sizeof user);
-    b->mine = me && me[0] && sc_strlen(user) == sc_strlen(me) && same(user, me, sc_strlen(me));
+    b->mine = me && me[0] && str_same(user, me);
     m->reactions = mem_alloc(sizeof *m->reactions);
     r = &m->reactions[0];
     if (json_get(emoji, "id", &v) && json_type(v) == JSON_STRING)
@@ -1009,7 +1001,7 @@ msg_batch_t *msg_batch_poll_vote(json_t d, int delta, const char *me)
         json_raw(v, b->channel_id, sizeof b->channel_id);
     if (json_get(d, "user_id", &v))
         json_raw(v, user, sizeof user);
-    b->mine = me && me[0] && sc_strlen(user) == sc_strlen(me) && same(user, me, sc_strlen(me));
+    b->mine = me && me[0] && str_same(user, me);
     b->total = get_num(d, "answer_id");
     b->n = 1;
     return b;
