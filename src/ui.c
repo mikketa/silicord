@@ -5249,10 +5249,12 @@ static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
  * as before, with AppendMenuW, and shown by menu_track(): popups of our own
  * (rounded by DWM, as Discord's), submenus opening on hover, the keyboard
  * as in any menu. An item's data says how it is ticked: MENU_CHECK, a box,
- * or MENU_RADIO, one choice of several.
+ * or MENU_RADIO, one choice of several; or MENU_STATUS + a status, its dot
+ * before the label. A label may carry a line of help after a newline.
  */
 #define MENU_CHECK 1
 #define MENU_RADIO 2
+#define MENU_STATUS 0x100
 #define MENU_ITEMS 40
 #define MENU_LEVELS 3
 #define MENU_PAD 8     /* the scroller's padding */
@@ -5264,8 +5266,9 @@ static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
 typedef struct {
     wchar_t label[64];
     UINT id, type, state;
-    ULONG_PTR kind; /* MENU_CHECK, MENU_RADIO or 0 */
+    ULONG_PTR kind; /* MENU_CHECK, MENU_RADIO, MENU_STATUS + status or 0 */
     HMENU sub;
+    int len; /* of the label before its line of help, if any */
 } menu_item_t;
 
 typedef struct {
@@ -5301,7 +5304,7 @@ static void menu_mark(HMENU menu, UINT id, int kind)
 
 static int menu_item_h(const menu_item_t *it)
 {
-    return it->type & MFT_SEPARATOR ? S(MENU_SEP_H) : S(MENU_ITEM_H);
+    return it->type & MFT_SEPARATOR ? S(MENU_SEP_H) : it->label[it->len] ? S(MENU_ITEM_H + 18) : S(MENU_ITEM_H);
 }
 
 static int menu_item_y(const menu_level_t *l, int k)
@@ -5387,12 +5390,18 @@ static void menu_load(menu_level_t *l, HMENU menu)
         it->state = mi.fState;
         it->kind = mi.dwItemData;
         it->sub = mi.hSubMenu;
+        for (it->len = 0; it->label[it->len] && it->label[it->len] != L'\n'; it->len++)
+            ;
         l->n++;
     }
     for (int i = 0; i < l->n; i++)
         if (!(l->item[i].type & MFT_SEPARATOR)) {
             /* the label, 8 either side, the accessory with its 8 of margin, the scroller's padding */
-            int tw = r_text_width(g_ui.f_menu, l->item[i].label, -1) + S(16) + S(28) + 2 * S(MENU_PAD);
+            const menu_item_t *it = &l->item[i];
+            int tw = r_text_width(g_ui.f_menu, it->label, it->len), help = 0;
+            if (it->label[it->len])
+                help = r_text_width(g_ui.f_small, it->label + it->len + 1, -1);
+            tw = (tw > help ? tw : help) + S(16) + S(28) + 2 * S(MENU_PAD) + (it->kind >= MENU_STATUS ? S(20) : 0);
             if (tw > w)
                 w = tw;
         }
@@ -5513,8 +5522,19 @@ static void menu_paint(RECT rc)
             continue;
         }
         if (hot)
-            r_round(x, y, w, S(MENU_ITEM_H), S(4), bg);
-        r_text(g_ui.f_menu, ink, x + S(8), y, w - S(16) - S(28), S(MENU_ITEM_H), it->label, -1, R_VCENTER | R_SINGLE | R_ELLIPSIS);
+            r_round(x, y, w, menu_item_h(it), S(4), bg);
+        {
+            int lx = x + S(8);
+            if (it->kind >= MENU_STATUS) { /* the status's dot, then its name */
+                status_dot(lx, y + (S(MENU_ITEM_H) - S(12)) / 2, S(12), (int)(it->kind - MENU_STATUS), bg);
+                lx += S(20);
+            }
+            r_text(g_ui.f_menu, ink, lx, y, x + w - S(8) - S(28) - lx, S(MENU_ITEM_H), it->label, it->len,
+                   R_VCENTER | R_SINGLE | R_ELLIPSIS);
+            if (it->label[it->len])
+                r_text(g_ui.f_small, hot ? 0xFFB5B6BCu : ARGB(C_MUTED), lx, y + S(26), x + w - S(8) - lx, S(18),
+                       it->label + it->len + 1, -1, R_SINGLE | R_ELLIPSIS);
+        }
         ay = y + (S(MENU_ITEM_H) - S(20)) / 2;
         if (it->sub) {
             r_text(g_ui.f_icon, hot ? 0xFFFBFBFBu : 0xFF81828Au, ax, ay, S(20), S(20), L"\xE76C", -1, R_CENTER | R_VCENTER | R_SINGLE);
@@ -7921,12 +7941,13 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             HMENU menu = CreatePopupMenu();
             POINT pt = {pop_width() + S(8), g_ui.pop_status_y[1] - S(8)};
             int cmd;
+            static const wchar_t *const labels[4] = {L"Online", L"Idle",
+                                                     L"Do Not Disturb\nYou will not receive desktop notifications",
+                                                     L"Invisible\nYou will appear offline"};
             for (int k = 0; k < 4; k++) {
-                wchar_t label[32];
-                MultiByteToWideChar(CP_UTF8, 0, k_status_names[k], -1, label, ARRAYSIZE(label));
-                AppendMenuW(menu, MF_STRING | (g_ui.my_status == k_status_states[k] ? MF_CHECKED : 0), (UINT_PTR)(k + 1), label);
+                AppendMenuW(menu, MF_STRING, (UINT_PTR)(k + 1), labels[k]);
+                menu_mark(menu, (UINT)(k + 1), MENU_STATUS + k_status_states[k]);
             }
-            menu_mark(menu, 0, MENU_RADIO);
             ClientToScreen(wnd, &pt);
             cmd = menu_track(menu, pt.x, pt.y);
             DestroyMenu(menu);
