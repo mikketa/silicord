@@ -1,5 +1,6 @@
 /* Silicord - native Discord client for Windows. No C runtime: entry point is `entry`. */
 #include <windows.h>
+#include <emmintrin.h>
 #include "console.h"
 #include "cred.h"
 #include "gw.h"
@@ -597,24 +598,64 @@ static unsigned char clamp8(int v)
 }
 
 /* BT.601 studio range, as VP8 video is. */
+/* R, G and B of 8 pixels, 16-bit Y - 16 and the chroma d = U - 128, e = V - 128 of each, clamped to bytes. */
+static __m128i yuv_channel(__m128i y, __m128i a, __m128i b, __m128i k)
+{
+    /* k pairs a factor for y with one for a, then one for b with the rounding. */
+    __m128i one = _mm_set1_epi16(1), kya = _mm_shuffle_epi32(k, 0x00), kb1 = _mm_shuffle_epi32(k, 0xAA);
+    __m128i lo = _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(y, a), kya), _mm_madd_epi16(_mm_unpacklo_epi16(b, one), kb1));
+    __m128i hi = _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(y, a), kya), _mm_madd_epi16(_mm_unpackhi_epi16(b, one), kb1));
+
+    lo = _mm_packs_epi32(_mm_srai_epi32(lo, 8), _mm_srai_epi32(hi, 8));
+    return _mm_packus_epi16(lo, lo);
+}
+
+static __m128i pair16(int a, int b)
+{
+    return _mm_set1_epi32((int)((unsigned)(unsigned short)a | (unsigned)(unsigned short)b << 16));
+}
+
+/*
+ * BT.601 video range to BGRA, eight pixels at a time: the products summed in
+ * 32 bits by pmaddwd, (sum + 128) >> 8 and clamped by the packs, the same
+ * integers as pixel by pixel.
+ */
 static void i420_to_bgra(const vp8_image_t *img, unsigned *out)
 {
+    const __m128i zero = _mm_setzero_si128(), bias_y = _mm_set1_epi16(16), bias_c = _mm_set1_epi16(128);
+    const __m128i alpha = _mm_set1_epi8(-1);
+    const __m128i kr = _mm_unpacklo_epi64(pair16(298, 409), pair16(0, 128)); /* 298 y + 409 e + 0 d + 128 */
+    const __m128i kg = _mm_unpacklo_epi64(pair16(298, -100), pair16(-208, 128));
+    const __m128i kb = _mm_unpacklo_epi64(pair16(298, 516), pair16(0, 128));
+
     for (int y = 0; y < img->h; y++) {
         const unsigned char *py = img->y + y * img->y_stride, *pu = img->u + (y >> 1) * img->uv_stride,
                             *pv = img->v + (y >> 1) * img->uv_stride;
         unsigned *o = out + (size_t)y * (size_t)img->w;
-        int r = 0, g = 0, b = 0;
-        for (int x = 0; x < img->w; x++) {
-            int c = 298 * (py[x] - 16);
-            /* Two pixels share their chroma: work it out once for both. */
-            if (!(x & 1)) {
-                int d = pu[x >> 1] - 128, e = pv[x >> 1] - 128;
-                r = 409 * e + 128;
-                g = -100 * d - 208 * e + 128;
-                b = 516 * d + 128;
-            }
-            o[x] = 0xFF000000u | (unsigned)clamp8((c + r) >> 8) << 16 | (unsigned)clamp8((c + g) >> 8) << 8 |
-                   clamp8((c + b) >> 8);
+        int x = 0;
+        for (; x + 8 <= img->w; x += 8) {
+            __m128i yy = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(py + x)), zero), bias_y);
+            int u4, v4;
+            __m128i u, v, d, e, r, g, b, bg, ra;
+            memcpy(&u4, pu + (x >> 1), 4);
+            memcpy(&v4, pv + (x >> 1), 4);
+            u = _mm_cvtsi32_si128(u4);
+            v = _mm_cvtsi32_si128(v4);
+            /* Each chroma sample covers two pixels. */
+            d = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_unpacklo_epi8(u, u), zero), bias_c);
+            e = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_unpacklo_epi8(v, v), zero), bias_c);
+            r = yuv_channel(yy, e, d, kr);
+            g = yuv_channel(yy, d, e, kg);
+            b = yuv_channel(yy, d, d, kb);
+            bg = _mm_unpacklo_epi8(b, g);
+            ra = _mm_unpacklo_epi8(r, alpha);
+            _mm_storeu_si128((__m128i *)(o + x), _mm_unpacklo_epi16(bg, ra));
+            _mm_storeu_si128((__m128i *)(o + x + 4), _mm_unpackhi_epi16(bg, ra));
+        }
+        for (; x < img->w; x++) {
+            int c = 298 * (py[x] - 16), d = pu[x >> 1] - 128, e = pv[x >> 1] - 128;
+            o[x] = 0xFF000000u | (unsigned)clamp8((c + 409 * e + 128) >> 8) << 16 |
+                   (unsigned)clamp8((c - 100 * d - 208 * e + 128) >> 8) << 8 | clamp8((c + 516 * d + 128) >> 8);
         }
     }
 }
