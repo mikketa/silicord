@@ -7637,7 +7637,8 @@ static void pick_files(void)
     redraw();
 }
 
-static void on_drop(HDROP drop)
+/* Queues the files of a drop, dragged in or copied in Explorer; returns how many it holds. */
+static UINT upload_drop(HDROP drop)
 {
     UINT n = DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0);
     wchar_t *path = mem_alloc(MAX_PATH * 4 * sizeof(wchar_t));
@@ -7646,6 +7647,12 @@ static void on_drop(HDROP drop)
         if (DragQueryFileW(drop, i, path, MAX_PATH * 4))
             upload_add(path);
     mem_free(path);
+    return n;
+}
+
+static void on_drop(HDROP drop)
+{
+    upload_drop(drop);
     DragFinish(drop);
     place_composer();
     clamp_msg_scroll();
@@ -7701,13 +7708,7 @@ static int paste_files(void)
         return 0;
     if (IsClipboardFormatAvailable(CF_HDROP)) {
         HDROP drop = (HDROP)GetClipboardData(CF_HDROP);
-        wchar_t *path = mem_alloc(MAX_PATH * 4 * sizeof(wchar_t));
-        UINT n = drop ? DragQueryFileW(drop, 0xFFFFFFFF, NULL, 0) : 0;
-        for (UINT i = 0; i < n; i++)
-            if (DragQueryFileW(drop, i, path, MAX_PATH * 4))
-                upload_add(path);
-        mem_free(path);
-        done = n > 0;
+        done = drop && upload_drop(drop) > 0;
     } else if (!IsClipboardFormatAvailable(CF_UNICODETEXT) && IsClipboardFormatAvailable(CF_BITMAP)) {
         HBITMAP bmp = (HBITMAP)GetClipboardData(CF_BITMAP);
         wchar_t *path = mem_alloc(MAX_PATH * 2 * sizeof(wchar_t));
