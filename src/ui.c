@@ -281,7 +281,7 @@ typedef struct {
     int pop_self, pop_failed, pop_hover, pop_h, pop_input_y;
     int pop_ax, pop_ay, pop_above;
     int pop_status_y[4];
-    unsigned pop_frame;
+    unsigned pop_frame;        /* its last paint, whose images the main window keeps */
     int pop_badge_x[32], pop_badge_y[32];
     md_doc_t pop_bio;
     r_rich_t *pop_rich;
@@ -310,6 +310,7 @@ typedef struct {
 
     /* Quick switcher. */
     HWND qs, qs_edit;
+    unsigned qs_frame;
     WNDPROC qs_edit_proc;
     HBRUSH qs_brush;
     int qs_kind[12], qs_index[12], nqs, qs_sel;
@@ -320,6 +321,7 @@ typedef struct {
 
     /* Emoji picker. */
     HWND picker, picker_edit;
+    unsigned picker_frame;
     WNDPROC picker_edit_proc;
     HBRUSH picker_brush;
     int picker_mode;
@@ -4131,7 +4133,12 @@ static void anim_tick(void)
     }
 }
 
-static void paint(HWND wnd)
+/*
+ * One paint of a window, the main one or a popup: a new frame (images drawn
+ * are marked with it, and decoding from the disk cache is timed from its
+ * start), drawn in bands. Returns the frame.
+ */
+static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
 {
     PAINTSTRUCT ps;
     RECT rc;
@@ -4142,19 +4149,43 @@ static void paint(HWND wnd)
     g_ui.paint_wnd = wnd;
     QueryPerformanceCounter(&g_ui.frame_start);
     while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
-        if (g_ui.view == VIEW_APP && g_ui.settings_open)
-            paint_settings(rc);
-        else if (g_ui.view == VIEW_APP)
-            paint_app(rc);
-        else if (g_ui.view == VIEW_LOADING)
-            paint_loading(rc);
-        else
-            paint_login(rc);
+        draw(rc);
         r_end(dc);
     }
     EndPaint(wnd, &ps);
-    /* The popout is painted separately: what it shows was drawn at its last paint. */
-    images_trim(g_ui.pop && (int)(g_ui.pop_frame - g_ui.frame) < 0 ? g_ui.pop_frame : g_ui.frame);
+    return g_ui.frame;
+}
+
+/* The popups are painted separately: what each shows was drawn at its last paint, and stays in memory. */
+static unsigned oldest_shown_frame(void)
+{
+    unsigned keep = g_ui.frame;
+
+    if (g_ui.pop && (int)(g_ui.pop_frame - keep) < 0)
+        keep = g_ui.pop_frame;
+    if (g_ui.picker && (int)(g_ui.picker_frame - keep) < 0)
+        keep = g_ui.picker_frame;
+    if (g_ui.qs && (int)(g_ui.qs_frame - keep) < 0)
+        keep = g_ui.qs_frame;
+    return keep;
+}
+
+static void paint_view(RECT rc)
+{
+    if (g_ui.view == VIEW_APP && g_ui.settings_open)
+        paint_settings(rc);
+    else if (g_ui.view == VIEW_APP)
+        paint_app(rc);
+    else if (g_ui.view == VIEW_LOADING)
+        paint_loading(rc);
+    else
+        paint_login(rc);
+}
+
+static void paint(HWND wnd)
+{
+    paint_frame(wnd, paint_view);
+    images_trim(oldest_shown_frame());
     if (g_ui.log_memory && g_ui.nmsgs) {
         char when[64];
         g_ui.log_memory = 0;
@@ -6065,26 +6096,20 @@ static void set_status(int k)
     app_user_settings(fields);
 }
 
+static void pop_draw(RECT rc)
+{
+    (void)rc;
+    pop_render(1);
+}
+
 static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        RECT rc;
-        HDC dc = BeginPaint(wnd, &ps);
-        GetClientRect(wnd, &rc);
-        g_ui.pop_frame = ++g_ui.frame;
-        g_ui.paint_wnd = wnd;
-        QueryPerformanceCounter(&g_ui.frame_start);
-        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
-            pop_render(1);
-            r_end(dc);
-        }
-        EndPaint(wnd, &ps);
+    case WM_PAINT:
+        g_ui.pop_frame = paint_frame(wnd, pop_draw);
         return 0;
-    }
     case WM_CTLCOLOREDIT:
         SetTextColor((HDC)wp, GDI(C_INK));
         SetBkColor((HDC)wp, RGB(g_ui.pop_input_color >> 16 & 0xFF, g_ui.pop_input_color >> 8 & 0xFF,
@@ -7050,10 +7075,11 @@ static void picker_layout(void)
     g_ui.pick_content = y + (col ? cell : 0) - S(PICK_TOP);
 }
 
-static void picker_paint(void)
+static void picker_paint(RECT rc)
 {
     int w = S(PICK_W), h = S(PICK_H), grid_bottom = h - S(PICK_FOOT);
 
+    (void)rc;
     r_fill(0, 0, w, h, ARGB(C_MAIN));
     r_round(0, 0, w, h, S(8), 0xFF111111);
     r_round_outline(0, 0, w, h, S(8), 1, 0xFF2A2A2A);
@@ -7235,20 +7261,9 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        RECT rc;
-        HDC dc = BeginPaint(wnd, &ps);
-        GetClientRect(wnd, &rc);
-        g_ui.paint_wnd = wnd;
-        g_ui.frame++;
-        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
-            picker_paint();
-            r_end(dc);
-        }
-        EndPaint(wnd, &ps);
+    case WM_PAINT:
+        g_ui.picker_frame = paint_frame(wnd, picker_paint);
         return 0;
-    }
     case WM_COMMAND:
         if ((HWND)lp == g_ui.picker_edit && HIWORD(wp) == EN_CHANGE) {
             if (g_ui.picker_tab == TAB_GIFS) {
@@ -8898,11 +8913,12 @@ static int qs_height(void)
     return S(96) + (g_ui.nqs ? g_ui.nqs : 1) * S(QS_ROW) + S(16);
 }
 
-static void qs_paint(void)
+static void qs_paint(RECT rc)
 {
     int w = S(QS_W), h = qs_height(), y = S(96);
     const model_t *m = g_ui.model;
 
+    (void)rc;
     r_fill(0, 0, w, h, 0xFF000000u);
     r_round(0, 0, w, h, S(10), 0xFF151515);
     r_round_outline(0, 0, w, h, S(10), 1, 0xFF2A2A2A);
@@ -9003,18 +9019,9 @@ static LRESULT CALLBACK qs_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        RECT rc;
-        HDC dc = BeginPaint(wnd, &ps);
-        GetClientRect(wnd, &rc);
-        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
-            qs_paint();
-            r_end(dc);
-        }
-        EndPaint(wnd, &ps);
+    case WM_PAINT:
+        g_ui.qs_frame = paint_frame(wnd, qs_paint);
         return 0;
-    }
     case WM_COMMAND:
         if ((HWND)lp == g_ui.qs_edit && HIWORD(wp) == EN_CHANGE) {
             qs_rebuild();
