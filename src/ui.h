@@ -39,6 +39,7 @@ enum {
     UI_STREAM,          /* no payload: our screen share or the stream we watch changed; see app_stream_status() */
     UI_SHOP,            /* text = the shop's collectibles-categories JSON (empty on failure) */
     UI_QUESTS,          /* text = the quests/@me JSON (empty on failure) */
+    UI_APP,             /* text = an application id, NUL, then its public JSON (empty on failure) */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -90,6 +91,8 @@ void app_fetch_gifs(const char *query);
 void app_fetch_shop(void);
 /* Our quests, from Discord's quests API; answered with UI_QUESTS. */
 void app_fetch_quests(void);
+/* An application's public face (its icon, for Active Now); answered with UI_APP. */
+void app_fetch_application(const char *id);
 /* The slash commands usable in a server (guild_id) or a DM (channel_id); answered with UI_COMMANDS. */
 void app_fetch_commands(const char *guild_id, const char *channel_id);
 /* Clicks a bot's button, or picks `value` in its select menu. Failures come as UI_SEND_FAILED. */

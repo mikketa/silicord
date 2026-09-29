@@ -436,7 +436,9 @@ typedef struct presence {
     sb_t activity;
     /* The first activity that is not a custom status, for Active Now's card. */
     sb_t game, details, state, image, album; /* image: a full URL, empty if none we can show */
+    sb_t corner;                             /* the small picture on the large one's corner, a URL too */
     long long start, end;                    /* ms since 1970 it began and ends, 0 if not told */
+    char app[24];                            /* its application, whose icon Active Now shows */
     int listening;                           /* Spotify: a song, by an artist, on an album */
     int kind;                                /* its type: 0 playing, 1 streaming, 2 listening, 3 watching */
 } presence_t;
@@ -466,6 +468,7 @@ static void anim_schedule(void);
 static int friends_view(void);
 static void rel_store(json_t obj);
 static relation_t *rel_find(const char *id);
+static void on_application(sb_t *p);
 static int tag_chip(int x, int cy, const char *tag, const char *guild, const char *badge, int draw);
 static void rel_remove(const char *id);
 
@@ -3162,6 +3165,25 @@ static void json_str_of(json_t obj, const char *key, sb_t *out)
         json_str(v, out);
 }
 
+/* An activity's picture as a URL: "mp:" media proxy paths, Spotify covers, or assets of the application. */
+static void asset_url(const sb_t *img, const char *app, sb_t *out)
+{
+    sb_clear(out);
+    if (img->len > 8 && CompareStringA(LOCALE_INVARIANT, 0, img->data, 8, "spotify:", 8) == CSTR_EQUAL) {
+        sb_add(out, "https://i.scdn.co/image/");
+        sb_add(out, img->data + 8);
+    } else if (img->len > 3 && img->data[0] == 'm' && img->data[1] == 'p' && img->data[2] == ':') {
+        sb_add(out, "https://media.discordapp.net/");
+        sb_addn(out, img->data + 3, img->len - 3);
+    } else if (img->len && app[0] && img->data[0] >= '0' && img->data[0] <= '9') {
+        sb_add(out, "https://cdn.discordapp.com/app-assets/");
+        sb_add(out, app);
+        sb_add(out, "/");
+        sb_add(out, img->data);
+        sb_add(out, ".png");
+    }
+}
+
 /*
  * The first activity that is not a custom status: its name, details, state,
  * start and large picture. Pictures are "mp:" media proxy paths or assets of
@@ -3178,6 +3200,8 @@ static void presence_game(json_t obj, presence_t *p)
     sb_clear(&p->state);
     sb_clear(&p->image);
     sb_clear(&p->album);
+    sb_clear(&p->corner);
+    p->app[0] = 0;
     p->start = p->end = 0;
     p->listening = 0;
     if (!json_get(obj, "activities", &acts))
@@ -3201,23 +3225,16 @@ static void presence_game(json_t obj, presence_t *p)
         p->kind = (int)type;
         if (json_get(a, "application_id", &v))
             json_raw(v, app, sizeof app);
+        lstrcpynA(p->app, app, sizeof p->app);
         if (json_get(a, "assets", &assets)) {
+            sb_t corner = {0};
             json_str_of(assets, "large_image", &img);
             json_str_of(assets, "large_text", &p->album);
+            json_str_of(assets, "small_image", &corner);
+            asset_url(&corner, app, &p->corner);
+            sb_free(&corner);
         }
-        if (img.len > 8 && CompareStringA(LOCALE_INVARIANT, 0, img.data, 8, "spotify:", 8) == CSTR_EQUAL) {
-            sb_add(&p->image, "https://i.scdn.co/image/");
-            sb_add(&p->image, img.data + 8);
-        } else if (img.len > 3 && img.data[0] == 'm' && img.data[1] == 'p' && img.data[2] == ':') {
-            sb_add(&p->image, "https://media.discordapp.net/");
-            sb_addn(&p->image, img.data + 3, img.len - 3);
-        } else if (img.len && app[0] && img.data[0] >= '0' && img.data[0] <= '9') {
-            sb_add(&p->image, "https://cdn.discordapp.com/app-assets/");
-            sb_add(&p->image, app);
-            sb_add(&p->image, "/");
-            sb_add(&p->image, img.data);
-            sb_add(&p->image, ".png");
-        }
+        asset_url(&img, app, &p->image);
         sb_free(&img);
         return;
     }
@@ -3262,6 +3279,7 @@ static void presences_clear(void)
         sb_free(&g_ui.presences[i].state);
         sb_free(&g_ui.presences[i].image);
         sb_free(&g_ui.presences[i].album);
+        sb_free(&g_ui.presences[i].corner);
     }
     g_ui.npresences = 0;
 }
@@ -6750,6 +6768,13 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == UI_STREAM) {
         stream_refresh();
+        return;
+    }
+    if (msg == UI_APP) {
+        if (p) {
+            on_application(p);
+            mem_free(p);
+        }
         return;
     }
     if (msg == UI_QUESTS) {
@@ -11784,6 +11809,56 @@ static void friend_button(int bx, int by, const wchar_t *glyph, int row_hovered,
     }
 }
 
+/*
+ * Applications' icons for Active Now, asked for once each: the public
+ * /applications/{id}/rpc gives the icon's hash, the CDN the picture.
+ */
+static struct {
+    char id[24], icon[48];
+    int state; /* 1 asked, 2 known (icon may be empty) */
+} g_apps[48];
+static int g_napps;
+
+static r_image_t *app_icon(const char *id, int px)
+{
+    int k;
+
+    if (!id[0])
+        return NULL;
+    for (k = 0; k < g_napps; k++)
+        if (!lstrcmpA(g_apps[k].id, id))
+            break;
+    if (k == g_napps) {
+        if (g_napps == (int)ARRAYSIZE(g_apps))
+            return NULL;
+        lstrcpynA(g_apps[g_napps].id, id, sizeof g_apps[0].id);
+        g_apps[g_napps].icon[0] = 0;
+        g_apps[g_napps++].state = 1;
+        app_fetch_application(id);
+        return NULL;
+    }
+    if (g_apps[k].state != 2 || !g_apps[k].icon[0])
+        return NULL;
+    return cdn_image("ai", "/app-icons/%s/%s.png?size=64", g_apps[k].id, g_apps[k].icon, px);
+}
+
+/* UI_APP: the id, a NUL, then the application's JSON. */
+static void on_application(sb_t *p)
+{
+    const char *id = p->data, *body = id + lstrlenA(id) + 1;
+    json_t root, v;
+
+    for (int k = 0; k < g_napps; k++)
+        if (!lstrcmpA(g_apps[k].id, id)) {
+            g_apps[k].state = 2;
+            if (body < p->data + p->len && json_parse(body, (size_t)(p->data + p->len - body), &root) &&
+                json_get(root, "icon", &v) && json_type(v) == JSON_STRING)
+                json_raw(v, g_apps[k].icon, sizeof g_apps[k].icon);
+            redraw();
+            return;
+        }
+}
+
 /* "Active Now": friends playing, listening or streaming, one card each. */
 static void paint_active_now(RECT rc, int x, int w)
 {
@@ -11848,9 +11923,15 @@ static void paint_active_now(RECT rc, int x, int w)
         else
             r_circle(x + S(16), y + (hh - S(40)) / 2, S(40), ARGB(C_ITEM));
         paint_status(x + S(16), y + (hh - S(40)) / 2, S(40), pr->status, 0xFF0C0C0Cu);
-        text(g_ui.f_h, C_INK, rect(x + S(68), y + S(13), w - S(84), S(22)), r->name.data ? r->name.data : "",
+        text(g_ui.f_h, C_INK, rect(x + S(68), y + S(13), w - S(84) - S(36), S(22)), r->name.data ? r->name.data : "",
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(35), w - S(84), S(18)), sub, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(35), w - S(84) - S(36), S(18)), sub, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        {
+            /* the application's icon at the head's right, as Discord shows it */
+            r_image_t *ai = app_icon(pr->app, S(28));
+            if (ai)
+                r_image(ai, x + w - S(16) - S(28), y + (hh - S(28)) / 2, S(28), S(28), S(14));
+        }
         if (bh) {
             int by = y + hh + S(16), tx = x + S(16) + S(32) + S(12), ty = by + (S(32) > nlines * S(17) ? (S(32) - nlines * S(17)) / 2 : 0);
             r_image_t *art = pr->image.len ? shop_image(pr->image.data, S(32)) : NULL;
@@ -11858,6 +11939,14 @@ static void paint_active_now(RECT rc, int x, int w)
                 r_image_cover(art, x + S(16), by, S(32), S(32), S(4));
             else
                 r_round(x + S(16), by, S(32), S(32), S(4), 0xFF1E1E20u);
+            if (pr->corner.len) {
+                /* the small picture on its corner, ringed with the card's black */
+                r_image_t *sm = shop_image(pr->corner.data, S(14));
+                if (sm) {
+                    r_circle(x + S(16) + S(32) - S(12), by + S(32) - S(12), S(18), ARGB(C_MAIN));
+                    r_image_cover(sm, x + S(16) + S(32) - S(10), by + S(32) - S(10), S(14), S(14), S(7));
+                }
+            }
             for (int k = 0; k < nlines; k++)
                 text(k ? g_ui.f_small : g_ui.f_small_mid, k ? C_MUTED : C_INK, rect(tx, ty + k * S(17), x + w - S(16) - tx, S(17)),
                      lines[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -15236,7 +15325,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_QUESTS) {
+        if (msg >= UI_QR && msg <= UI_APP) {
             on_worker(msg, wp, lp);
             return 0;
         }

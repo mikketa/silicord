@@ -2986,6 +2986,30 @@ static DWORD WINAPI quests_main(LPVOID arg)
     return 0;
 }
 
+static DWORD WINAPI application_main(LPVOID arg)
+{
+    rest_job_t *j = arg;
+    http_resp_t resp = {0};
+    sb_t *p = mem_alloc(sizeof *p);
+    char path[64];
+
+    wsprintfA(path, "/applications/%s/rpc", j->channel);
+    get_rate_limited(path, j->token.data, &resp);
+    sb_add(p, j->channel);
+    sb_addn(p, "", 1);
+    if (resp.status == 200)
+        sb_addn(p, resp.body.data, resp.body.len);
+    ui_post(UI_APP, p);
+    http_resp_free(&resp);
+    free_job(j);
+    return 0;
+}
+
+void app_fetch_application(const char *id)
+{
+    CloseHandle(CreateThread(NULL, 0, application_main, new_job(id), 0, NULL));
+}
+
 void app_fetch_quests(void)
 {
     CloseHandle(CreateThread(NULL, 0, quests_main, new_job(""), 0, NULL));
