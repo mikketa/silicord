@@ -10823,18 +10823,18 @@ static int in_tab(const relation_t *r, int tab)
 }
 
 /* The friends page, as in Discord: search, "Online - 3", the rows; "Active Now" on the right when there is room. */
-#define FR_SEARCH_H 36
+#define FR_SEARCH_H 40
 #define FR_ACTIVE_W 360
 #define FR_PAD 24
 
 static int friends_active_w(int w)
 {
-    return w >= S(1000) ? S(FR_ACTIVE_W) : 0;
+    return w >= S(860) ? S(FR_ACTIVE_W) : 0;
 }
 
 static int friends_search_y(void)
 {
-    return S(HEADER_H) + S(16);
+    return S(HEADER_H) + S(12);
 }
 
 static int friends_list_y(void)
@@ -10896,11 +10896,24 @@ static int row_actions(const relation_t *r, int *acts)
     return 2;
 }
 
-/* A round button of the friends list: message, accept, ignore, more. */
-static void friend_button(int bx, int by, const wchar_t *glyph, int hot, unsigned hot_ink)
+/*
+ * A button of the friends list: message, accept, ignore, or "more" (three
+ * dots, glyph NULL). Bare, as in Discord; a round background shows on the
+ * hovered row, lighter under the pointer.
+ */
+static void friend_button(int bx, int by, const wchar_t *glyph, int row_hovered, int hot, unsigned hot_ink)
 {
-    r_circle(bx, by, S(36), hot ? 0xFF1E1E20u : 0xFF121214u);
-    r_text(g_ui.f_icon, hot ? hot_ink : ARGB(C_MUTED), bx, by, S(36), S(36), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+    unsigned ink = hot ? hot_ink : ARGB(C_MUTED);
+
+    if (row_hovered)
+        r_circle(bx, by, S(36), hot ? 0xFF1E1E20u : 0xFF0A0A0Cu);
+    if (glyph) {
+        r_text(g_ui.f_icon_mid, ink, bx, by, S(36), S(36), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+    } else {
+        int d = S(4) > 3 ? S(4) : 3, cx = bx + (S(36) - d) / 2;
+        for (int k = -1; k <= 1; k++)
+            r_circle(cx, by + S(18) - d / 2 + k * S(7), d, ink);
+    }
 }
 
 /* "Active Now": friends playing, listening or streaming, one card each. */
@@ -10919,14 +10932,14 @@ static void paint_active_now(RECT rc, int x, int w)
         r_image_t *img;
         if (r->type != REL_FRIEND || !pr || !pr->activity.len || pr->status == ML_OFFLINE)
             continue;
-        r_round(x, y, w, S(72), S(8), 0xFF0A0A0Cu);
-        r_round_outline(x, y, w, S(72), S(8), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        r_round(x, y, w, S(72), S(16), ARGB(C_MAIN));
+        r_round_outline(x, y, w, S(72), S(16), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
         img = user_avatar(r->id, r->avatar);
         if (img)
             r_image(img, x + S(16), y + S(16), S(40), S(40), S(20));
         else
             r_circle(x + S(16), y + S(16), S(40), ARGB(C_ITEM));
-        paint_status(x + S(16), y + S(16), S(40), pr->status, 0xFF0A0A0Cu);
+        paint_status(x + S(16), y + S(16), S(40), pr->status, ARGB(C_MAIN));
         text(g_ui.f_h, C_INK, rect(x + S(68), y + S(14), w - S(84), S(22)), r->name.data ? r->name.data : "",
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(38), w - S(84), S(18)), pr->activity.data,
@@ -10986,6 +10999,8 @@ static void paint_friends(RECT rc, int x0, int w)
             paint_badge(x + tw - S(8), S(HEADER_H) / 2, pending);
         x += tw + S(8);
     }
+    text_w(g_ui.f_icon_mid, g_ui.friend_hover == -30 ? C_INK : C_MUTED, rect(x0 + w - S(16) - S(32), 0, S(32), S(HEADER_H)),
+           L"\xE8F2", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     if (aw)
         paint_active_now(rc, x0 + lw, aw);
 
@@ -11008,10 +11023,10 @@ static void paint_friends(RECT rc, int x0, int w)
     }
 
     /* Search, drawn around the edit control that place_friend_input() puts in it. */
-    r_round(x0 + S(FR_PAD), friends_search_y(), lw - S(2 * FR_PAD), S(FR_SEARCH_H), S(8), 0xFF121214u);
+    r_round(x0 + S(FR_PAD), friends_search_y(), lw - S(2 * FR_PAD), S(FR_SEARCH_H), S(8), ARGB(C_MAIN));
     r_round_outline(x0 + S(FR_PAD), friends_search_y(), lw - S(2 * FR_PAD), S(FR_SEARCH_H), S(8), S(1) > 1 ? S(1) : 1,
-                    0xFF27272Au);
-    text_w(g_ui.f_icon, C_MUTED, rect(x0 + lw - S(FR_PAD) - S(36), friends_search_y(), S(28), S(FR_SEARCH_H)), L"\xE721", -1,
+                    0xFF242426u);
+    text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(FR_PAD) + S(8), friends_search_y(), S(24), S(FR_SEARCH_H)), L"\xE721", -1,
            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     /* The frame is painted in bands: look up statuses and sort once, not for each band. */
@@ -11024,7 +11039,7 @@ static void paint_friends(RECT rc, int x0, int w)
         char title[64];
         static const char *const names[] = {"Online", "All friends", "Pending", "Blocked"};
         wsprintfA(title, "%s \xE2\x80\x94 %d", names[g_ui.friend_tab], n);
-        text(g_ui.f_small_mid, C_MUTED, rect(x0 + S(FR_PAD) + S(6), y, lw - S(2 * FR_PAD), S(20)), title,
+        text(g_ui.f_small_mid, C_INK, rect(x0 + S(FR_PAD), y, lw - S(2 * FR_PAD), S(20)), title,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     y = friends_list_y();
@@ -11043,14 +11058,14 @@ static void paint_friends(RECT rc, int x0, int w)
         const relation_t *r = &g_ui.rels[rows[k]];
         r_image_t *img;
         int acts[2], na, st = user_status(r->id), hov = g_ui.friend_hover == k;
-        int ax = x0 + S(FR_PAD) + S(8);
+        int ax = x0 + S(FR_PAD);
         const presence_t *pr = presence_find(r->id);
         char sub[160];
         unsigned bg;
         if (!r_visible(y, S(FR_ROW)))
             continue;
         /* A line between rows, hidden next to the hovered one as in Discord. */
-        if (k && !hov && g_ui.friend_hover != k - 1)
+        if (!hov && g_ui.friend_hover != k - 1)
             fill(x0 + S(FR_PAD) + S(8), y, lw - S(2 * FR_PAD) - S(16), S(1) > 1 ? S(1) : 1, C_LINE);
         bg = row_bg(TW_FRIEND, k, 0, hov, ARGB(C_MAIN), x0 + S(FR_PAD) - S(4), y + S(1), lw - S(2 * FR_PAD) + S(8),
                     S(FR_ROW) - S(2), S(8));
@@ -11084,10 +11099,12 @@ static void paint_friends(RECT rc, int x0, int w)
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         na = row_actions(r, acts);
         for (int a = 0; a < na; a++) {
-            static const wchar_t *const icons[] = {L"\xE8BD", L"\xE73E", L"\xE711", L"\xE711", L"\xE711"};
+            /* message, accept, ignore, unblock, and "more" for a friend (its menu holds Remove Friend) */
+            static const wchar_t *const icons[] = {L"\xE8BD", L"\xE73E", L"\xE711", L"\xE711", NULL};
             int hot = hov && g_ui.friend_act == a;
-            friend_button(x0 + lw - S(FR_PAD) - S(8) - S(36) - a * S(46), y + S(13), icons[acts[a]], hot,
-                          acts[a] == ACT_ACCEPT ? ARGB(C_GREEN) : acts[a] != ACT_MESSAGE ? ARGB(C_RED) : ARGB(C_INK));
+            friend_button(x0 + lw - S(FR_PAD) - S(8) - S(36) - a * S(46), y + S(13), icons[acts[a]], hov, hot,
+                          acts[a] == ACT_ACCEPT ? ARGB(C_GREEN) : acts[a] == ACT_IGNORE || acts[a] == ACT_UNBLOCK ? ARGB(C_RED)
+                                                                                                     : ARGB(C_INK));
         }
     }
     r_unclip();
@@ -11102,6 +11119,8 @@ static int friends_hit(int x, int y, int *act)
     if (!friends_view())
         return -1;
     if (y < S(HEADER_H)) {
+        if (x >= x0 + w - S(16) - S(32) && x < x0 + w - S(16))
+            return -30; /* new group DM */
         for (int t = 0; t < TAB_COUNT; t++)
             if (x >= g_ui.tab_x[t] && x < g_ui.tab_x[t] + g_ui.tab_w[t] && y >= S(8) && y < S(40))
                 return -10 - t;
@@ -11144,6 +11163,10 @@ static void friends_click(int x, int y)
         redraw();
         return;
     }
+    if (k == -30) {
+        qs_open(); /* a conversation to start: the quick switcher, as "Find or start a conversation" */
+        return;
+    }
     if (k == -20) {
         wchar_t w[64];
         sb_t name = {0};
@@ -11174,9 +11197,18 @@ static void friends_click(int x, int y)
             /* The message box runs a message loop that can move or free the relationships: keep the id. */
             char id[24];
             lstrcpynA(id, r->id, sizeof id);
-            if (acts[act] == ACT_REMOVE &&
-                MessageBoxW(g_ui.wnd, L"Remove this friend?", L"Remove Friend", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
-                break;
+            if (acts[act] == ACT_REMOVE) {
+                HMENU menu = CreatePopupMenu();
+                POINT pt;
+                int cmd;
+                AppendMenuW(menu, MF_STRING, 1, L"Remove Friend");
+                GetCursorPos(&pt);
+                cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, g_ui.wnd, NULL);
+                DestroyMenu(menu);
+                if (cmd != 1 ||
+                    MessageBoxW(g_ui.wnd, L"Remove this friend?", L"Remove Friend", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+                    break;
+            }
             app_relationship(id, "DELETE");
             break;
         }
@@ -11201,8 +11233,8 @@ static void place_friend_input(void)
     }
     if (g_ui.friend_search) {
         if (search)
-            MoveWindow(g_ui.friend_search, x0 + S(FR_PAD) + S(12), friends_search_y() + (S(FR_SEARCH_H) - S(22)) / 2,
-                       w - S(2 * FR_PAD) - S(56), S(22), TRUE);
+            MoveWindow(g_ui.friend_search, x0 + S(FR_PAD) + S(40), friends_search_y() + (S(FR_SEARCH_H) - S(24)) / 2,
+                       w - S(2 * FR_PAD) - S(56), S(24), TRUE);
         ShowWindow(g_ui.friend_search, search ? SW_SHOWNA : SW_HIDE);
     }
 
@@ -13814,7 +13846,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_CTLCOLOREDIT:
-        if ((HWND)lp == g_ui.friend_search || (HWND)lp == g_ui.friend_edit) {
+        if ((HWND)lp == g_ui.friend_search) { /* in a box on the page's black */
+            SetTextColor((HDC)wp, GDI(C_TEXT));
+            SetBkColor((HDC)wp, GDI(C_MAIN));
+            return (LRESULT)GetStockObject(BLACK_BRUSH);
+        }
+        if ((HWND)lp == g_ui.friend_edit) {
             static HBRUSH field;
             if (!field)
                 field = CreateSolidBrush(RGB(0x12, 0x12, 0x14));
