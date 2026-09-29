@@ -170,8 +170,12 @@ int app_voice_mic_test(int on);
  */
 int app_video_take(const char *user_id, int stream, int tile_w, int tile_h, unsigned *serial,
                    void (*take)(void *ctx, const unsigned *bgra, int w, int h), void *ctx);
-/* Shares the screen showing `wnd` in our call (Go Live), or stops; returns whether it is shared. */
-int app_screen_share(int on, HWND wnd);
+/*
+ * Shares a screen in our call (Go Live), `screen` indexing screen_list()
+ * (out of range: the primary one), with the sound of other programs when
+ * `sound`; or stops. Returns whether it is shared.
+ */
+int app_screen_share(int on, int screen, int sound);
 /* Watches someone's Go Live stream in our call (NULL stops); returns whether it was asked for. */
 int app_stream_watch(const char *user_id);
 /*

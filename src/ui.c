@@ -18,6 +18,7 @@
 #include "md.h"
 #include "memberlist.h"
 #include "picture.h"
+#include "screen.h"
 #include "command.h"
 #include "search.h"
 #include "stats.h"
@@ -249,6 +250,12 @@ typedef struct {
     } live_hits[16];           /* the streams' tiles drawn with a button to watch them */
     int nlive_hits;
     RECT stream_close;         /* the watched stream's close button */
+    int share_pick;            /* the screen picker is open */
+    int share_pick_hover;      /* what the mouse is over in it: a screen, PICK_SOUND, PICK_CANCEL, else -1 */
+    int share_no_sound;        /* share the screen without the sound of other programs */
+    screen_info_t screens[8];  /* the screens it offers, and a still of each */
+    r_image_t *screen_stills[8];
+    int nscreens;
     struct {
         char channel[24];
         int ringing;           /* we are being rung */
@@ -1246,8 +1253,12 @@ static void voice_join(const char *guild_id, const char *channel_id, const char 
     redraw();
 }
 
+static void share_pick_close(void);
+
 static void voice_leave(void)
 {
+    if (g_ui.share_pick)
+        share_pick_close();
     g_ui.voice_camera = 0;
     g_ui.share_state = g_ui.watch_state = VOICE_OFF;
     g_ui.watch_user[0] = 0;
@@ -1598,7 +1609,7 @@ static void stream_refresh(void)
 {
     g_ui.share_state = app_stream_status(g_ui.watch_user, sizeof g_ui.watch_user, &g_ui.watch_state);
     if (g_ui.share_state == VOICE_FAILED) {
-        app_screen_share(0, g_ui.wnd);
+        app_screen_share(0, -1, 0);
         g_ui.share_state = VOICE_OFF;
     }
     if (g_ui.watch_state == VOICE_FAILED) {
@@ -4327,6 +4338,153 @@ static void paint_tooltip(void)
          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+/* ---- Screen picker ---- */
+
+#define PICK_TW 240 /* a screen's still */
+#define PICK_TH 135
+enum { PICK_SOUND = 100, PICK_CANCEL, PICK_INSIDE };
+
+static int pick_cols(void)
+{
+    return g_ui.nscreens < 3 ? (g_ui.nscreens > 0 ? g_ui.nscreens : 1) : 3;
+}
+
+static RECT pick_rect(void)
+{
+    RECT rc;
+    int cols = pick_cols(), rows = (g_ui.nscreens + cols - 1) / cols;
+    int w = cols * S(PICK_TW + 16) - S(16) + 2 * S(24), h = S(84) + rows * S(PICK_TH + 52) + S(64);
+
+    if (w < S(420))
+        w = S(420);
+    GetClientRect(g_ui.wnd, &rc);
+    return rect((rc.right - w) / 2, (rc.bottom - h) / 2, w, h);
+}
+
+/* Where screen i's still goes. */
+static RECT pick_tile(int i)
+{
+    RECT r = pick_rect();
+    int cols = pick_cols(), grid = cols * S(PICK_TW + 16) - S(16);
+
+    return rect(r.left + (r.right - r.left - grid) / 2 + i % cols * S(PICK_TW + 16), r.top + S(84) + i / cols * S(PICK_TH + 52),
+                S(PICK_TW), S(PICK_TH));
+}
+
+static void share_pick_close(void)
+{
+    for (int i = 0; i < g_ui.nscreens; i++) {
+        r_image_free(g_ui.screen_stills[i]);
+        g_ui.screen_stills[i] = NULL;
+    }
+    g_ui.nscreens = 0;
+    g_ui.share_pick = 0;
+    g_ui.share_pick_hover = -1;
+    redraw();
+}
+
+/* Opens the picker with a still of each screen, taken now. */
+static void share_pick_open(void)
+{
+    g_ui.nscreens = screen_list(g_ui.screens, (int)ARRAYSIZE(g_ui.screens));
+    for (int i = 0; i < g_ui.nscreens; i++) {
+        const RECT *m = &g_ui.screens[i].rect;
+        int w, h;
+        picture_fit(m->right - m->left, m->bottom - m->top, S(PICK_TW), S(PICK_TH), &w, &h);
+        g_ui.screen_stills[i] = r_image_blank(w, h);
+        if (g_ui.screen_stills[i] && !screen_thumbnail(&g_ui.screens[i], w, h, r_image_bits(g_ui.screen_stills[i]))) {
+            r_image_free(g_ui.screen_stills[i]);
+            g_ui.screen_stills[i] = NULL;
+        }
+    }
+    g_ui.share_pick = 1;
+    g_ui.share_pick_hover = -1;
+    redraw();
+}
+
+static void paint_share_pick(void)
+{
+    RECT rc, r;
+    int bx, by;
+
+    if (!g_ui.share_pick)
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    r_fill(0, 0, rc.right, rc.bottom, 0xB0000000u);
+    r = pick_rect();
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 0xFF151515);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(10), 1, 0xFF2A2A2A);
+    text(g_ui.f_title, C_INK, rect(r.left + S(24), r.top + S(18), r.right - r.left - S(48), S(28)), "Share Your Screen",
+         DT_LEFT | DT_SINGLELINE);
+    text(g_ui.f_body, C_MUTED, rect(r.left + S(24), r.top + S(50), r.right - r.left - S(48), S(22)),
+         g_ui.nscreens ? "Choose the screen the others will see." : "No screen can be shared.", DT_LEFT | DT_SINGLELINE);
+    for (int i = 0; i < g_ui.nscreens; i++) {
+        RECT t = pick_tile(i);
+        const RECT *m = &g_ui.screens[i].rect;
+        char label[64];
+        r_round(t.left, t.top, S(PICK_TW), S(PICK_TH), S(6), 0xFF0B0B0B);
+        if (g_ui.screen_stills[i]) {
+            int w, h;
+            r_image_size(g_ui.screen_stills[i], &w, &h);
+            r_image(g_ui.screen_stills[i], t.left + (S(PICK_TW) - w) / 2, t.top + (S(PICK_TH) - h) / 2, w, h, S(6));
+        }
+        if (g_ui.share_pick_hover == i)
+            r_round_outline(t.left - S(3), t.top - S(3), S(PICK_TW) + S(6), S(PICK_TH) + S(6), S(8), S(2), ARGB(C_GREEN));
+        wsprintfA(label, "Screen %d%s \xC2\xB7 %d\xC3\x97%d", i + 1, g_ui.screens[i].primary ? " (main)" : "",
+                  m->right - m->left, m->bottom - m->top);
+        text(g_ui.f_small, g_ui.share_pick_hover == i ? C_INK : C_MUTED, rect(t.left, t.top + S(PICK_TH) + S(8), S(PICK_TW), S(20)),
+             label, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    /* The sound of other programs, and a way out. */
+    bx = r.left + S(24);
+    by = r.bottom - S(52);
+    r_round(bx, by + S(9), S(18), S(18), S(4), g_ui.share_no_sound ? 0xFF2A2A2A : ARGB(C_GREEN));
+    if (!g_ui.share_no_sound)
+        text_w(g_ui.f_icon, C_INK, rect(bx, by + S(9), S(18), S(18)), L"\xE73E", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text(g_ui.f_body, g_ui.share_pick_hover == PICK_SOUND ? C_INK : C_MUTED, rect(bx + S(28), by, S(200), S(36)), "Share sound",
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    r_round(r.right - S(120), by, S(96), S(36), S(6), g_ui.share_pick_hover == PICK_CANCEL ? 0xFF2A2A2A : 0xFF222222);
+    text(g_ui.f_h, C_INK, rect(r.right - S(120), by, S(96), S(36)), "Cancel", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+/* A screen's index, PICK_SOUND, PICK_CANCEL, PICK_INSIDE elsewhere in the picker, or -1 outside it. */
+static int share_pick_hit(int x, int y)
+{
+    RECT r = pick_rect();
+    POINT pt = {x, y};
+    int by = r.bottom - S(52);
+
+    for (int i = 0; i < g_ui.nscreens; i++) {
+        RECT t = pick_tile(i);
+        t.bottom += S(32); /* its label too */
+        if (PtInRect(&t, pt))
+            return i;
+    }
+    if (y >= by && y < by + S(36)) {
+        if (x >= r.left + S(24) && x < r.left + S(200))
+            return PICK_SOUND;
+        if (x >= r.right - S(120) && x < r.right - S(24))
+            return PICK_CANCEL;
+    }
+    return PtInRect(&r, pt) ? PICK_INSIDE : -1;
+}
+
+static void share_pick_click(int x, int y)
+{
+    int h = share_pick_hit(x, y);
+
+    if (h == PICK_SOUND) {
+        g_ui.share_no_sound ^= 1;
+        redraw();
+    } else if (h == PICK_CANCEL || h == -1) {
+        share_pick_close();
+    } else if (h >= 0 && h < g_ui.nscreens) {
+        app_screen_share(1, h, !g_ui.share_no_sound);
+        share_pick_close();
+        stream_refresh();
+    }
+}
+
 static void paint_app(RECT rc)
 {
     paint_main(rc);
@@ -4338,6 +4496,7 @@ static void paint_app(RECT rc)
     paint_tooltip();
     paint_reactors();
     paint_confirm();
+    paint_share_pick();
 }
 
 /* ---- Animations ---- */
@@ -4874,8 +5033,13 @@ static void on_click(int kind, int index)
         redraw();
         break;
     case HIT_VOICE_SHARE:
-        app_screen_share(g_ui.share_state == VOICE_OFF, g_ui.wnd);
-        stream_refresh();
+        /* Sharing starts from the screen picker; the button stops it. */
+        if (g_ui.share_state == VOICE_OFF) {
+            share_pick_open();
+        } else {
+            app_screen_share(0, -1, 0);
+            stream_refresh();
+        }
         break;
     case HIT_VOICE_MUTE:
         g_ui.voice_muted = !(g_ui.voice_muted || g_ui.voice_deafened);
@@ -11272,7 +11436,8 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     if (msg == WM_PASTE && paste_files())
         return 0;
-    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && !g_ui.confirm && !g_ui.bar && g_ui.ac_kind == AC_NONE && g_ui.channel >= 0) {
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && !g_ui.confirm && !g_ui.bar && !g_ui.share_pick && g_ui.ac_kind == AC_NONE &&
+        g_ui.channel >= 0) {
         /* Esc marks the channel read, like Discord. */
         mark_read(g_ui.channel);
         redraw();
@@ -11299,8 +11464,10 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             send_composer();
         return 0;
     }
-    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && (g_ui.confirm || g_ui.bar)) {
-        if (g_ui.confirm)
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && (g_ui.confirm || g_ui.bar || g_ui.share_pick)) {
+        if (g_ui.share_pick)
+            share_pick_close();
+        else if (g_ui.confirm)
             confirm_close(0);
         else
             bar_close();
@@ -11375,6 +11542,14 @@ static void update_hover(int x, int y)
         int h = confirm_hit(x, y);
         if (h != g_ui.confirm_hover) {
             g_ui.confirm_hover = h;
+            redraw();
+        }
+        return;
+    }
+    if (g_ui.share_pick) {
+        int h = share_pick_hit(x, y);
+        if (h != g_ui.share_pick_hover) {
+            g_ui.share_pick_hover = h;
             redraw();
         }
         return;
@@ -11588,6 +11763,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                     confirm_close(0);
                 else if (h == 2)
                     confirm_close(1);
+                return 0;
+            }
+            if (g_ui.share_pick) {
+                share_pick_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 return 0;
             }
             if (toolbar_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &action) >= 0) {

@@ -9,7 +9,7 @@
 
 static struct {
     HANDLE thread, stop, ready;
-    HWND wnd;
+    HMONITOR monitor;
     int fps, ok;
     screen_frame_fn frame;
     void *ctx;
@@ -48,10 +48,9 @@ static void close_duplication(capture_t *c)
     release((IUnknown **)&c->dev);
 }
 
-/* Duplicates the monitor showing wnd, on the adapter it hangs off (the first monitor if none matches). */
-static int open_duplication(capture_t *c, HWND wnd)
+/* Duplicates a monitor, on the adapter it hangs off (the first monitor if none matches). */
+static int open_duplication(capture_t *c, HMONITOR mon)
 {
-    HMONITOR mon = MonitorFromWindow(wnd, MONITOR_DEFAULTTOPRIMARY);
     IDXGIFactory1 *factory = NULL;
     IDXGIAdapter1 *adapter = NULL, *chosen_adapter = NULL;
     IDXGIOutput *output = NULL, *chosen = NULL;
@@ -213,6 +212,77 @@ static int take_frame(capture_t *c, const DXGI_OUTDUPL_FRAME_INFO *info, IDXGIRe
     return changed;
 }
 
+/* ---- Choosing a monitor ---- */
+
+typedef struct {
+    screen_info_t *out;
+    int n, max;
+} list_t;
+
+static BOOL CALLBACK add_monitor(HMONITOR mon, HDC dc, LPRECT r, LPARAM arg)
+{
+    list_t *l = (list_t *)arg;
+    MONITORINFO mi;
+
+    (void)dc;
+    (void)r;
+    mi.cbSize = sizeof mi;
+    if (l->n < l->max && GetMonitorInfoW(mon, &mi)) {
+        l->out[l->n].monitor = mon;
+        l->out[l->n].rect = mi.rcMonitor;
+        l->out[l->n].primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        l->n++;
+    }
+    return TRUE;
+}
+
+int screen_list(screen_info_t *out, int max)
+{
+    list_t l = {out, 0, max};
+
+    EnumDisplayMonitors(NULL, NULL, add_monitor, (LPARAM)&l);
+    /* Left to right, then top to bottom, as they sit on the desk. */
+    for (int i = 1; i < l.n; i++)
+        for (int j = i; j > 0 && (out[j].rect.left < out[j - 1].rect.left ||
+                                  (out[j].rect.left == out[j - 1].rect.left && out[j].rect.top < out[j - 1].rect.top));
+             j--) {
+            screen_info_t t = out[j];
+            out[j] = out[j - 1];
+            out[j - 1] = t;
+        }
+    return l.n;
+}
+
+int screen_thumbnail(const screen_info_t *s, int w, int h, unsigned *out)
+{
+    BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0}, {{0, 0, 0, 0}}};
+    HDC screen = GetDC(NULL), dc = CreateCompatibleDC(screen);
+    void *bits = NULL;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    int ok = 0;
+
+    if (bmp && dc) {
+        HGDIOBJ old = SelectObject(dc, bmp);
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, NULL);
+        ok = StretchBlt(dc, 0, 0, w, h, screen, s->rect.left, s->rect.top, s->rect.right - s->rect.left,
+                        s->rect.bottom - s->rect.top, SRCCOPY | CAPTUREBLT);
+        GdiFlush();
+        if (ok)
+            for (int i = 0; i < w * h; i++)
+                out[i] = ((const unsigned *)bits)[i] | 0xFF000000u;
+        SelectObject(dc, old);
+    }
+    if (bmp)
+        DeleteObject(bmp);
+    if (dc)
+        DeleteDC(dc);
+    ReleaseDC(NULL, screen);
+    return ok;
+}
+
+/* ---- Capturing ---- */
+
 static DWORD WINAPI screen_main(LPVOID arg)
 {
     capture_t c = {0};
@@ -220,7 +290,7 @@ static DWORD WINAPI screen_main(LPVOID arg)
     int dirty = 1;
 
     (void)arg;
-    g_scr.ok = open_duplication(&c, g_scr.wnd);
+    g_scr.ok = open_duplication(&c, g_scr.monitor);
     SetEvent(g_scr.ready);
     next = GetTickCount64();
     while (g_scr.ok && WaitForSingleObject(g_scr.stop, 0) == WAIT_TIMEOUT) {
@@ -232,7 +302,7 @@ static DWORD WINAPI screen_main(LPVOID arg)
             /* Lost (a mode change, the secure desktop): try again a few times a second. */
             if (WaitForSingleObject(g_scr.stop, 250) != WAIT_TIMEOUT)
                 break;
-            dirty |= open_duplication(&c, g_scr.wnd);
+            dirty |= open_duplication(&c, g_scr.monitor);
             continue;
         }
         hr = IDXGIOutputDuplication_AcquireNextFrame(c.dup, next > now ? (UINT)(next - now) : 0, &info, &res);
@@ -264,10 +334,10 @@ static DWORD WINAPI screen_main(LPVOID arg)
     return 0;
 }
 
-int screen_start(HWND wnd, int fps, screen_frame_fn frame, void *ctx)
+int screen_start(HMONITOR monitor, int fps, screen_frame_fn frame, void *ctx)
 {
     screen_stop();
-    g_scr.wnd = wnd;
+    g_scr.monitor = monitor;
     g_scr.fps = fps > 0 ? fps : 15;
     g_scr.frame = frame;
     g_scr.ctx = ctx;

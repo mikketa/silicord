@@ -22,6 +22,7 @@
 #include "vp8_enc.h"
 #include "camera.h"
 #include "screen.h"
+#include "loopback.h"
 
 #define JOIN_TIMEOUT 5000
 
@@ -454,7 +455,7 @@ static void audio_capture(void *ctx, const float *in)
     if (g_muted || g_deafened) {
         if (g_mic_hang) {
             g_mic_hang = 0;
-            voice_quiet();
+            voice_quiet(VOICE_LINK_CALL);
         }
         return;
     }
@@ -468,9 +469,9 @@ static void audio_capture(void *ctx, const float *in)
         return;
     n = opus_encode(&g_encoder, g_mic, packet);
     if (n)
-        voice_send(packet, (size_t)n);
+        voice_send(VOICE_LINK_CALL, packet, (size_t)n);
     if (--g_mic_hang == 0)
-        voice_quiet();
+        voice_quiet(VOICE_LINK_CALL);
 }
 
 /* The microphone test: what it hears, played back. */
@@ -832,6 +833,8 @@ static live_t g_share, g_watch; /* under g_voice_lock */
 /* Held while a stream's connection starts or stops, so a stop never runs between the check and the start. */
 static CRITICAL_SECTION g_live_lock;
 static volatile LONG g_share_state, g_share_active, g_share_want_key, g_watch_state;
+static opus_encoder_t g_share_opus; /* the loopback thread's */
+static int g_share_quiet;           /* its last block was silent */
 
 /* What the capture thread keeps between pictures of our screen. */
 static struct {
@@ -959,6 +962,34 @@ static void share_frame(void *ctx, const unsigned *bgra, int w, int h, int strid
         ui_post(UI_VIDEO, NULL);
 }
 
+/*
+ * Our screen's sound, 20 ms at a time on the loopback thread, once the
+ * stream is up: encoded, or while nothing plays the 3-byte Opus silence,
+ * which keeps its timing for next to nothing. The encoder starts afresh
+ * after a silence, as it would after a gap.
+ */
+static void share_sound(void *ctx, const float *pcm)
+{
+    static const unsigned char silence[3] = {0xF8, 0xFF, 0xFE};
+    unsigned char packet[1276];
+    int quiet = 1, n;
+
+    (void)ctx;
+    if (!g_share_active)
+        return;
+    for (int i = 0; i < 960 && quiet; i++)
+        quiet = pcm[i] == 0.f;
+    if (quiet) {
+        voice_send(VOICE_LINK_SHARE, silence, sizeof silence);
+    } else {
+        if (g_share_quiet)
+            opus_encoder_init(&g_share_opus);
+        if ((n = opus_encode(&g_share_opus, pcm, packet)) > 0)
+            voice_send(VOICE_LINK_SHARE, packet, (size_t)n);
+    }
+    g_share_quiet = quiet;
+}
+
 static void share_state_changed(void *ctx, int state, const char *text)
 {
     (void)ctx;
@@ -1022,6 +1053,7 @@ static void share_stop(int tell)
         LeaveCriticalSection(&g_live_lock);
         return;
     }
+    loopback_stop();
     screen_stop();
     if (InterlockedExchange(&g_share_active, 0))
         voice_video_active(VOICE_LINK_SHARE, 0, 0, 0, 0);
@@ -1071,10 +1103,11 @@ static void watch_stop(int tell)
     ui_post(UI_STREAM, NULL);
 }
 
-int app_screen_share(int on, HWND wnd)
+int app_screen_share(int on, int screen, int sound)
 {
     char guild[24], channel[24];
-    int ok;
+    screen_info_t screens[16];
+    int ok, n = screen_list(screens, 16);
 
     if (!on) {
         share_stop(1);
@@ -1095,12 +1128,21 @@ int app_screen_share(int on, HWND wnd)
         return g_share.on;
     InterlockedExchange(&g_share_state, VOICE_CONNECTING);
     InterlockedExchange(&g_share_active, 0);
-    if (!screen_start(wnd, SHARE_FPS, share_frame, NULL)) {
+    if (screen < 0 || screen >= n)
+        for (screen = 0; screen < n - 1 && !screens[screen].primary; screen++)
+            ;
+    if (!n || !screen_start(screens[screen].monitor, SHARE_FPS, share_frame, NULL)) {
         EnterCriticalSection(&g_voice_lock);
         g_share.on = 0;
         LeaveCriticalSection(&g_voice_lock);
         InterlockedExchange(&g_share_state, VOICE_OFF);
         return 0;
+    }
+    if (sound) {
+        opus_encoder_init(&g_share_opus);
+        g_share_quiet = 1;
+        if (!loopback_start(share_sound, NULL))
+            log_line("", "stream: this Windows cannot capture the sound of other programs (it needs version 2004)");
     }
     send_stream_create(guild, channel);
     send_stream_op(22, g_share.key);

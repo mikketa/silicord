@@ -769,9 +769,9 @@ static int send_frame(voice_t *v, const unsigned char *opus, size_t n)
     return ok;
 }
 
-int voice_send(const unsigned char *opus, size_t n)
+int voice_send(voice_link_t link, const unsigned char *opus, size_t n)
 {
-    voice_t *v = &g_links[VOICE_LINK_CALL];
+    voice_t *v = &g_links[link];
     int ok = 0;
 
     if (!v->init)
@@ -779,7 +779,7 @@ int voice_send(const unsigned char *opus, size_t n)
     EnterCriticalSection(&v->lock);
     if (v->have_key && v->udp != INVALID_SOCKET) {
         if (!v->speaking) {
-            send_speaking(v, 1);
+            send_speaking(v, v->p.screen ? 2 : 1);
             v->speaking = 1;
         }
         ok = send_frame(v, opus, n);
@@ -788,10 +788,10 @@ int voice_send(const unsigned char *opus, size_t n)
     return ok;
 }
 
-void voice_quiet(void)
+void voice_quiet(voice_link_t link)
 {
     static const unsigned char silence[3] = {0xF8, 0xFF, 0xFE};
-    voice_t *v = &g_links[VOICE_LINK_CALL];
+    voice_t *v = &g_links[link];
 
     if (!v->init)
         return;
@@ -820,11 +820,15 @@ int voice_video_active(voice_link_t link, int on, int w, int h, int fps)
         v->video_h = h;
         v->video_fps = fps;
         /* A stream announces itself as speaking (its sound) before its video, as Discord's clients do. */
-        if (v->p.screen && on)
+        if (v->p.screen && on && !v->speaking) {
             send_speaking(v, 2);
+            v->speaking = 1;
+        }
         send_our_video(v, on);
-        if (v->p.screen && !on)
+        if (v->p.screen && !on && v->speaking) {
             send_speaking(v, 0);
+            v->speaking = 0;
+        }
     }
     LeaveCriticalSection(&v->lock);
     return ok;

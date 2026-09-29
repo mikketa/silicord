@@ -95,5 +95,6 @@ Everything is written here, from the cryptography to the codec: no third-party c
 - [x] VP8 encoder: key and inter frames, motion search, rate control; ffmpeg decodes its streams exactly as ours does
 - [x] Sending the camera: Media Foundation capture, our VP8 encoder, RTP with RID and playout delay, key frames on request
 - [x] Watching Go Live streams: a voice connection of their own (ops 20 and 19, `STREAM_CREATE`, `STREAM_SERVER_UPDATE`), their picture and sound, the stream filling the call
-- [x] Sharing the screen (Go Live): DXGI Desktop Duplication of the window's monitor with the mouse pointer, scaled to 720p, our VP8 encoder at 15 fps
-- [ ] Go Live tested against Discord's voice servers; streams sent in H.264 (we decode VP8 only); the shared screen's sound
+- [x] Sharing the screen (Go Live): a picker with a still of each monitor, DXGI Desktop Duplication with the mouse pointer, scaled to 720p, our VP8 encoder at 15 fps
+- [x] The shared screen's sound: WASAPI process loopback of every program but ours (Windows 10 2004 and later), Opus, silence as 3-byte frames
+- [ ] Go Live tested against Discord's voice servers; streams sent in H.264 (we decode VP8 only); sharing a single window

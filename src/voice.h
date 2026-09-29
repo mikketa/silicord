@@ -43,10 +43,10 @@ typedef struct {
 int voice_start(voice_link_t link, const voice_params_t *p, const voice_events_t *ev);
 /* Leaves: closes the WebSocket and waits for the threads. */
 void voice_stop(voice_link_t link);
-/* Sends one 20 ms Opus frame in the call. */
-int voice_send(const unsigned char *opus, size_t n);
+/* Sends one 20 ms Opus frame: our microphone in the call, or our screen's sound on our stream. */
+int voice_send(voice_link_t link, const unsigned char *opus, size_t n);
 /* Ends a burst of speech: silence frames, then not speaking. */
-void voice_quiet(void);
+void voice_quiet(voice_link_t link);
 /* Starts or stops sending our video on `link` (announced to the server first, with its size and rate). */
 int voice_video_active(voice_link_t link, int on, int w, int h, int fps);
 /* One VP8 frame of our video on `link`; `timestamp` counts at 90 kHz. */
