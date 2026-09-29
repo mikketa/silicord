@@ -1416,6 +1416,18 @@ static int multipart(rest_job_t *j, sb_t *body)
     return ok;
 }
 
+/* A snowflake for now: lets Discord drop duplicates if the request is retried. */
+static unsigned long long nonce_now(void)
+{
+    FILETIME ft;
+    ULARGE_INTEGER now;
+
+    GetSystemTimeAsFileTime(&ft);
+    now.LowPart = ft.dwLowDateTime;
+    now.HighPart = ft.dwHighDateTime;
+    return (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22;
+}
+
 static DWORD WINAPI send_main(LPVOID arg)
 {
     rest_job_t *j = arg;
@@ -1423,21 +1435,12 @@ static DWORD WINAPI send_main(LPVOID arg)
     sb_t body = {0};
     json_t root;
     char path[96];
-    FILETIME ft;
-    ULARGE_INTEGER now;
-    unsigned long long nonce;
-
-    /* A snowflake for now: lets Discord drop duplicates if the request is retried. */
-    GetSystemTimeAsFileTime(&ft);
-    now.LowPart = ft.dwLowDateTime;
-    now.HighPart = ft.dwHighDateTime;
-    nonce = (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22;
 
     wsprintfA(path, "/channels/%s/messages", j->channel);
     sb_add(&body, "{\"content\":");
     sb_json_str(&body, j->text.data, j->text.len);
     sb_add(&body, ",\"nonce\":\"");
-    sb_u64(&body, nonce);
+    sb_u64(&body, nonce_now());
     sb_add(&body, "\",\"tts\":false");
     if (j->sticker[0]) {
         sb_add(&body, ",\"sticker_ids\":[\"");
@@ -2340,14 +2343,8 @@ static DWORD WINAPI command_main(LPVOID arg)
     rest_job_t *j = arg;
     http_resp_t resp = {0};
     sb_t body = {0};
-    char session[80], nonce[24];
-    FILETIME ft;
-    ULARGE_INTEGER now;
+    char session[80];
 
-    GetSystemTimeAsFileTime(&ft);
-    now.LowPart = ft.dwLowDateTime;
-    now.HighPart = ft.dwHighDateTime;
-    wsprintfA(nonce, "%I64u", (now.QuadPart / 10000 - 11644473600000ull - 1420070400000ull) << 22);
     gw_session_id(session, sizeof session);
     sb_add(&body, "{\"type\":");
     sb_i64(&body, j->flag ? j->flag : 2);
@@ -2370,7 +2367,7 @@ static DWORD WINAPI command_main(LPVOID arg)
     sb_add(&body, "\",\"data\":");
     sb_addn(&body, j->text.data, j->text.len);
     sb_add(&body, ",\"nonce\":\"");
-    sb_add(&body, nonce);
+    sb_u64(&body, nonce_now());
     sb_add(&body, "\"}");
     /* The answer (or the bot's "thinking...") comes over the gateway like any message. */
     if (!http_request("POST", "/interactions", j->token.data, body.data, body.len, &resp)) {
