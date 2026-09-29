@@ -76,6 +76,7 @@ static void test_author_and_reply(void)
                 "\"message_reference\":{\"message_id\":\"1\"}}", &m) && lstrcmpA(m.reply_id, "1") == 0 &&
           str_eq(&m.reply, "ann: first line") && str_eq(&m.text, "yes"),
           "reply keeps the first line of the original");
+    check(m.reply_name_len == 3, "the reply knows where the name ends");
     msg_free(&m);
 
     check(parse("{\"id\":\"3\",\"content\":\"x\",\"referenced_message\":null}", &m) && m.reply.len == 0,

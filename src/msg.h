@@ -84,6 +84,11 @@ typedef struct {
     sb_t content;    /* raw content as sent, for editing */
     sb_t reply;      /* "name: first line" of the message replied to, or empty */
     char reply_id[24];
+    /* The author replied to, as Discord shows them above the reply: their picture and "@name". */
+    char reply_author[24];
+    char reply_avatar[40];
+    int reply_name_len;  /* bytes of `reply` before ": " */
+    int reply_pings;     /* the reply mentions its author (Discord's "@ ON") */
     int system;      /* join notices and other non-user messages */
     int deleted;
     int edited;

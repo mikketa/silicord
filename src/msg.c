@@ -223,10 +223,10 @@ static void plain_text(const char *s, size_t n, sb_t *out)
     }
 }
 
-static void parse_reply(json_t obj, sb_t *out)
+static void parse_reply(json_t obj, msg_t *m)
 {
     json_t ref = {0}, author, content, mref, v;
-    sb_t raw = {0}, formatted = {0}, plain = {0};
+    sb_t raw = {0}, formatted = {0}, plain = {0}, *out = &m->reply;
 
     /* A reply whose message is gone: Discord sends referenced_message null. */
     json_get(obj, "referenced_message", &ref);
@@ -247,8 +247,27 @@ static void parse_reply(json_t obj, sb_t *out)
         }
         return;
     }
-    if (json_get(ref, "author", &author))
+    if (json_get(ref, "author", &author)) {
+        json_t list, u;
+        json_iter_t it;
         user_name(author, out);
+        if (json_get(author, "id", &v))
+            json_raw(v, m->reply_author, sizeof m->reply_author);
+        if (json_get(author, "avatar", &v) && json_type(v) == JSON_STRING)
+            json_raw(v, m->reply_avatar, sizeof m->reply_avatar);
+        /* A reply that pings: its author is among the message's mentions. */
+        if (m->reply_author[0] && json_get(obj, "mentions", &list)) {
+            json_iter(list, &it);
+            while (!m->reply_pings && json_next(&it, NULL, &u)) {
+                char id[24];
+                if (json_get(u, "id", &v)) {
+                    json_raw(v, id, sizeof id);
+                    m->reply_pings = str_eq(id, m->reply_author);
+                }
+            }
+        }
+    }
+    m->reply_name_len = (int)out->len;
     sb_add(out, ": ");
     if (json_get(ref, "content", &content) && json_str(content, &raw) && raw.len) {
         json_t mentions = {0};
@@ -832,7 +851,7 @@ int msg_parse(json_t obj, msg_t *out)
                !out->sticker_id[0] && !out->poll && !out->ncomponents) {
         set_system(out, "sent a system message.");
     }
-    parse_reply(obj, &out->reply);
+    parse_reply(obj, out);
     if (json_get(obj, "message_reference", &v) && json_get(v, "message_id", &name))
         json_raw(name, out->reply_id, sizeof out->reply_id);
     return 1;
