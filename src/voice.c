@@ -519,8 +519,6 @@ static int handle(voice_t *v, const sb_t *msg)
             set_speaker(v, (unsigned)ssrc, user);
             LeaveCriticalSection(&v->lock);
         }
-        if (user && v->ev.speaking)
-            v->ev.speaking(v->ev.ctx, user, json_num(d, "speaking") > 0);
         break;
     }
     case OP_VIDEO: {

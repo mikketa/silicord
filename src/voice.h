@@ -22,7 +22,6 @@ typedef struct {
     void (*state)(void *ctx, int state, const char *text);
     /* One decrypted Opus packet from `user`, with its RTP sequence number. */
     void (*frame)(void *ctx, unsigned long long user, unsigned seq, const unsigned char *opus, size_t n);
-    void (*speaking)(void *ctx, unsigned long long user, int on);
     /* Someone left the call. */
     void (*left)(void *ctx, unsigned long long user);
     /* Someone's camera or stream started or stopped. */
