@@ -192,7 +192,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -215,7 +215,7 @@ typedef struct {
     int home_page; /* HOME_*: what home shows when no conversation is open */
     int shop_state; /* 0 not asked, 1 loading, 2 loaded, 3 failed */
     int quests_state; /* the same, for the Quests page */
-    int nitro_hover;  /* over the Nitro page's Subscribe */
+    int nitro_hover;  /* NB_*: what the pointer is over on the Nitro page */
     unsigned char folder_open[64];
     int hover_kind, hover_index;
     image_t *images;
@@ -2828,7 +2828,9 @@ static int quests_hit(int x, int y);
 static void quests_scroll_by(int delta);
 static void paint_nitro(RECT rc, int x0, int w);
 static int nitro_view(void);
-static RECT nitro_button(int x0, int w);
+static int nitro_hit(int x, int y);
+static void nitro_click(int id);
+static void nitro_scroll_to(int to);
 static void rels_clear(void);
 static void paint_autocomplete(void);
 static void ac_update(void);
@@ -5271,7 +5273,11 @@ static void make_fonts(void)
     g_ui.f_section = r_font(L"Segoe UI", S(14), FW_NORMAL, 0);
     g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
     g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
-    g_ui.f_nitro = r_font(L"Segoe UI", S(32), FW_BOLD, 0);
+    /* Discord's marketing headings: heavy italic capitals (Segoe UI Black stands in for its own face). */
+    g_ui.f_nitro = r_font(L"Segoe UI", S(64), FW_BLACK, 1);
+    g_ui.f_nitro_h = r_font(L"Segoe UI", S(48), FW_BLACK, 1);
+    g_ui.f_nitro_card = r_font(L"Segoe UI", S(32), FW_BOLD, 0);
+    g_ui.f_h1x = r_font(L"Segoe UI", S(24), FW_EXTRABOLD, 0); /* Discord's heading-xxl/extrabold */
     build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
@@ -10129,18 +10135,41 @@ static void shop_scroll_by(int delta)
 
 /* ---- Nitro ---- */
 
-/* Discord's Nitro page: what it gives, and a way to subscribe, which happens on discord.com. */
+/*
+ * Discord's Nitro page, laid out as its marketing page is: a bar of tabs that
+ * jump to their section, a hero with a huge italic heading, What's New, the
+ * best perks, the plans, and a last call to subscribe. Subscribing and gifting
+ * happen on discord.com, where every button leads.
+ */
+enum { NB_NONE, NB_TAB, NB_HEART = NB_TAB + 5, NB_GIFT_TOP, NB_SUBSCRIBE, NB_GIFT, NB_PLAN_BASIC, NB_PLAN_NITRO, NB_FOOT_SUB,
+       NB_FOOT_GIFT };
+
+/* The perks Discord's page shows, with its words and its art (the dark theme's). */
 static const struct {
-    const wchar_t *icon;
-    const char *title, *text;
+    const char *art, *title, *text;
 } k_nitro_perks[] = {
-    {L"\xE76E", "Custom emoji anywhere", "Use custom emoji and stickers in any server, and animated ones too."},
-    {L"\xE8FB", "Super Reactions", "React with animated Super Reactions that burst across the message."},
-    {L"\xE714", "HD video streaming", "Stream your screen and camera in HD, up to 4K at 60 frames a second."},
-    {L"\xE898", "Bigger uploads", "Share files up to 500 MB, full-quality videos and screenshots included."},
-    {L"\xE77B", "Your profile, your way", "Animated avatar, profile banner, theme colors and display name styles."},
-    {L"\xE734", "Server boosts", "Two Server Boosts, and 30% off extra ones for the servers you love."},
+    {"https://discord.com/assets/d8edaaf5cb32248f.svg", "More Emoji Power", "Hype, roast, and meme with custom emoji anywhere."},
+    {"https://discord.com/assets/3bcdc01b26c7f691.svg", "HD Video",
+     "Better video resolutions for all your streams. Stream apps and games in sweet, sweet HD."},
+    {"https://discord.com/assets/010eae6a6dbacc63.svg", "500 MB Uploads", "Upload what you want with increased 500 MB upload size."},
+    {"https://cdn.discordapp.com/assets/content/bca160c31fc5390dd2b41d90060edcc912a45f6ab3beab44ea79e16bf1f6530f.png",
+     "Custom App Icons", "Choose a mobile and in-app desktop icon that fits your vibe."},
+    {"https://discord.com/assets/bd6751720573fb38.svg", "Use Custom Sounds",
+     "Use custom sounds and personalized entrance sounds across voice channels."},
+    {"https://discord.com/assets/1eb1b74667b4c0f0.svg", "Video Backgrounds", "Make video calls unique with your own backgrounds."},
+    {"https://discord.com/assets/99b308eabe7fcfd2.svg", "Unlimited Super Reactions",
+     "We made Super Reactions unlimited so you can unleash the chaos in your chats."},
+    {"https://discord.com/assets/0838bda6ecd20d91.svg", "Special Sticker Access", "Use custom stickers anywhere."},
+    {"https://discord.com/assets/42e77ef3b6c4c1bb.svg", "Subscriber Badge", "Get this cool badge for being a Nitro subscriber."},
 };
+
+/* Discord's own words for the page (its English strings), the apostrophe curly as there. */
+static const char *const k_nitro_tabs[5] = {"Home", "What\xE2\x80\x99s New", "Best of Nitro", "Plans", "Compare"};
+
+static struct {
+    int scroll, height;
+    int section[5]; /* where each tab's section starts, in content coordinates */
+} g_nitro;
 
 static int nitro_view(void)
 {
@@ -10148,54 +10177,285 @@ static int nitro_view(void)
            g_ui.home_page == HOME_NITRO;
 }
 
-#define NITRO_HERO_H 280
+#define NITRO_NAV_H 48
+#define NITRO_PAD 40
 
-/* The Subscribe button of the hero, in the main pane's coordinates. */
-static RECT nitro_button(int x0, int w)
+/* A heading in Discord's marketing style: heavy italic capitals, lines packed tight, centered in w. Returns its height. */
+static int nitro_heading(r_font_t *f, int px, int x, int y, int w, const char *s, int draw)
 {
-    (void)w;
-    return rect(x0 + S(SHOP_PAD) + S(40), S(HEADER_H) + S(SHOP_PAD) + S(NITRO_HERO_H) - S(40) - S(44), S(160), S(44));
+    wchar_t *text = utf8_to_wide(s, lstrlenA(s)), line[256];
+    int lh = px * 86 / 100, h = 0;
+
+    CharUpperW(text);
+    for (const wchar_t *p = text; *p;) {
+        int n = 0, fit = 0;
+        /* as many words as fit */
+        for (;;) {
+            int k = n;
+            while (p[k] && p[k] != L' ')
+                k++;
+            if (k > 250)
+                break;
+            lstrcpynW(line, p, k + 1);
+            if (fit && r_text_width(f, line, -1) > w)
+                break;
+            fit = k;
+            if (!p[k])
+                break;
+            n = k + 1;
+        }
+        if (!fit)
+            fit = lstrlenW(p) < 250 ? lstrlenW(p) : 250;
+        lstrcpynW(line, p, fit + 1);
+        if (draw)
+            r_text(f, 0xFFFFFFFFu, x, y + h - px / 8, w, px * 5 / 4, line, -1, R_CENTER | R_SINGLE);
+        h += lh;
+        p += fit;
+        while (*p == L' ')
+            p++;
+    }
+    mem_free(text);
+    return h;
+}
+
+/* A rounded button with an optional glyph; `hot` eases its color. */
+static void nitro_button_at(RECT b, const wchar_t *glyph, const char *label, unsigned bg, unsigned bg_hot, unsigned ink, int hot,
+                            int id)
+{
+    float t = tween_on(TW_NITRO, id, hot, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
+    wchar_t *w = utf8_to_wide(label, lstrlenA(label));
+    int tw = r_text_width(g_ui.f_nav, w, -1) + (glyph ? S(28) : 0), tx = b.left + (b.right - b.left - tw) / 2;
+
+    r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(8), lerp_argb(bg, bg_hot, t));
+    if (glyph)
+        r_text(g_ui.f_icon_mid, ink, tx, b.top, S(22), b.bottom - b.top, glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+    r_text(g_ui.f_nav, ink, tx + (glyph ? S(28) : 0), b.top, tw, b.bottom - b.top, w, -1, R_LEFT | R_VCENTER | R_SINGLE);
+    mem_free(w);
+}
+
+/*
+ * Lays the page out from x0, w wide, under the tab bar: paints it, or returns
+ * the NB_* thing at (hx, hy). Also notes where each section starts.
+ */
+static int nitro_walk(RECT rc, int x0, int w, int draw, int hx, int hy)
+{
+    int top = S(HEADER_H), y = top - g_nitro.scroll, cw = w - 2 * S(NITRO_PAD), x = x0 + S(NITRO_PAD), hit = NB_NONE;
+    int hover = g_ui.nitro_hover;
+
+#define NB_HIT(r, id)                                                                                                      \
+    if (!draw && hx >= (r).left && hx < (r).right && hy >= (r).top && hy < (r).bottom && hy >= top)                     \
+        hit = (id);
+
+    /* Hero: Nitro's glow, the heading, Subscribe and Gift, the fine print. */
+    g_nitro.section[0] = 0;
+    if (draw) {
+        r_fill(x0, y, w, S(620), 0xFF000000u);
+        r_round_gradient(x0, y - S(40), w, S(560), 0, 0xFFB43FD4u, 0x00000000u);
+        r_round_gradient(x0, y + S(260), w, S(360), 0, 0x00000000u, 0xFF000000u);
+    }
+    {
+        int hy0 = y + S(76), hh = nitro_heading(g_ui.f_nitro, S(64), x0 + (w - S(760)) / 2, hy0, S(760),
+                                                "Unlock a World of Perks with Nitro", draw);
+        int by = hy0 + hh + S(32), bw1 = S(150), bw2 = S(170), bx = x0 + (w - bw1 - bw2 - S(16)) / 2;
+        RECT sub = rect(bx, by, bw1, S(44)), gift = rect(bx + bw1 + S(16), by, bw2, S(44));
+        if (draw) {
+            nitro_button_at(sub, L"\xE734", "Subscribe", 0xFFFFFFFFu, 0xFFEDEDF7u, 0xFF000000u, hover == NB_SUBSCRIBE, NB_SUBSCRIBE);
+            nitro_button_at(gift, L"\xF133", "Gift Nitro", 0xFF232428u, 0xFF2E2F34u, 0xFFFFFFFFu, hover == NB_GIFT, NB_GIFT);
+            text(g_ui.f_section, C_MUTED, rect(x0 + (w - S(420)) / 2, by + S(64), S(420), S(44)),
+                 "Nitro is a recurring subscription. Cancel at any time in your settings.",
+                 DT_CENTER | DT_WORDBREAK);
+        }
+        NB_HIT(sub, NB_SUBSCRIBE);
+        NB_HIT(gift, NB_GIFT);
+        y = by + S(160);
+    }
+
+    /* What's New: one big card. */
+    g_nitro.section[1] = y + g_nitro.scroll - top;
+    y += nitro_heading(g_ui.f_nitro_h, S(48), x, y, cw, "What\xE2\x80\x99s New", draw) + S(40);
+    if (draw && r_visible(y, S(360))) {
+        r_round_gradient(x, y, cw, S(360), S(16), 0xFF0F3A22u, 0xFF0A0A0Cu);
+        r_round_outline(x, y, cw, S(360), S(16), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        text(g_ui.f_nitro_card, C_INK, rect(x + S(48), y + S(56), cw / 2, S(140)),
+             "Your Nitro subscription now includes Xbox Game Pass (Starter Edition)", DT_LEFT | DT_WORDBREAK);
+        text(g_ui.f_body, C_TEXT, rect(x + S(48), y + S(220), cw / 2, S(60)),
+             "Play a rotating library of games on PC with your Nitro subscription, at no extra cost.", DT_LEFT | DT_WORDBREAK);
+    }
+    y += S(360) + S(96);
+
+    /* Best of Nitro: "Favorite Nitro Perks", cards with Discord's art (a grid of 260 wide at least, 16 apart). */
+    g_nitro.section[2] = y + g_nitro.scroll - top;
+    if (draw)
+        text(g_ui.f_h1x, C_INK, rect(x, y, cw, S(32)), "Favorite Nitro Perks", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    y += S(32) + S(32);
+    {
+        int cols = (cw + S(16)) / (S(260) + S(16)), pw, ph = S(300);
+        if (cols < 1)
+            cols = 1;
+        pw = (cw - (cols - 1) * S(16)) / cols;
+        for (int k = 0; k < (int)ARRAYSIZE(k_nitro_perks); k++) {
+            int px = x + (k % cols) * (pw + S(16)), py = y + (k / cols) * (ph + S(16));
+            if (!draw || !r_visible(py, ph))
+                continue;
+            r_round(px, py, pw, ph, S(12), 0xFF0A0A0Cu);
+            r_round_outline(px, py, pw, ph, S(12), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+            {
+                /* The art, fitted in its box above the words, as the page sizes it. */
+                r_image_t *art = shop_image(k_nitro_perks[k].art, S(240));
+                if (art) {
+                    int iw, ih, bw = pw - S(48), bh = S(140), fw, fh;
+                    r_image_size(art, &iw, &ih);
+                    fw = bw;
+                    fh = iw ? ih * fw / iw : bh;
+                    if (fh > bh) {
+                        fh = bh;
+                        fw = ih ? iw * fh / ih : bw;
+                    }
+                    r_image(art, px + (pw - fw) / 2, py + S(32) + (bh - fh) / 2, fw, fh, 0);
+                }
+            }
+            text(g_ui.f_h, C_INK, rect(px + S(24), py + S(32) + S(140) + S(16), pw - S(48), S(22)), k_nitro_perks[k].title,
+                 DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            text(g_ui.f_section, C_MUTED, rect(px + S(24), py + S(32) + S(140) + S(46), pw - S(48), S(60)), k_nitro_perks[k].text,
+                 DT_CENTER | DT_WORDBREAK);
+        }
+        y += ((int)ARRAYSIZE(k_nitro_perks) + cols - 1) / cols * (ph + S(16)) + S(80);
+    }
+
+    /* Plans: Nitro Basic and Nitro, side by side. */
+    g_nitro.section[3] = g_nitro.section[4] = y + g_nitro.scroll - top;
+    y += nitro_heading(g_ui.f_nitro_h, S(48), x, y, cw, "Plans", draw) + S(12);
+    if (draw)
+        text(g_ui.f_body, C_MUTED, rect(x, y, cw, S(24)), "Pick the plan that works for you. Cancel at any time.",
+             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    y += S(24) + S(32);
+    {
+        static const char *const names[2] = {"Nitro Basic", "Nitro"};
+        static const char *const lines[2][4] = {
+            {"Custom emoji anywhere", "500 MB uploads", "Special Nitro badge", "Longer messages"},
+            {"Everything in Basic", "HD video streaming", "2 Server Boosts", "Custom profiles and more"}};
+        int pw = cw >= S(620) ? (cw - S(16)) / 2 : cw, ph = S(300);
+        for (int k = 0; k < 2; k++) {
+            int px = x + (pw == cw ? 0 : k * (pw + S(16))), py = y + (pw == cw ? k * (ph + S(16)) : 0);
+            RECT b = rect(px + S(32), py + ph - S(32) - S(44), pw - S(64), S(44));
+            if (draw && r_visible(py, ph)) {
+                if (k)
+                    r_round_gradient(px, py, pw, ph, S(12), 0xFF5A36C9u, 0xFFA23FC4u);
+                else
+                    r_round_gradient(px, py, pw, ph, S(12), 0xFF3B4BCFu, 0xFF2B63D9u);
+                text(g_ui.f_nitro_card, 0xFFFFFFFFu, rect(px + S(32), py + S(28), pw - S(64), S(44)), names[k],
+                     DT_LEFT | DT_SINGLELINE);
+                for (int l = 0; l < 4; l++) {
+                    text_w(g_ui.f_icon, 0xFFFFFFFFu, rect(px + S(32), py + S(92) + l * S(30), S(20), S(24)), ICON_CHECK, -1,
+                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    text(g_ui.f_body, 0xFFFFFFFFu, rect(px + S(60), py + S(92) + l * S(30), pw - S(92), S(24)), lines[k][l],
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
+                nitro_button_at(b, NULL, "Subscribe", 0xFFFFFFFFu, 0xFFEDEDF7u, 0xFF000000u, hover == NB_PLAN_BASIC + k,
+                                NB_PLAN_BASIC + k);
+            }
+            NB_HIT(b, NB_PLAN_BASIC + k);
+        }
+        y += (pw == cw ? 2 * ph + S(16) : ph) + S(120);
+    }
+
+    /* The last call. */
+    {
+        int hh = nitro_heading(g_ui.f_nitro, S(64), x0 + (w - S(760)) / 2, y, S(760), "What are you waiting for?", draw);
+        int by = y + hh + S(32), bw1 = S(150), bw2 = S(170), bx = x0 + (w - bw1 - bw2 - S(16)) / 2;
+        RECT sub = rect(bx, by, bw1, S(44)), gift = rect(bx + bw1 + S(16), by, bw2, S(44));
+        if (draw) {
+            nitro_button_at(sub, L"\xE734", "Subscribe", 0xFFFFFFFFu, 0xFFEDEDF7u, 0xFF000000u, hover == NB_FOOT_SUB, NB_FOOT_SUB);
+            nitro_button_at(gift, L"\xF133", "Gift Nitro", 0xFF232428u, 0xFF2E2F34u, 0xFFFFFFFFu, hover == NB_FOOT_GIFT,
+                            NB_FOOT_GIFT);
+        }
+        NB_HIT(sub, NB_FOOT_SUB);
+        NB_HIT(gift, NB_FOOT_GIFT);
+        y = by + S(44) + S(96);
+    }
+    g_nitro.height = y + g_nitro.scroll - top;
+
+    /* The tab bar stays on top: the Nitro mark, the tabs, heart and Gift Nitro. */
+    if (draw) {
+        int tx = x0 + S(64);
+        r_fill(x0, 0, w, S(NITRO_NAV_H), g_nitro.scroll > 0 ? 0xFF0A0A0Cu : 0xFF000000u);
+        text_w(g_ui.f_icon_mid, C_INK, rect(x0 + S(16), 0, S(28), S(NITRO_NAV_H)), L"\xE734", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        for (int k = 0; k < 5; k++) {
+            int tw = text_width(g_ui.f_nav, k_nitro_tabs[k]), on = k == 0 ? g_nitro.scroll < g_nitro.section[1] - S(200) : 0;
+            text(g_ui.f_nav, hover == NB_TAB + k || on ? C_INK : C_TEXT, rect(tx, 0, tw + S(4), S(NITRO_NAV_H)), k_nitro_tabs[k],
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (on)
+                r_fill(tx, S(NITRO_NAV_H) - S(2), tw, S(2), 0xFFFFFFFFu);
+            tx += tw + S(32);
+        }
+        {
+            RECT heart = rect(x0 + w - S(16) - S(170) - S(12) - S(40), S(4), S(40), S(40)),
+                 gift = rect(x0 + w - S(16) - S(170), S(4), S(170), S(40));
+            nitro_button_at(heart, L"\xEB51", "", 0xFF121214u, 0xFF1E1E20u, 0xFFFFFFFFu, hover == NB_HEART, NB_HEART);
+            nitro_button_at(gift, L"\xF133", "Gift Nitro", 0xFF121214u, 0xFF1E1E20u, 0xFFFFFFFFu, hover == NB_GIFT_TOP, NB_GIFT_TOP);
+        }
+    } else if (hy < top) {
+        int tx = x0 + S(64);
+        RECT heart = rect(x0 + w - S(16) - S(170) - S(12) - S(40), S(4), S(40), S(40)), gift = rect(x0 + w - S(16) - S(170), S(4), S(170), S(40));
+        for (int k = 0; k < 5; k++) {
+            int tw = text_width(g_ui.f_nav, k_nitro_tabs[k]);
+            if (hx >= tx && hx < tx + tw)
+                return NB_TAB + k;
+            tx += tw + S(32);
+        }
+        if (hx >= heart.left && hx < heart.right && hy >= heart.top && hy < heart.bottom)
+            return NB_HEART;
+        if (hx >= gift.left && hx < gift.right && hy >= gift.top && hy < gift.bottom)
+            return NB_GIFT_TOP;
+        return NB_NONE;
+    }
+#undef NB_HIT
+    (void)rc;
+    return hit;
 }
 
 static void paint_nitro(RECT rc, int x0, int w)
 {
-    int cw = w - 2 * S(SHOP_PAD), x = x0 + S(SHOP_PAD), y = S(HEADER_H) + S(SHOP_PAD);
-    int cols = cw >= S(900) ? 3 : cw >= S(560) ? 2 : 1, pw = (cw - (cols - 1) * S(SHOP_GAP)) / cols;
-    RECT b = nitro_button(x0, w);
-    float t = tween_on(TW_NITRO, 0, g_ui.nitro_hover, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
+    r_clip(x0, 0, w, rc.bottom);
+    nitro_walk(rc, x0, w, 1, 0, 0);
+    r_unclip();
+}
 
-    (void)rc;
-    fill(x0, S(HEADER_H) - S(1), w, S(1) > 1 ? S(1) : 1, C_LINE);
-    text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(16), 0, S(24), S(HEADER_H)), L"\xE734", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    text(g_ui.f_h, C_INK, rect(x0 + S(48), 0, w - S(64), S(HEADER_H)), "Nitro", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+static int nitro_hit(int x, int y)
+{
+    RECT rc;
+    int x0 = S(RAIL_W + SIDE_W);
 
-    /* The hero: Nitro's purple to pink, its promise, and Subscribe. */
-    r_round_gradient(x, y, cw, S(NITRO_HERO_H), S(12), 0xFF6A38C2u, 0xFFB845C1u);
-    r_round(x, y, cw, S(NITRO_HERO_H), S(12), 0x33000000u);
-    text(g_ui.f_nitro, 0xFFFFFFFFu, rect(x + S(40), y + S(40), cw - S(80), S(44)), "Unleash more fun with Nitro",
-         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    text(g_ui.f_body, 0xFFFFFFFFu, rect(x + S(40), y + S(96), cw * 3 / 5, S(80)),
-         "Subscribe to Nitro to upgrade your emoji, personalize your profile, share bigger files and so much more.",
-         DT_LEFT | DT_WORDBREAK);
-    r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(22), lerp_argb(0xFFFFFFFFu, 0xFFEDEDF7u, t));
-    text(g_ui.f_nav, C_RAIL, b, "Subscribe", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    y += S(NITRO_HERO_H) + S(32);
+    if (!nitro_view() || x < x0)
+        return NB_NONE;
+    GetClientRect(g_ui.wnd, &rc);
+    return nitro_walk(rc, x0, main_right() - x0, 0, x, y);
+}
 
-    text(g_ui.f_h2, C_INK, rect(x, y, cw, S(28)), "Popular Nitro perks", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    y += S(44);
-    for (int k = 0; k < (int)ARRAYSIZE(k_nitro_perks); k++) {
-        int px = x + (k % cols) * (pw + S(SHOP_GAP)), py = y + (k / cols) * (S(140) + S(SHOP_GAP));
-        if (!r_visible(py, S(140)))
-            continue;
-        r_round(px, py, pw, S(140), S(8), 0xFF121214u);
-        r_round_outline(px, py, pw, S(140), S(8), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
-        r_round_gradient(px + S(20), py + S(20), S(40), S(40), S(20), 0xFF8A5CF6u, 0xFFD946EFu);
-        r_text(g_ui.f_icon_mid, 0xFFFFFFFFu, px + S(20), py + S(20), S(40), S(40), k_nitro_perks[k].icon, -1,
-               R_CENTER | R_VCENTER | R_SINGLE);
-        text(g_ui.f_h, C_INK, rect(px + S(20), py + S(70), pw - S(40), S(22)), k_nitro_perks[k].title,
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        text(g_ui.f_section, C_MUTED, rect(px + S(20), py + S(94), pw - S(40), S(40)), k_nitro_perks[k].text,
-             DT_LEFT | DT_WORDBREAK);
+static void nitro_scroll_to(int to)
+{
+    RECT rc;
+    int max;
+
+    GetClientRect(g_ui.wnd, &rc);
+    max = g_nitro.height - (rc.bottom - S(HEADER_H));
+    g_nitro.scroll = to > max ? max : to;
+    if (g_nitro.scroll < 0)
+        g_nitro.scroll = 0;
+}
+
+/* A click on the page: tabs jump to their section, everything else leads to discord.com. */
+static void nitro_click(int id)
+{
+    if (id >= NB_TAB && id < NB_TAB + 5) {
+        nitro_scroll_to(g_nitro.section[id - NB_TAB]);
+        redraw();
+    } else if (id == NB_HEART) {
+        ShellExecuteW(NULL, L"open", L"https://discord.com/nitro", NULL, NULL, SW_SHOWNORMAL);
+    } else if (id != NB_NONE) {
+        ShellExecuteW(NULL, L"open", id == NB_GIFT || id == NB_GIFT_TOP || id == NB_FOOT_GIFT ? L"https://discord.com/nitro#gift"
+                                                                                              : L"https://discord.com/nitro",
+                      NULL, NULL, SW_SHOWNORMAL);
     }
 }
 
@@ -13366,11 +13626,7 @@ static void update_hover(int x, int y)
         link = link || th >= 0 || att || emo || bh;
     }
     {
-        int sh = shop_hit(x, y), qh = quests_hit(x, y), nh = 0;
-        if (nitro_view()) {
-            RECT b = nitro_button(S(RAIL_W + SIDE_W), main_right() - S(RAIL_W + SIDE_W));
-            nh = x >= b.left && x < b.right && y >= b.top && y < b.bottom;
-        }
+        int sh = shop_hit(x, y), qh = quests_hit(x, y), nh = nitro_hit(x, y);
         if (sh != g_shop.hover || qh != g_quests.hover || nh != g_ui.nitro_hover) {
             g_shop.hover = sh;
             g_quests.hover = qh;
@@ -13700,7 +13956,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
             if (nitro_view() && g_ui.nitro_hover) {
-                ShellExecuteW(NULL, L"open", L"https://discord.com/nitro", NULL, NULL, SW_SHOWNORMAL);
+                nitro_click(g_ui.nitro_hover);
                 return 0;
             }
             if (quests_view() && GET_X_LPARAM(lp) >= S(RAIL_W + SIDE_W)) {
@@ -13798,6 +14054,12 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         if (!g_ui.pop_docked)
             pop_close();
+        if (nitro_view() && pt.x >= S(RAIL_W + SIDE_W)) {
+            nitro_scroll_to(g_nitro.scroll + delta);
+            update_hover(pt.x, pt.y);
+            redraw();
+            return 0;
+        }
         if (quests_view() && pt.x >= S(RAIL_W + SIDE_W)) {
             quests_scroll_by(delta);
             update_hover(pt.x, pt.y);
