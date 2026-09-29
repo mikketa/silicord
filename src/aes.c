@@ -2,51 +2,234 @@
 #include "aes.h"
 #include "sha2.h"
 
-/* ---- GF(2^8), without branches or tables ---- */
+typedef unsigned long long u64;
 
-static unsigned char xtime(unsigned char a)
+/* ---- Bit planes, and the S-box without branches or tables ---- */
+
+/*
+ * Boyar and Peralta's circuit for the S-box (IACR ePrint 2009/191), 32 ANDs
+ * and 83 XORs, on bit planes: q[j] holds bit j of every byte.
+ */
+static void sbox_planes(unsigned q[8])
 {
-    return (unsigned char)((a << 1) ^ ((unsigned char)-(a >> 7) & 0x1b));
+    unsigned x0 = q[7], x1 = q[6], x2 = q[5], x3 = q[4], x4 = q[3], x5 = q[2], x6 = q[1], x7 = q[0];
+    unsigned y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15, y16, y17, y18, y19, y20, y21;
+    unsigned t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21,
+        t22, t23, t24, t25, t26, t27, t28, t29, t30, t31, t32, t33, t34, t35, t36, t37, t38, t39, t40, t41, t42,
+        t43, t44, t45, t46, t47, t48, t49, t50, t51, t52, t53, t54, t55, t56, t57, t58, t59, t60, t61, t62, t63,
+        t64, t65, t66, t67;
+    unsigned z0, z1, z2, z3, z4, z5, z6, z7, z8, z9, z10, z11, z12, z13, z14, z15, z16, z17;
+
+    /* Top linear transform. */
+    y14 = x3 ^ x5;
+    y13 = x0 ^ x6;
+    y9 = x0 ^ x3;
+    y8 = x0 ^ x5;
+    t0 = x1 ^ x2;
+    y1 = t0 ^ x7;
+    y4 = y1 ^ x3;
+    y12 = y13 ^ y14;
+    y2 = y1 ^ x0;
+    y5 = y1 ^ x6;
+    y3 = y5 ^ y8;
+    t1 = x4 ^ y12;
+    y15 = t1 ^ x5;
+    y20 = t1 ^ x1;
+    y6 = y15 ^ x7;
+    y10 = y15 ^ t0;
+    y11 = y20 ^ y9;
+    y7 = x7 ^ y11;
+    y17 = y10 ^ y11;
+    y19 = y10 ^ y8;
+    y16 = t0 ^ y11;
+    y21 = y13 ^ y16;
+    y18 = x0 ^ y16;
+
+    /* The inversion in GF(2^8). */
+    t2 = y12 & y15;
+    t3 = y3 & y6;
+    t4 = t3 ^ t2;
+    t5 = y4 & x7;
+    t6 = t5 ^ t2;
+    t7 = y13 & y16;
+    t8 = y5 & y1;
+    t9 = t8 ^ t7;
+    t10 = y2 & y7;
+    t11 = t10 ^ t7;
+    t12 = y9 & y11;
+    t13 = y14 & y17;
+    t14 = t13 ^ t12;
+    t15 = y8 & y10;
+    t16 = t15 ^ t12;
+    t17 = t4 ^ t14;
+    t18 = t6 ^ t16;
+    t19 = t9 ^ t14;
+    t20 = t11 ^ t16;
+    t21 = t17 ^ y20;
+    t22 = t18 ^ y19;
+    t23 = t19 ^ y21;
+    t24 = t20 ^ y18;
+    t25 = t21 ^ t22;
+    t26 = t21 & t23;
+    t27 = t24 ^ t26;
+    t28 = t25 & t27;
+    t29 = t28 ^ t22;
+    t30 = t23 ^ t24;
+    t31 = t22 ^ t26;
+    t32 = t31 & t30;
+    t33 = t32 ^ t24;
+    t34 = t23 ^ t33;
+    t35 = t27 ^ t33;
+    t36 = t24 & t35;
+    t37 = t36 ^ t34;
+    t38 = t27 ^ t36;
+    t39 = t29 & t38;
+    t40 = t25 ^ t39;
+    t41 = t40 ^ t37;
+    t42 = t29 ^ t33;
+    t43 = t29 ^ t40;
+    t44 = t33 ^ t37;
+    t45 = t42 ^ t41;
+    z0 = t44 & y15;
+    z1 = t37 & y6;
+    z2 = t33 & x7;
+    z3 = t43 & y16;
+    z4 = t40 & y1;
+    z5 = t29 & y7;
+    z6 = t42 & y11;
+    z7 = t45 & y17;
+    z8 = t41 & y10;
+    z9 = t44 & y12;
+    z10 = t37 & y3;
+    z11 = t33 & y4;
+    z12 = t43 & y13;
+    z13 = t40 & y5;
+    z14 = t29 & y2;
+    z15 = t42 & y9;
+    z16 = t45 & y14;
+    z17 = t41 & y8;
+
+    /* Bottom linear transform, the affine constant 0x63 included. */
+    t46 = z15 ^ z16;
+    t47 = z10 ^ z11;
+    t48 = z5 ^ z13;
+    t49 = z9 ^ z10;
+    t50 = z2 ^ z12;
+    t51 = z2 ^ z5;
+    t52 = z7 ^ z8;
+    t53 = z0 ^ z3;
+    t54 = z6 ^ z7;
+    t55 = z16 ^ z17;
+    t56 = z12 ^ t48;
+    t57 = t50 ^ t53;
+    t58 = z4 ^ t46;
+    t59 = z3 ^ t54;
+    t60 = t46 ^ t57;
+    t61 = z14 ^ t57;
+    t62 = t52 ^ t58;
+    t63 = t49 ^ t58;
+    t64 = z4 ^ t59;
+    t65 = t61 ^ t62;
+    t66 = z1 ^ t63;
+    t67 = t64 ^ t65;
+    q[7] = t59 ^ t63;
+    q[1] = t56 ^ ~t62;
+    q[0] = t48 ^ ~t60;
+    q[4] = t53 ^ t66;
+    q[3] = t51 ^ t66;
+    q[2] = t47 ^ t65;
+    q[6] = t64 ^ ~q[4];
+    q[5] = t55 ^ ~t67;
 }
 
-static unsigned char gmul(unsigned char a, unsigned char b)
+/* An 8x8 bit matrix, a row per byte, transposed (Hacker's Delight, 7-3). */
+static u64 transpose8(u64 x)
 {
-    unsigned char p = 0;
+    u64 t;
 
-    for (int i = 0; i < 8; i++) {
-        p ^= (unsigned char)(-(b & 1) & a);
-        a = xtime(a);
-        b >>= 1;
+    t = (x ^ (x >> 7)) & 0x00AA00AA00AA00AAull;
+    x ^= t ^ (t << 7);
+    t = (x ^ (x >> 14)) & 0x0000CCCC0000CCCCull;
+    x ^= t ^ (t << 14);
+    t = (x ^ (x >> 28)) & 0x00000000F0F0F0F0ull;
+    x ^= t ^ (t << 28);
+    return x;
+}
+
+/* 16 bytes into bit planes: bit i of q[j] is bit j of byte i. */
+static void to_planes(const unsigned char b[16], unsigned q[8])
+{
+    u64 lo = 0, hi = 0;
+
+    for (int i = 7; i >= 0; i--) {
+        lo = lo << 8 | b[i];
+        hi = hi << 8 | b[8 + i];
     }
-    return p;
+    lo = transpose8(lo);
+    hi = transpose8(hi);
+    for (int j = 0; j < 8; j++)
+        q[j] = (unsigned)(lo >> (8 * j) & 0xFF) | (unsigned)(hi >> (8 * j) & 0xFF) << 8;
 }
 
-/* x^254, the inverse (and 0 for 0), by a fixed chain of products. */
-static unsigned char ginv(unsigned char x)
+static void from_planes(const unsigned q[8], unsigned char b[16])
 {
-    unsigned char x2 = gmul(x, x), x3 = gmul(x2, x), x6 = gmul(x3, x3), x12 = gmul(x6, x6), x15 = gmul(x12, x3);
-    unsigned char x30 = gmul(x15, x15), x60 = gmul(x30, x30), x120 = gmul(x60, x60), x240 = gmul(x120, x120);
+    u64 lo = 0, hi = 0;
 
-    return gmul(gmul(x240, x12), x2);
+    for (int j = 7; j >= 0; j--) {
+        lo = lo << 8 | (q[j] & 0xFF);
+        hi = hi << 8 | (q[j] >> 8 & 0xFF);
+    }
+    lo = transpose8(lo);
+    hi = transpose8(hi);
+    for (int i = 0; i < 8; i++) {
+        b[i] = (unsigned char)(lo >> (8 * i));
+        b[8 + i] = (unsigned char)(hi >> (8 * i));
+    }
 }
 
-static unsigned char rotl8(unsigned char b, int n)
+/* ---- AES, on bit planes ---- */
+
+/*
+ * The state is column-major (byte c * 4 + row), so a plane holds a column per
+ * nibble; rot1 and rot2 give row r of every column its row r + 1 or r + 2.
+ */
+static unsigned rot1(unsigned x)
 {
-    return (unsigned char)(b << n | b >> (8 - n));
+    return (x >> 1 & 0x7777) | (x << 3 & 0x8888);
 }
 
-static unsigned char sbox(unsigned char x)
+static unsigned rot2(unsigned x)
 {
-    unsigned char b = ginv(x);
-
-    return (unsigned char)(b ^ rotl8(b, 1) ^ rotl8(b, 2) ^ rotl8(b, 3) ^ rotl8(b, 4) ^ 0x63);
+    return (x >> 2 & 0x3333) | (x << 2 & 0xCCCC);
 }
 
-/* ---- AES ---- */
+/* Row r moves r columns left; this also clears the bits above 16 that the S-box's NOTs set. */
+static void shift_rows(unsigned q[8])
+{
+    for (int j = 0; j < 8; j++) {
+        unsigned x = q[j] & 0xFFFF;
+        q[j] = (x & 0x1111) | ((x >> 4 | x << 12) & 0x2222) | ((x >> 8 | x << 8) & 0x4444) |
+               ((x >> 12 | x << 4) & 0x8888);
+    }
+}
+
+/* a_r ^ all ^ xtime(a_r ^ a_r+1), which is a_r+1 ^ d_r+2 ^ xtime(d_r) for d_r = a_r ^ a_r+1. */
+static void mix_columns(unsigned q[8])
+{
+    unsigned d7 = q[7] ^ rot1(q[7]), prev = 0;
+
+    for (int j = 0; j < 8; j++) {
+        unsigned r = rot1(q[j]), d = q[j] ^ r;
+        /* xtime moves each bit up a plane and folds the top one into planes 0, 1, 3 and 4 (0x1B). */
+        q[j] = r ^ rot2(d) ^ prev ^ ((0x1Bu >> j & 1) ? d7 : 0);
+        prev = d;
+    }
+}
 
 int aes_init(aes_t *a, const unsigned char *key, size_t n)
 {
     unsigned char w[240];
+    unsigned q[8];
     int nk = (int)(n / 4), words, i;
     unsigned char rcon = 1;
 
@@ -56,54 +239,49 @@ int aes_init(aes_t *a, const unsigned char *key, size_t n)
     words = 4 * (a->rounds + 1);
     memcpy(w, key, n);
     for (i = nk; i < words; i++) {
-        unsigned char t[4];
+        unsigned char t[16] = {0};
         memcpy(t, w + (i - 1) * 4, 4);
-        if (i % nk == 0) {
+        if (i % nk == 0 || (nk > 6 && i % nk == 4)) { /* SubWord */
+            to_planes(t, q);
+            sbox_planes(q);
+            from_planes(q, t);
+        }
+        if (i % nk == 0) { /* RotWord, which commutes with SubWord */
             unsigned char first = t[0];
-            t[0] = (unsigned char)(sbox(t[1]) ^ rcon);
-            t[1] = sbox(t[2]);
-            t[2] = sbox(t[3]);
-            t[3] = sbox(first);
-            rcon = xtime(rcon);
-        } else if (nk > 6 && i % nk == 4) {
-            for (int k = 0; k < 4; k++)
-                t[k] = sbox(t[k]);
+            t[0] = (unsigned char)(t[1] ^ rcon);
+            t[1] = t[2];
+            t[2] = t[3];
+            t[3] = first;
+            rcon = (unsigned char)((rcon << 1) ^ (rcon >> 7) * 0x1B);
         }
         for (int k = 0; k < 4; k++)
             w[i * 4 + k] = (unsigned char)(w[(i - nk) * 4 + k] ^ t[k]);
+        secure_wipe(t, sizeof t);
     }
-    memcpy(a->rk, w, (size_t)words * 4);
+    for (i = 0; i <= a->rounds; i++)
+        to_planes(w + 16 * i, a->rk[i]);
     secure_wipe(w, sizeof w);
+    secure_wipe(q, sizeof q);
     return 1;
 }
 
 void aes_encrypt_block(const aes_t *a, const unsigned char in[16], unsigned char out[16])
 {
-    unsigned char s[16], t[16];
+    unsigned q[8];
 
-    for (int i = 0; i < 16; i++)
-        s[i] = (unsigned char)(in[i] ^ a->rk[0][i]);
+    to_planes(in, q);
+    for (int j = 0; j < 8; j++)
+        q[j] ^= a->rk[0][j];
     for (int r = 1; r <= a->rounds; r++) {
-        /* SubBytes and ShiftRows (the state is column-major: s[column * 4 + row]). */
-        for (int c = 0; c < 4; c++)
-            for (int row = 0; row < 4; row++)
-                t[c * 4 + row] = sbox(s[((c + row) % 4) * 4 + row]);
-        if (r < a->rounds) { /* MixColumns */
-            for (int c = 0; c < 4; c++) {
-                unsigned char *col = t + c * 4, a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3];
-                unsigned char all = (unsigned char)(a0 ^ a1 ^ a2 ^ a3);
-                col[0] = (unsigned char)(a0 ^ all ^ xtime((unsigned char)(a0 ^ a1)));
-                col[1] = (unsigned char)(a1 ^ all ^ xtime((unsigned char)(a1 ^ a2)));
-                col[2] = (unsigned char)(a2 ^ all ^ xtime((unsigned char)(a2 ^ a3)));
-                col[3] = (unsigned char)(a3 ^ all ^ xtime((unsigned char)(a3 ^ a0)));
-            }
-        }
-        for (int i = 0; i < 16; i++)
-            s[i] = (unsigned char)(t[i] ^ a->rk[r][i]);
+        sbox_planes(q);
+        shift_rows(q);
+        if (r < a->rounds)
+            mix_columns(q);
+        for (int j = 0; j < 8; j++)
+            q[j] ^= a->rk[r][j];
     }
-    memcpy(out, s, 16);
-    secure_wipe(s, sizeof s);
-    secure_wipe(t, sizeof t);
+    from_planes(q, out);
+    secure_wipe(q, sizeof q);
 }
 
 /* ---- GCM ---- */

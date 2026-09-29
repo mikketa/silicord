@@ -3,13 +3,12 @@
 
 /*
  * AES-128/256 and GCM in portable, constant-time C: no table lookups indexed
- * by secrets (the S-box is computed), for MLS and DAVE's frame encryption.
- * Voice needs a few hundred small messages a second, so simplicity wins over
- * speed here.
+ * by secrets (the state is bitsliced and the S-box a circuit), for MLS, DAVE's
+ * frame encryption and the voice transport, video included.
  */
 typedef struct {
-    unsigned char rk[15][16]; /* round keys */
-    int rounds;               /* 10 or 14 */
+    unsigned rk[15][8]; /* round keys, as bit planes */
+    int rounds;         /* 10 or 14 */
 } aes_t;
 
 /* `n` is 16 or 32. Returns 0 for any other key size. */
