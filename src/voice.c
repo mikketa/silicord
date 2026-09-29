@@ -204,15 +204,36 @@ static void send_identify(voice_t *v)
     send_text(v, &m);
 }
 
-/* Our video state: none yet, which the server needs before any video flows either way. */
-static void send_video_state(voice_t *v)
+/* Op 12 with our stream, active or not. */
+static void send_our_video(voice_t *v, int on)
 {
     sb_t m = {0};
 
     sb_add(&m, "{\"op\":12,\"d\":{\"audio_ssrc\":");
     sb_u64(&m, v->ssrc);
-    sb_add(&m, ",\"video_ssrc\":0,\"rtx_ssrc\":0,\"streams\":[]}}");
+    sb_add(&m, ",\"video_ssrc\":");
+    sb_u64(&m, on ? v->video_ssrc : 0);
+    sb_add(&m, ",\"rtx_ssrc\":");
+    sb_u64(&m, on ? v->rtx_ssrc : 0);
+    sb_add(&m, ",\"streams\":[");
+    if (on) {
+        sb_add(&m, "{\"type\":\"video\",\"rid\":\"100\",\"ssrc\":");
+        sb_u64(&m, v->video_ssrc);
+        sb_add(&m, ",\"rtx_ssrc\":");
+        sb_u64(&m, v->rtx_ssrc);
+        sb_add(&m, ",\"active\":true,\"quality\":100,\"max_bitrate\":2500000,\"max_framerate\":30,"
+                   "\"max_resolution\":{\"type\":\"fixed\",\"width\":1280,\"height\":720}}");
+    }
+    sb_add(&m, "]}}");
     send_text(v, &m);
+}
+
+/* Our video state: none yet, which the server needs before any video flows either way. */
+static void send_video_state(voice_t *v)
+{
+    sb_t m = {0};
+
+    send_our_video(v, 0);
     /* Everyone's video at the best quality. */
     sb_add(&m, "{\"op\":15,\"d\":{\"any\":100}}");
     send_text(v, &m);
@@ -766,30 +787,6 @@ void voice_quiet(void)
         v->speaking = 0;
     }
     LeaveCriticalSection(&v->lock);
-}
-
-/* Op 12 with our stream, active or not. */
-static void send_our_video(voice_t *v, int on)
-{
-    sb_t m = {0};
-
-    sb_add(&m, "{\"op\":12,\"d\":{\"audio_ssrc\":");
-    sb_u64(&m, v->ssrc);
-    sb_add(&m, ",\"video_ssrc\":");
-    sb_u64(&m, on ? v->video_ssrc : 0);
-    sb_add(&m, ",\"rtx_ssrc\":");
-    sb_u64(&m, on ? v->rtx_ssrc : 0);
-    sb_add(&m, ",\"streams\":[");
-    if (on) {
-        sb_add(&m, "{\"type\":\"video\",\"rid\":\"100\",\"ssrc\":");
-        sb_u64(&m, v->video_ssrc);
-        sb_add(&m, ",\"rtx_ssrc\":");
-        sb_u64(&m, v->rtx_ssrc);
-        sb_add(&m, ",\"active\":true,\"quality\":100,\"max_bitrate\":2500000,\"max_framerate\":30,"
-                   "\"max_resolution\":{\"type\":\"fixed\",\"width\":1280,\"height\":720}}");
-    }
-    sb_add(&m, "]}}");
-    send_text(v, &m);
 }
 
 int voice_video_active(int on)
