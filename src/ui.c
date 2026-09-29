@@ -641,6 +641,223 @@ static int frame_ms(void)
     return (int)((now.QuadPart - g_ui.frame_start.QuadPart) * 1000 / g_ui.qpf.QuadPart);
 }
 
+/* ---- Transitions ---- */
+
+/*
+ * Hover and selection ease in and out instead of snapping, as in Discord. A
+ * transition is keyed by what it moves (a hit kind or a TW_ key, and an index)
+ * and depends only on the frame's time, so every band of a frame reads the
+ * same value. While one runs, the rectangles it covers are repainted about
+ * every 16 ms; once all have settled the timer stops and nothing wakes up.
+ * Popups are not animated: their values jump to the target.
+ */
+#define TIMER_TWEEN 12
+#define TWEENS 64
+#define TW_FAST 120  /* hover backgrounds */
+#define TW_SHAPE 200 /* server icons and their pill */
+enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_MESSAGE, TW_MEMBER, TW_FRIEND };
+
+typedef struct {
+    int kind, index;
+    float from, to;
+    unsigned t0, used; /* ms when it started; frame it was last read */
+    int ms;
+} tween_t;
+
+static struct {
+    tween_t t[TWEENS];
+    int n;
+    unsigned now;       /* ms, the same for the whole frame */
+    RECT dirty, repaint; /* what running transitions cover: in this frame, and to repaint next */
+} g_tween;
+
+static float ease_out(float p)
+{
+    p = 1.f - p;
+    return 1.f - p * p * p;
+}
+
+static float tween_at(const tween_t *t)
+{
+    unsigned el = g_tween.now - t->t0;
+
+    if ((int)el >= t->ms)
+        return t->to;
+    return t->from + (t->to - t->from) * ease_out((float)(int)el / (float)t->ms);
+}
+
+/*
+ * The value of kind/index easing to `target` over `ms`; (x, y, w, h) is where it
+ * shows. `rest` is its value when nothing happens to it (not hovered, not
+ * selected): only the ones away from it are remembered, a handful at a time.
+ */
+static float tween(int kind, int index, float target, float rest, int ms, int x, int y, int w, int h)
+{
+    tween_t *t = NULL;
+    float v;
+
+    if (g_ui.paint_wnd != g_ui.wnd)
+        return target;
+    for (int i = 0; i < g_tween.n && !t; i++)
+        if (g_tween.t[i].kind == kind && g_tween.t[i].index == index)
+            t = &g_tween.t[i];
+    if (!t) {
+        int i = g_tween.n;
+        if (target == rest)
+            return rest;
+        if (i == TWEENS) { /* full: the one read longest ago goes */
+            for (int k = i = 0; k < TWEENS; k++)
+                if ((int)(g_tween.t[k].used - g_tween.t[i].used) < 0)
+                    i = k;
+        } else {
+            g_tween.n++;
+        }
+        t = &g_tween.t[i];
+        t->kind = kind;
+        t->index = index;
+        t->from = t->to = rest;
+        t->t0 = g_tween.now - (unsigned)ms;
+        t->ms = ms;
+    }
+    t->used = g_ui.frame;
+    if (t->to != target) {
+        t->from = tween_at(t);
+        t->to = target;
+        t->t0 = g_tween.now;
+        t->ms = ms;
+    }
+    v = tween_at(t);
+    if (v != t->to) {
+        RECT r = {x, y, x + w, y + h};
+        UnionRect(&g_tween.dirty, &g_tween.dirty, &r);
+    } else if (t->to == rest) {
+        *t = g_tween.t[--g_tween.n]; /* settled at rest: forget it */
+    }
+    return v;
+}
+
+/* 0 to 1 while kind/index is on, for a hover or a selection. */
+static float tween_on(int kind, int index, int on, int ms, int x, int y, int w, int h)
+{
+    return tween(kind, index, on ? 1.f : 0.f, 0.f, ms, x, y, w, h);
+}
+
+static int lerp_i(int a, int b, float t)
+{
+    return a + (int)((float)(b - a) * t + (b > a ? .5f : -.5f));
+}
+
+/* ARGB colors mixed channel by channel. */
+static unsigned lerp_argb(unsigned a, unsigned b, float t)
+{
+    unsigned out = 0;
+
+    for (int s = 0; s < 32; s += 8)
+        out |= (unsigned)lerp_i((int)(a >> s & 0xFF), (int)(b >> s & 0xFF), t) << s;
+    return out;
+}
+
+/*
+ * A row's background: it eases in on hover, and on to the selection's color.
+ * Returns the color under the row (`base` when none), for the status dots cut out of it.
+ */
+static unsigned row_bg(int kind, int index, int sel, int hov, unsigned base, int x, int y, int w, int h, int radius)
+{
+    float t = tween(kind, index, sel ? 2.f : hov ? 1.f : 0.f, 0.f, TW_FAST, x, y, w, h);
+    unsigned c = t <= 1.f ? lerp_argb(base, ARGB(C_HOVER), t) : lerp_argb(ARGB(C_HOVER), ARGB(C_SELECT), t - 1.f);
+
+    if (t > 0.f)
+        r_round(x, y, w, h, radius, c);
+    return c;
+}
+
+/*
+ * Popups (profiles, the emoji picker, the quick switcher) fade in instead of
+ * appearing at once: layered while they fade, plain windows again after.
+ */
+#define TIMER_FADE 13
+#define FADE_MS 120
+#define FADES 4
+
+static struct {
+    HWND wnd[FADES];
+    LONGLONG t0[FADES];
+    int n;
+} g_fade;
+
+static LONGLONG qpc_ms(void)
+{
+    LARGE_INTEGER now;
+
+    if (!g_ui.qpf.QuadPart)
+        QueryPerformanceFrequency(&g_ui.qpf);
+    QueryPerformanceCounter(&now);
+    return now.QuadPart * 1000 / g_ui.qpf.QuadPart;
+}
+
+static void fade_done(HWND w)
+{
+    SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA);
+    SetWindowLongPtrW(w, GWL_EXSTYLE, GetWindowLongPtrW(w, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+}
+
+/* Before the popup is shown. */
+static void fade_in(HWND w)
+{
+    if (!w || g_fade.n == FADES)
+        return;
+    SetWindowLongPtrW(w, GWL_EXSTYLE, GetWindowLongPtrW(w, GWL_EXSTYLE) | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(w, 0, 0, LWA_ALPHA);
+    g_fade.wnd[g_fade.n] = w;
+    g_fade.t0[g_fade.n++] = qpc_ms();
+    SetTimer(g_ui.wnd, TIMER_FADE, 16, NULL);
+}
+
+static void fade_tick(void)
+{
+    LONGLONG now = qpc_ms();
+
+    for (int i = 0; i < g_fade.n;) {
+        HWND w = g_fade.wnd[i];
+        LONGLONG el = now - g_fade.t0[i];
+        if (IsWindow(w) && el < FADE_MS) {
+            SetLayeredWindowAttributes(w, 0, (BYTE)(ease_out((float)el / FADE_MS) * 255.f), LWA_ALPHA);
+            i++;
+            continue;
+        }
+        if (IsWindow(w))
+            fade_done(w);
+        g_fade.wnd[i] = g_fade.wnd[--g_fade.n];
+        g_fade.t0[i] = g_fade.t0[g_fade.n];
+    }
+    if (!g_fade.n)
+        KillTimer(g_ui.wnd, TIMER_FADE);
+}
+
+static void tween_frame_start(void)
+{
+    if (!g_ui.qpf.QuadPart)
+        QueryPerformanceFrequency(&g_ui.qpf);
+    g_tween.now = (unsigned)(g_ui.frame_start.QuadPart * 1000 / g_ui.qpf.QuadPart);
+    SetRectEmpty(&g_tween.dirty);
+}
+
+/* After a paint of the main window: what still moves is painted again in 16 ms. */
+static void tween_frame_end(void)
+{
+    if (IsRectEmpty(&g_tween.dirty))
+        return;
+    UnionRect(&g_tween.repaint, &g_tween.repaint, &g_tween.dirty);
+    SetTimer(g_ui.wnd, TIMER_TWEEN, 16, NULL);
+}
+
+static void tween_tick(void)
+{
+    KillTimer(g_ui.wnd, TIMER_TWEEN);
+    InvalidateRect(g_ui.wnd, &g_tween.repaint, FALSE);
+    SetRectEmpty(&g_tween.repaint);
+}
+
 /* How long the process has run and the CPU time it used, in ms. */
 static void process_times(unsigned long long *uptime_ms, unsigned long long *cpu_ms)
 {
@@ -1939,9 +2156,19 @@ static void paint_badge(int right, int cy, int count)
     text(g_ui.f_cat, C_INK, rect(right - w, cy - S(9), w, S(18)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
-static void paint_pill(int y, int height)
+/* The white pill left of a server: `height` is where it goes (`rest` without hover or selection), and it grows or shrinks there. */
+static void paint_pill(int kind, int index, int y, int height, int rest)
 {
-    r_round(-S(4), y + (S(ICON) - height) / 2, S(8), height, S(4), ARGB(C_INK));
+    int h = (int)(tween(kind, index, (float)height, (float)rest, TW_SHAPE, 0, y, S(8), S(ICON)) + .5f);
+
+    if (h > 0)
+        r_round(-S(4), y + (S(ICON) - h) / 2, S(8), h, S(4) < h / 2 ? S(4) : h / 2, ARGB(C_INK));
+}
+
+/* Round when at rest, a rounded square when hovered or selected, morphing between them. */
+static int icon_radius(float t)
+{
+    return lerp_i(S(ICON) / 2, S(16), t);
 }
 
 static void paint_rail(RECT rc)
@@ -1952,11 +2179,12 @@ static void paint_rail(RECT rc)
     fill(0, 0, S(RAIL_W), rc.bottom, C_RAIL);
 
     /* Home: the Silicord mark. */
-    r_round(x, home_y, S(ICON), S(ICON), sel_home || hov_home ? S(16) : S(ICON) / 2,
-                   sel_home || hov_home ? ARGB(C_AMBER) : ARGB(C_ITEM));
-    draw_mark(x + S(8), home_y + S(8), S(2), sel_home || hov_home ? C_RAIL : C_AMBER);
-    if (sel_home)
-        paint_pill(home_y, S(40));
+    {
+        float t = tween_on(TW_HOME, 0, sel_home || hov_home, TW_SHAPE, x, home_y, S(ICON), S(ICON));
+        r_round(x, home_y, S(ICON), S(ICON), icon_radius(t), lerp_argb(ARGB(C_ITEM), ARGB(C_AMBER), t));
+        draw_mark(x + S(8), home_y + S(8), S(2), t >= .5f ? C_RAIL : C_AMBER);
+        paint_pill(TW_HOME_PILL, 0, home_y, sel_home ? S(40) : hov_home ? S(20) : 0, 0);
+    }
     if (g_ui.model) {
         int unread, mentions;
         range_state(g_ui.model->dm_first, g_ui.model->dm_count, &unread, &mentions);
@@ -2005,7 +2233,8 @@ static void paint_rail(RECT rc)
                 r_round(x + S(14), y + S(30), S(20), S(3), S(1), 0xFF000000u | c);
             } else {
                 /* Closed: up to four of its icons in a grid, like Discord. */
-                r_round(x, y, S(ICON), S(ICON), S(16), hov ? 0x66000000u | c : 0x40000000u | c);
+                float t = tween_on(HIT_FOLDER, f, hov, TW_FAST, x, y, S(ICON), S(ICON));
+                r_round(x, y, S(ICON), S(ICON), S(16), lerp_argb(0x40000000u | c, 0x66000000u | c, t));
                 for (unsigned g = 0; g < g_ui.model->nguilds && j < 4; g++) {
                     if (g_ui.model->guilds[g].folder != f)
                         continue;
@@ -2019,12 +2248,8 @@ static void paint_rail(RECT rc)
                     }
                     j++;
                 }
-                if (sel)
-                    paint_pill(y, S(40));
-                else if (hov)
-                    paint_pill(y, S(20));
-                else if (unread || mentions)
-                    paint_pill(y, S(8));
+                paint_pill(TW_FOLDER_PILL, f, y, sel ? S(40) : hov ? S(20) : unread || mentions ? S(8) : 0,
+                           unread || mentions ? S(8) : 0);
                 if (mentions) {
                     r_circle(x + S(ICON) - S(20), y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
                     paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
@@ -2035,13 +2260,15 @@ static void paint_rail(RECT rc)
 
     for (int k = 0; k < n; k++) {
         int i = g_rail.index[k], y = g_rail.y[k];
-        int sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i;
-        int radius = sel || hov ? S(16) : S(ICON) / 2;
+        int sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i, radius;
+        float t;
         const guild_t *gd;
         r_image_t *img;
 
         if (g_rail.kind[k] != RAIL_GUILD || y + S(ICON) < 0 || y > rc.bottom)
             continue;
+        t = tween_on(HIT_GUILD, i, sel || hov, TW_SHAPE, x, y, S(ICON), S(ICON));
+        radius = icon_radius(t);
         gd = &g_ui.model->guilds[i];
         img = guild_icon(gd);
         if (img) {
@@ -2049,17 +2276,14 @@ static void paint_rail(RECT rc)
         } else {
             wchar_t ini[8];
             initials(model_str(g_ui.model, gd->name), ini, 8);
-            r_round(x, y, S(ICON), S(ICON), radius, sel || hov ? ARGB(C_AMBER) : ARGB(C_ITEM));
-            text_w(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial, sel || hov ? C_RAIL : C_INK,
+            r_round(x, y, S(ICON), S(ICON), radius, lerp_argb(ARGB(C_ITEM), ARGB(C_AMBER), t));
+            text_w(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial, t >= .5f ? C_RAIL : C_INK,
                    rect(x, y, S(ICON), S(ICON)), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
         {
             int unread, mentions;
             guild_state(i, &unread, &mentions);
-            if (sel || hov)
-                paint_pill(y, sel ? S(40) : S(20));
-            else if (unread || mentions)
-                paint_pill(y, S(8));
+            paint_pill(TW_PILL, i, y, sel ? S(40) : hov ? S(20) : unread || mentions ? S(8) : 0, unread || mentions ? S(8) : 0);
             if (mentions) {
                 r_circle(x + S(ICON) - S(20), y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
                 paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
@@ -2097,8 +2321,7 @@ static void paint_channel_row(unsigned i, int y)
     }
     if (is_dm_type(c->type)) {
         r_image_t *img = dm_icon(c);
-        if (sel || hov)
-            r_round(x, y + S(1), w, S(DM_ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        unsigned bg = row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(DM_ROW_H) - S(2), S(6));
         if (img) {
             r_image(img, x + S(8), y + S(6), S(32), S(32), S(16));
         } else {
@@ -2112,8 +2335,7 @@ static void paint_channel_row(unsigned i, int y)
             int unread = channel_unread(i), badge = c->mentions ? S(30) : 0;
             presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
             if (c->type == CH_DM && c->user_id[0])
-                paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE,
-                             sel ? ARGB(C_SELECT) : hov ? ARGB(C_HOVER) : ARGB(C_SIDE));
+                paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE, bg);
             if (pr && pr->activity.len && pr->status != ML_OFFLINE) {
                 text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
                      rect(x + S(50), y + S(3), w - S(56) - badge, S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2133,14 +2355,12 @@ static void paint_channel_row(unsigned i, int y)
         int unread = channel_unread(i);
         fill(x + S(18), y - S(6), S(1) > 1 ? S(1) : 1, S(ROW_H) / 2 + S(6), C_LINE);
         fill(x + S(18), y + S(ROW_H) / 2, S(12), S(1) > 1 ? S(1) : 1, C_LINE);
-        if (sel || hov)
-            r_round(x + S(34), y + S(1), w - S(34), S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+        row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x + S(34), y + S(1), w - S(34), S(ROW_H) - S(2), S(6));
         text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED, rect(x + S(42), y, w - S(48), S(ROW_H)),
              name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
-    if (sel || hov)
-        r_round(x, y + S(1), w, S(ROW_H) - S(2), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+    row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(ROW_H) - S(2), S(6));
     if (c->type == CH_VOICE || c->type == CH_STAGE || c->type == CH_NEWS || c->type == CH_FORUM || c->type == CH_MEDIA)
         /* Speaker, megaphone for announcements, speech bubbles for forums, like Discord. */
         text_w(g_ui.f_icon, C_FAINT, rect(x + S(8), y, S(20), S(ROW_H)),
@@ -2283,8 +2503,7 @@ static void paint_side(RECT rc)
 
         if (g_ui.guild < 0) {
             int sel = friends_view(), hov = g_ui.hover_kind == HIT_FRIENDS;
-            if (sel || hov)
-                r_round(x0 + S(8), S(6), S(SIDE_W) - S(16), S(HEADER_H) - S(12), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
+            row_bg(HIT_FRIENDS, 0, sel, hov, ARGB(C_SIDE), x0 + S(8), S(6), S(SIDE_W) - S(16), S(HEADER_H) - S(12), S(6));
             text_w(g_ui.f_icon_mid, sel ? C_INK : C_MUTED, rect(x0 + S(16), 0, S(32), S(HEADER_H)), L"\xE716", -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             text(g_ui.f_h, sel ? C_INK : C_MUTED, rect(x0 + S(56), 0, S(SIDE_W) - S(72), S(HEADER_H)), "Friends",
@@ -3909,8 +4128,10 @@ static void paint_message(int i, int x0, int y, int w)
         int top = y + (m->grouped == 1 ? 0 : S(12));
         fill(x0, top, w, h - (top - y), g_ui.hover_msg == i ? C_MENTION_HOVER : C_MENTION);
         fill(x0, top, S(2), h - (top - y), C_AMBER);
-    } else if (g_ui.hover_msg == i)
-        fill(x0, y + (m->grouped == 1 ? 0 : S(12)), w, h - (m->grouped == 1 ? 0 : S(12)), C_HOVER);
+    } else {
+        row_bg(TW_MESSAGE, i, 0, g_ui.hover_msg == i, ARGB(C_MAIN), x0, y + (m->grouped == 1 ? 0 : S(12)), w,
+               h - (m->grouped == 1 ? 0 : S(12)), 0);
+    }
 
     if (m->system) {
         char line[160];
@@ -4568,11 +4789,14 @@ static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
     g_ui.frame++;
     g_ui.paint_wnd = wnd;
     QueryPerformanceCounter(&g_ui.frame_start);
+    tween_frame_start();
     while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
         draw(rc);
         r_end(dc);
     }
     EndPaint(wnd, &ps);
+    if (wnd == g_ui.wnd)
+        tween_frame_end();
     return g_ui.frame;
 }
 
@@ -6651,6 +6875,7 @@ static void pop_open(const char *user_id, const char *name, const char *avatar, 
     pop_set_profile(p);
     if (!p && g_ui.pop_edit)
         pop_cue(name);
+    fade_in(g_ui.pop);
     ShowWindow(g_ui.pop, SW_SHOWNA);
     g_ui.pop_focus = GetFocus(); /* given back on close, usually the composer */
     SetFocus(g_ui.pop);
@@ -7258,15 +7483,15 @@ static void paint_members(RECT rc)
                 unsigned ink = color ? 0xFF000000u | color : ARGB(C_INK);
                 int ay = y + (h - S(32)) / 2, tx = x0 + S(56), tw = S(MEMBERS_W) - S(64);
                 wchar_t *name;
+                unsigned bg = row_bg(TW_MEMBER, i, 0, g_ui.ml_hover == i, ARGB(C_SIDE), x0 + S(8), y + S(1),
+                                     S(MEMBERS_W) - S(16), h - S(2), S(6));
 
-                if (g_ui.ml_hover == i)
-                    r_round(x0 + S(8), y + S(1), S(MEMBERS_W) - S(16), h - S(2), S(6), ARGB(C_HOVER));
                 if (img)
                     r_image(img, x0 + S(16), ay, S(32), S(32), S(16));
                 else
                     r_circle(x0 + S(16), ay, S(32), ARGB(C_ITEM));
                 if (!offline)
-                    paint_status(x0 + S(16), ay, S(32), it->status, g_ui.ml_hover == i ? ARGB(C_HOVER) : ARGB(C_SIDE));
+                    paint_status(x0 + S(16), ay, S(32), it->status, bg);
                 else /* offline members are dimmed */
                     r_circle(x0 + S(16), ay, S(32), 0x80111111u);
                 if (offline)
@@ -7924,6 +8149,7 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     picker_rebuild();
     if (g_ui.picker_tab == TAB_GIFS)
         app_fetch_gifs("");
+    fade_in(g_ui.picker);
     SetWindowPos(g_ui.picker, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     SetFocus(g_ui.picker_edit);
 }
@@ -8942,8 +9168,8 @@ static void paint_friends(RECT rc, int x0, int w)
         if (!r_visible(y, S(FR_ROW)))
             continue;
         fill(x0 + S(30), y, w - S(60), 1, C_LINE);
-        if (g_ui.friend_hover == k)
-            r_round(x0 + S(20), y + S(1), w - S(40), S(FR_ROW) - S(2), S(8), ARGB(C_HOVER));
+        unsigned bg = row_bg(TW_FRIEND, k, 0, g_ui.friend_hover == k, ARGB(C_MAIN), x0 + S(20), y + S(1), w - S(40),
+                             S(FR_ROW) - S(2), S(8));
         img = user_avatar(r->id, r->avatar);
         if (img)
             r_image(img, x0 + S(30), y + S(15), S(32), S(32), S(16));
@@ -8951,7 +9177,7 @@ static void paint_friends(RECT rc, int x0, int w)
             r_circle(x0 + S(30), y + S(15), S(32), ARGB(C_ITEM));
         if (r->type == REL_FRIEND)
             paint_status(x0 + S(30), y + S(15), S(32), st == ML_UNKNOWN ? ML_OFFLINE : st,
-                         g_ui.friend_hover == k ? ARGB(C_HOVER) : ARGB(C_MAIN));
+                         bg);
         text(g_ui.f_h, C_INK, rect(x0 + S(74), y + S(10), w - S(260), S(22)), r->name.data ? r->name.data : "",
              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         if (r->type == REL_INCOMING)
@@ -9568,6 +9794,7 @@ static void qs_open(void)
     SendMessageW(g_ui.qs_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search for servers, channels or DMs");
     qs_rebuild();
     qs_place();
+    fade_in(g_ui.qs);
     ShowWindow(g_ui.qs, SW_SHOWNA);
     SetFocus(g_ui.qs_edit);
 }
@@ -11958,6 +12185,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == TIMER_ANIM) {
             anim_tick();
+            return 0;
+        }
+        if (wp == TIMER_TWEEN) {
+            tween_tick();
+            return 0;
+        }
+        if (wp == TIMER_FADE) {
+            fade_tick();
             return 0;
         }
         if (wp == TIMER_REACTORS) {
