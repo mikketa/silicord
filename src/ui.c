@@ -11980,13 +11980,16 @@ static void paint_friends(RECT rc, int x0, int w)
     x += S(16);
     for (int t = 0; t < TAB_COUNT; t++) {
         int tw = text_width(g_ui.f_nav, tabs[t]) + S(24), sel = g_ui.friend_tab == t, hov = g_ui.friend_hover == -10 - t;
-        int pending = 0, ty = (S(HEADER_H) - S(32)) / 2;
+        int pending = 0, outgoing = 0, ty = (S(HEADER_H) - S(32)) / 2;
         float h;
         if (t == TAB_PENDING)
-            for (int i = 0; i < g_ui.nrels; i++)
+            for (int i = 0; i < g_ui.nrels; i++) {
                 pending += g_ui.rels[i].type == REL_INCOMING;
-        if (t == TAB_PENDING && !pending && !sel) {
-            g_ui.tab_x[t] = g_ui.tab_w[t] = -100000; /* Discord shows Pending only with requests */
+                outgoing += g_ui.rels[i].type == REL_OUTGOING;
+            }
+        /* As Discord's tab bar: Pending with requests either way (its count the incoming ones), no Blocked tab. */
+        if ((t == TAB_PENDING && !pending && !outgoing && !sel) || (t == TAB_BLOCKED && !sel)) {
+            g_ui.tab_x[t] = g_ui.tab_w[t] = -100000;
             continue;
         }
         if (pending)
