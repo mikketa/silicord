@@ -277,12 +277,14 @@ static void fwht(const short *in, short *out)
 /* Quantizes a block from `first`; `deq` gets what decoders will multiply back. Returns whether any is nonzero. */
 static int quantize(const short *in, short *q, short *deq, int first, const short *dq)
 {
+    /* Dividing by a step as multiplying by 2^32 / step, rounded up: exact for dividends below 2^16. */
+    const unsigned long long inv[2] = {0xFFFFFFFFu / (unsigned)dq[0] + 1ull, 0xFFFFFFFFu / (unsigned)dq[1] + 1ull};
     int any = 0;
 
     for (int i = first; i < 16; i++) {
         int c = in[i], a = c < 0 ? -c : c, step = dq[i > 0], v;
         /* A dead zone on the AC coefficients saves bits where they matter least. */
-        v = (a + (i ? step * 3 / 8 : step / 2)) / step;
+        v = (int)((unsigned long long)(a + (i ? step * 3 / 8 : step / 2)) * inv[i > 0] >> 32);
         if (v > 2048 + 66)
             v = 2048 + 66;
         v = c < 0 ? -v : v;
@@ -512,8 +514,12 @@ static int code_residual(vp8_encoder_t *e, unsigned char *y, unsigned char *u, u
             ss = aw / 2;
             ps = e->uv_stride;
         }
-        for (int i = 0; i < 16; i++)
-            res[i] = (short)(s[(i >> 2) * ss + (i & 3)] - p[(i >> 2) * ps + (i & 3)]);
+        for (int r = 0; r < 4; r++) {
+            __m128i zero = _mm_setzero_si128();
+            __m128i src = _mm_unpacklo_epi8(_mm_cvtsi32_si128(vp8i_load4(s + r * ss)), zero);
+            __m128i pred = _mm_unpacklo_epi8(_mm_cvtsi32_si128(vp8i_load4(p + r * ps)), zero);
+            _mm_storel_epi64((__m128i *)(res + 4 * r), _mm_sub_epi16(src, pred));
+        }
         fdct(res, f);
         if (b < 16) {
             dc[b] = f[0];

@@ -2,6 +2,17 @@
 #include <string.h>
 #include "vp8_int.h"
 
+/* Stores the first n (4 or 8) of 8 pixels. */
+static void store_px(unsigned char *dst, __m128i px, int n)
+{
+    if (n >= 8) {
+        _mm_storel_epi64((__m128i *)dst, px);
+    } else {
+        int v = _mm_cvtsi128_si32(px);
+        memcpy(dst, &v, 4);
+    }
+}
+
 /* Trees (RFC 6386, section 8.1): positive entries index the next pair, others are negated leaves. */
 const signed char vp8_kf_y_mode_tree[8] = {-B_PRED, 2, 4, 6, -DC_PRED, -V_PRED, -H_PRED, -TM_PRED};
 const signed char vp8_y_mode_tree[8] = {-DC_PRED, 2, 4, 6, -V_PRED, -H_PRED, -TM_PRED, -B_PRED};
@@ -123,11 +134,27 @@ void vp8i_predict_block(unsigned char *p, int stride, int n, int mode)
         for (int i = 0; i < n; i++)
             memset(p + i * stride, p[i * stride - 1], (size_t)n);
         break;
-    default: /* TM_PRED */
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++)
-                p[i * stride + j] = vp8i_clamp255(p[i * stride - 1] + p[-stride + j] - p[-stride - 1]);
+    default: { /* TM_PRED: left + above - corner, clamped by the pack */
+        const unsigned char *above = p - stride;
+        __m128i zero = _mm_setzero_si128(), a, lo, hi;
+        if (n == 16)
+            a = _mm_loadu_si128((const __m128i *)above);
+        else if (n == 8)
+            a = _mm_loadl_epi64((const __m128i *)above);
+        else
+            a = _mm_cvtsi32_si128(vp8i_load4(above));
+        lo = _mm_unpacklo_epi8(a, zero);
+        hi = _mm_unpackhi_epi8(a, zero);
+        for (int i = 0; i < n; i++) {
+            __m128i d = _mm_set1_epi16((short)(p[i * stride - 1] - above[-1]));
+            __m128i row = _mm_packus_epi16(_mm_add_epi16(lo, d), _mm_add_epi16(hi, d));
+            if (n == 16)
+                _mm_storeu_si128((__m128i *)(p + i * stride), row);
+            else
+                store_px(p + i * stride, row, n);
+        }
         break;
+    }
     }
 }
 
@@ -333,14 +360,6 @@ static __m128i tap_pair(const short *f, int a)
     return _mm_set1_epi32((int)((unsigned)(unsigned short)f[a] | (unsigned)(unsigned short)f[a + 1] << 16));
 }
 
-/* Stores the first n (4 or 8) of 8 pixels. */
-static void store_px(unsigned char *dst, __m128i px, int n)
-{
-    if (n >= 8)
-        _mm_storel_epi64((__m128i *)dst, px);
-    else
-        *(int *)dst = _mm_cvtsi128_si32(px);
-}
 
 /*
  * One pass of a subpixel filter over bw x bh pixels (bw a multiple of 4);

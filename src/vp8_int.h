@@ -1,4 +1,5 @@
 #pragma once
+#include <string.h>
 #include "vp8.h"
 
 /*
@@ -48,6 +49,15 @@ extern const unsigned char vp8_cat5[];
 extern const unsigned char vp8_cat6[];
 extern const short vp8_sixtap[8][6];
 extern const short vp8_bilinear[8][6];
+
+/* Four bytes from any address, for SSE2 loads of 4-pixel rows. */
+static __inline int vp8i_load4(const unsigned char *p)
+{
+    int v;
+
+    memcpy(&v, p, 4);
+    return v;
+}
 
 /* Inline: the loop filter and the predictions call it for every pixel. */
 static __inline unsigned char vp8i_clamp255(int v)
