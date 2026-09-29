@@ -83,10 +83,9 @@ int mls_key_package_read(mls_key_package_t *kp, tls_reader_t *r)
     if (!mls_leaf_parse(&kp->leaf, r->p, (size_t)(r->end - r->p), &used))
         return 0;
     r->p += used;
-    kp->extensions = read_extensions(r);
+    read_extensions(r);
     kp->tbs = span(start, r);
     kp->signature = read_vec(r);
-    kp->whole = span(start, r);
     if (r->bad || kp->leaf.source != 1) {
         mls_key_package_free(kp);
         return 0;
@@ -253,7 +252,7 @@ static int framed_read(mls_content_t *m, tls_reader_t *r)
         m->sender = (unsigned)tls_read_u32(r);
     else if (m->sender_type != MLS_SENDER_NEW_MEMBER_PROPOSAL && m->sender_type != MLS_SENDER_NEW_MEMBER_COMMIT)
         return 0;
-    m->authenticated_data = read_vec(r);
+    read_vec(r); /* authenticated_data, covered by `framed` */
     m->content_type = (int)tls_read_u8(r);
     content = r->p;
     if (r->bad)
@@ -367,7 +366,6 @@ int mls_group_info_read(mls_group_info_t *gi, tls_reader_t *r)
     gi->signer = (unsigned)tls_read_u32(r);
     gi->tbs = span(start, r);
     gi->signature = read_vec(r);
-    gi->whole = span(start, r);
     return !r->bad && gi->tree_hash.n == 32;
 }
 

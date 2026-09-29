@@ -32,7 +32,7 @@ typedef struct {
 /* FramedContent with its authentication data; a PublicMessage adds the membership tag. */
 typedef struct {
     unsigned wire_format;
-    mls_bytes_t group_id, authenticated_data;
+    mls_bytes_t group_id;
     unsigned long long epoch;
     int sender_type;
     unsigned sender;
@@ -63,13 +63,13 @@ typedef struct {
 } mls_commit_t;
 
 typedef struct {
-    mls_bytes_t whole, tbs, signature, extensions;
+    mls_bytes_t tbs, signature;
     unsigned char init_key[65];
     mls_node_t leaf;
 } mls_key_package_t;
 
 typedef struct {
-    mls_bytes_t whole, tbs, signature;
+    mls_bytes_t tbs, signature;
     mls_bytes_t group_context, group_id, tree_hash, confirmed_transcript_hash, gc_extensions;
     unsigned long long epoch;
     mls_bytes_t extensions, confirmation_tag;
