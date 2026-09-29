@@ -168,9 +168,7 @@ static int stored(bits_t *b, sb_t *out)
 {
     unsigned len, nlen;
 
-    /* To the byte boundary, and give back the whole bytes read ahead. */
-    b->bits >>= b->count & 7;
-    b->count -= b->count & 7;
+    /* To the byte boundary: the rest of the current byte is dropped, the whole bytes read ahead given back. */
     b->p -= b->count / 8;
     b->bits = 0;
     b->count = 0;
