@@ -311,6 +311,17 @@ static int is_structure_event(json_t t)
     return 0;
 }
 
+/* UI_EVENT: the event name, a NUL, then its JSON. */
+static void post_event(const char *name, const char *json, size_t n)
+{
+    sb_t *p = mem_alloc(sizeof *p);
+
+    sb_add(p, name);
+    sb_addn(p, "", 1);
+    sb_addn(p, json, n);
+    ui_post(UI_EVENT, p);
+}
+
 /* Hands the raw event to the UI thread, which owns the model. */
 static void forward_event(session_t *s, json_t t, json_t d)
 {
@@ -1106,14 +1117,10 @@ static void on_ready(void *ctx, json_t d)
         }
         /* Friends' statuses, applied once the model is in place. */
         if (json_get(d, "presences", &presences)) {
-            sb_t *p = mem_alloc(sizeof *p);
             char line[64];
             wsprintfA(line, "%d presences", (int)json_count(presences));
             log_line("ready: ", line);
-            sb_add(p, "PRESENCES");
-            sb_addn(p, "", 1);
-            sb_addn(p, presences.p, (size_t)(presences.end - presences.p));
-            ui_post(UI_EVENT, p);
+            post_event("PRESENCES", presences.p, (size_t)(presences.end - presences.p));
         }
     } else {
         model_free(model);
@@ -1534,13 +1541,8 @@ static DWORD WINAPI channel_main(LPVOID arg)
     char path[96];
 
     wsprintfA(path, "/channels/%s", j->channel);
-    if (http_request("GET", path, j->token.data, NULL, 0, &resp) && resp.status == 200) {
-        sb_t *p = mem_alloc(sizeof *p);
-        sb_add(p, "CHANNEL_CREATE");
-        sb_addn(p, "", 1);
-        sb_addn(p, resp.body.data, resp.body.len);
-        ui_post(UI_EVENT, p);
-    }
+    if (http_request("GET", path, j->token.data, NULL, 0, &resp) && resp.status == 200)
+        post_event("CHANNEL_CREATE", resp.body.data, resp.body.len);
     http_resp_free(&resp);
     free_job(j);
     return 0;
@@ -1591,12 +1593,8 @@ static DWORD WINAPI dm_main(LPVOID arg)
     sb_add(&body, "\"]}");
     if (http_request("POST", "/users/@me/channels", j->token.data, body.data, body.len, &resp) &&
         resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root) && json_get(root, "id", &id)) {
-        sb_t *p = mem_alloc(sizeof *p);
         json_raw(id, channel, sizeof channel);
-        sb_add(p, "CHANNEL_CREATE");
-        sb_addn(p, "", 1);
-        sb_addn(p, resp.body.data, resp.body.len);
-        ui_post(UI_EVENT, p);
+        post_event("CHANNEL_CREATE", resp.body.data, resp.body.len);
         ui_post(UI_DM_OPENED, ui_text(channel));
     } else {
         ui_post(UI_SEND_FAILED, ui_text("Could not open the conversation"));
@@ -2065,11 +2063,7 @@ static DWORD WINAPI thread_main(LPVOID arg)
         wsprintfA(path, "/channels/%s/threads", j->channel);
     if (http_request("POST", path, j->token.data, j->text.data, j->text.len, &resp) &&
         (resp.status == 200 || resp.status == 201)) {
-        sb_t *p = mem_alloc(sizeof *p);
-        sb_add(p, "THREAD_OURS");
-        sb_addn(p, "", 1);
-        sb_addn(p, resp.body.data, resp.body.len);
-        ui_post(UI_EVENT, p);
+        post_event("THREAD_OURS", resp.body.data, resp.body.len);
     } else {
         char text[64];
         wsprintfA(text, "Could not create the thread (HTTP %u)", resp.status);
