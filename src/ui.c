@@ -211,6 +211,7 @@ typedef struct {
     unsigned char *collapsed;  /* per channel (categories) */
     int rail_scroll, side_scroll;
     int camera_on_connect; /* the video button started the call: the camera follows */
+    int pop_docked;        /* the popout is the profile panel beside a DM */
     int home_page; /* HOME_*: what home shows when no conversation is open */
     unsigned char folder_open[64];
     int hover_kind, hover_index;
@@ -2734,6 +2735,7 @@ static void paint_side(RECT rc)
 
 static void place_composer(void);
 static void pop_close(void);
+static void dm_profile_sync(void);
 static void open_self(void);
 static void build_name_fonts(void);
 static void profiles_clear(void);
@@ -2787,8 +2789,8 @@ static int header_buttons(int *out)
     c = chan(g_ui.channel);
     if (is_voice_type(c->type))
         return 0;
-    if (g_ui.guild >= 0 || c->type == CH_GROUP_DM)
-        out[n++] = HB_MEMBERS;
+    if (g_ui.guild >= 0 || c->type == CH_GROUP_DM || (c->type == CH_DM && c->user_id[0]))
+        out[n++] = HB_MEMBERS; /* a DM's: its person's profile */
     out[n++] = HB_PINS;
     if (is_dm_type(c->type)) {
         out[n++] = HB_VIDEO;
@@ -4617,7 +4619,8 @@ static void paint_chat_header(RECT rc, int x0, const channel_t *c, const char *n
             ink = ARGB(C_INK);
         if (k[i] == HB_CALL && in_call(c->id))
             ink = ARGB(C_GREEN);
-        r_text(g_ui.f_icon_mid, ink, bx, 0, S(32), S(HEADER_H), glyphs[k[i]], -1, R_CENTER | R_VCENTER | R_SINGLE);
+        r_text(g_ui.f_icon_mid, ink, bx, 0, S(32), S(HEADER_H), k[i] == HB_MEMBERS && c->type == CH_DM ? L"\xE77B" : glyphs[k[i]], -1,
+               R_CENTER | R_VCENTER | R_SINGLE);
     }
     if (!voice) {
         r_round(sx, S(8), S(SEARCH_W), S(32), S(8), ARGB(C_MAIN));
@@ -5559,6 +5562,7 @@ static void open_channel(int index)
     mem_free(hint);
     SetWindowTextW(g_ui.composer, L"");
     place_composer();
+    dm_profile_sync();
 }
 
 
@@ -6437,6 +6441,7 @@ static int click_message(int x, int y)
  */
 
 #define POP_W 300
+#define PROFILE_W 340 /* the profile beside a DM, as in Discord: the popout, docked */
 #define POP_PAD 16
 #define POP_AVATAR 80
 #define POP_BANNER 105
@@ -6644,13 +6649,18 @@ static void pop_tooltip(const char *s, int cx, int bottom, int w)
          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+static int pop_width(void)
+{
+    return g_ui.pop_docked ? S(PROFILE_W) : S(POP_W);
+}
+
 /* Walks the popout layout; paints when `draw` is set. Returns the height. */
 static int pop_render(int draw)
 {
     const profile_t *p = g_ui.pop_profile;
-    int w = S(POP_W), pad = S(POP_PAD), inner = w - 2 * pad;
+    int w = pop_width(), pad = S(POP_PAD), inner = w - 2 * pad, radius = g_ui.pop_docked ? 0 : S(POP_RADIUS);
     int bh = pop_banner_h(p), y, ax = pad, ay = bh - S(POP_AVATAR) / 2;
-    unsigned body = 0xFF111111, border = 0xFF262626;
+    unsigned body = 0xFF121214u, border = 0xFF1E1E20u; /* background-surface-higher, border-subtle */
     r_image_t *avatar = pop_avatar(p);
     const char *name = p ? p->name.data : g_ui.pop_name.data;
 
@@ -6664,16 +6674,15 @@ static int pop_render(int draw)
 
         fill(0, 0, w, S(4000), g_ui.pop_ax < S(RAIL_W + SIDE_W) ? C_SIDE : C_MAIN); /* behind the corners */
         if (p && p->ntheme == 2) {
-            r_round_gradient(0, 0, w, g_ui.pop_h, S(POP_RADIUS), rgb_argb(p->theme[0], 0xFF),
-                             rgb_argb(p->theme[1], 0xFF));
-            r_round(0, 0, w, g_ui.pop_h, S(POP_RADIUS), 0x99000000u);
+            r_round_gradient(0, 0, w, g_ui.pop_h, radius, rgb_argb(p->theme[0], 0xFF), rgb_argb(p->theme[1], 0xFF));
+            r_round(0, 0, w, g_ui.pop_h, radius, 0x99000000u);
         } else {
-            r_round(0, 0, w, g_ui.pop_h, S(POP_RADIUS), body);
+            r_round(0, 0, w, g_ui.pop_h, radius, body);
         }
         /* Banner: image, else theme or accent color, else the avatar's average color. */
         r_clip(0, 0, w, bh);
         if (banner) {
-            r_image_cover(banner, 0, 0, w, bh + S(POP_RADIUS), S(POP_RADIUS));
+            r_image_cover(banner, 0, 0, w, bh + S(POP_RADIUS), radius);
         } else {
             if (p && p->ntheme == 2)
                 bc = rgb_argb(p->theme[0], 0xFF);
@@ -6681,7 +6690,7 @@ static int pop_render(int draw)
                 bc = rgb_argb(p->accent, 0xFF);
             else if (avatar)
                 bc = r_image_average(avatar);
-            r_round(0, 0, w, bh + S(POP_RADIUS), S(POP_RADIUS), bc ? bc : 0xFF2A2A2A);
+            r_round(0, 0, w, bh + S(POP_RADIUS), radius, bc ? bc : 0xFF2A2A2A);
         }
         r_unclip();
 
@@ -6791,7 +6800,7 @@ static int pop_render(int draw)
         y += S(POP_BADGE);
 
     /* Mutual friends and servers. */
-    if (p && !g_ui.pop_self && (p->mutual_friends > 0 || p->mutual_guilds > 0)) {
+    if (p && !g_ui.pop_self && !g_ui.pop_docked && (p->mutual_friends > 0 || p->mutual_guilds > 0)) {
         char line[96] = "";
         int x = pad;
 
@@ -6864,7 +6873,7 @@ static int pop_render(int draw)
                 y += S(28);
             }
             if (draw) {
-                r_round(rx, y, pw, S(24), S(4), 0xFF1E1E1E);
+                r_round(rx, y, pw, S(24), S(4), 0xFF17181Bu);
                 r_circle(rx + S(8), y + S(7), S(10), r.color ? 0xFF000000u | r.color : 0xFF99AAB5u);
                 text(g_ui.f_small, C_INK, rect(rx + S(22), y, pw - S(26), S(24)), rname, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
@@ -6889,11 +6898,56 @@ static int pop_render(int draw)
         y += r_rich_height(g_ui.pop_rich);
     }
 
+    /* When the account was made, read from its id as Discord shows it: "Member Since". */
+    if (p && g_ui.pop_user[0]) {
+        unsigned long long id = 0;
+        for (const char *c = g_ui.pop_user; *c >= '0' && *c <= '9'; c++)
+            id = id * 10 + (unsigned long long)(*c - '0');
+        y += S(16);
+        if (draw && id) {
+            unsigned long long t = ((id >> 22) + FILETIME_UNIX_MS + 1420070400000ull) * 10000ull;
+            FILETIME ft = {(DWORD)t, (DWORD)(t >> 32)}, local;
+            SYSTEMTIME st;
+            wchar_t date[48];
+            FileTimeToLocalFileTime(&ft, &local);
+            FileTimeToSystemTime(&local, &st);
+            if (!GetDateFormatEx(L"en-US", 0, &st, L"MMM d, yyyy", date, ARRAYSIZE(date), NULL))
+                date[0] = 0;
+            text(g_ui.f_cat, C_INK, rect(pad, y, inner, S(18)), "Member Since", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            text_w(g_ui.f_section, C_MUTED, rect(pad, y + S(20), inner, S(20)), date, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        y += S(40);
+    }
+
+    /* Beside a DM, mutual servers and friends are rows of their own, as in Discord's panel. */
+    if (p && g_ui.pop_docked && (p->mutual_friends > 0 || p->mutual_guilds > 0)) {
+        const char *labels[2] = {"Mutual Servers", "Mutual Friends"};
+        int counts[2] = {p->mutual_guilds, p->mutual_friends}, rows = (counts[0] > 0) + (counts[1] > 0), r = 0;
+        y += S(16);
+        if (draw)
+            r_round(pad, y, inner, rows * S(44), S(8), 0xFF17181Bu);
+        for (int k = 0; k < 2; k++) {
+            char line[64];
+            if (counts[k] <= 0)
+                continue;
+            wsprintfA(line, "%s \xE2\x80\x94 %d", labels[k], counts[k]);
+            if (draw) {
+                if (r)
+                    r_fill(pad + S(12), y, inner - S(24), S(1) > 1 ? S(1) : 1, 0xFF242426u);
+                text(g_ui.f_section, C_INK, rect(pad + S(12), y, inner - S(48), S(44)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                text_w(g_ui.f_icon, C_MUTED, rect(pad + inner - S(36), y, S(24), S(44)), ICON_CHEVRON_RIGHT, -1,
+                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            y += S(44);
+            r++;
+        }
+    }
+
     /* Our own status, as in Discord's account popout. */
     if (g_ui.pop_self) {
         y += S(12);
         if (draw)
-            r_round(pad, y, inner, S(4 * 34 + 8), S(8), 0xFF0B0B0B);
+            r_round(pad, y, inner, S(4 * 34 + 8), S(8), 0xFF17181Bu);
         y += S(4);
         for (int k = 0; k < 4; k++) {
             g_ui.pop_status_y[k] = y;
@@ -6901,7 +6955,7 @@ static int pop_render(int draw)
                 if (g_ui.pop_hover == -10 - k)
                     r_round(pad + S(4), y, inner - S(8), S(34), S(4), ARGB(C_HOVER));
                 status_dot(pad + S(14), y + S(11), S(12), k_status_states[k],
-                           g_ui.pop_hover == -10 - k ? ARGB(C_HOVER) : 0xFF0B0B0B);
+                           g_ui.pop_hover == -10 - k ? ARGB(C_HOVER) : 0xFF17181Bu);
                 text(g_ui.f_body, g_ui.my_status == k_status_states[k] ? C_INK : C_MUTED,
                      rect(pad + S(36), y, inner - S(44), S(34)), k_status_names[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
@@ -6910,8 +6964,8 @@ static int pop_render(int draw)
         y += S(4);
     }
 
-    /* Message box; the EDIT control sits inside it. */
-    if (!g_ui.pop_self) {
+    /* Message box; the EDIT control sits inside it. Not beside a DM: its composer is right there. */
+    if (!g_ui.pop_self && !g_ui.pop_docked) {
         y += S(16);
         g_ui.pop_input_y = y;
         if (draw)
@@ -6921,7 +6975,10 @@ static int pop_render(int draw)
     y += pad;
 
     if (draw) {
-        r_round_outline(0, 0, w, g_ui.pop_h, S(POP_RADIUS), 1, border);
+        if (g_ui.pop_docked)
+            r_fill(0, 0, S(1) > 1 ? S(1) : 1, g_ui.pop_h, border);
+        else
+            r_round_outline(0, 0, w, g_ui.pop_h, radius, S(1) > 1 ? S(1) : 1, border);
         if (p && g_ui.pop_hover >= 0 && g_ui.pop_hover < p->nbadges)
             pop_tooltip(p->badges[g_ui.pop_hover].description.data ? p->badges[g_ui.pop_hover].description.data : "",
                         g_ui.pop_badge_x[g_ui.pop_hover] + S(POP_BADGE) / 2, g_ui.pop_badge_y[g_ui.pop_hover] - S(4), w);
@@ -6933,11 +6990,18 @@ static int pop_render(int draw)
 static void pop_place(void)
 {
     RECT rc;
-    int w = S(POP_W), h, x, y;
+    int w = pop_width(), h, x, y;
 
     if (!g_ui.pop)
         return;
     GetClientRect(g_ui.wnd, &rc);
+    if (g_ui.pop_docked) {
+        pop_render(0);
+        g_ui.pop_h = rc.bottom - S(HEADER_H);
+        SetWindowPos(g_ui.pop, NULL, rc.right - w, S(HEADER_H), w, g_ui.pop_h, SWP_NOACTIVATE | SWP_NOZORDER);
+        InvalidateRect(g_ui.pop, NULL, FALSE);
+        return;
+    }
     h = pop_render(0);
     if (h > rc.bottom - S(16))
         h = rc.bottom - S(16);
@@ -6954,7 +7018,7 @@ static void pop_place(void)
     if (g_ui.pop_edit) {
         int eh = S(20);
         MoveWindow(g_ui.pop_edit, S(POP_PAD) + S(12), g_ui.pop_input_y + (S(POP_INPUT_H) - eh) / 2,
-                   S(POP_W) - 2 * S(POP_PAD) - S(24), eh, TRUE);
+                   pop_width() - 2 * S(POP_PAD) - S(24), eh, TRUE);
     }
     InvalidateRect(g_ui.pop, NULL, FALSE);
 }
@@ -6973,6 +7037,7 @@ static void pop_close(void)
     if (!pop)
         return;
     g_ui.pop = NULL;
+    g_ui.pop_docked = 0;
     g_ui.pop_edit = NULL;
     DestroyWindow(pop);
     if (g_ui.pop_font) {
@@ -7003,7 +7068,7 @@ static void pop_cue(const char *name)
 
 static void pop_set_profile(profile_t *p)
 {
-    unsigned c = 0xFF1E1E1E;
+    unsigned c = 0xFF17181Bu; /* user-profile-overlay-background */
 
     pop_reset_bio();
     g_ui.pop_profile = p;
@@ -7098,7 +7163,7 @@ static void copy_text(const char *s)
 static void pop_menu(void)
 {
     HMENU menu = CreatePopupMenu();
-    POINT pt = {S(POP_W) - S(12) - S(32), S(12) + S(34)};
+    POINT pt = {pop_width() - S(12) - S(32), S(12) + S(34)};
     int cmd;
     char id[24];
 
@@ -7119,13 +7184,13 @@ static void pop_menu(void)
 static int pop_hit(int x, int y)
 {
     const profile_t *p = g_ui.pop_profile;
-    int bx = S(POP_W) - S(12) - S(32), by = S(12);
+    int bx = pop_width() - S(12) - S(32), by = S(12);
 
     if (x >= bx && x < bx + S(32) && y >= by && y < by + S(32))
         return -2;
     if (g_ui.pop_self)
         for (int k = 0; k < 4; k++)
-            if (y >= g_ui.pop_status_y[k] && y < g_ui.pop_status_y[k] + S(34) && x >= S(POP_PAD) && x < S(POP_W) - S(POP_PAD))
+            if (y >= g_ui.pop_status_y[k] && y < g_ui.pop_status_y[k] + S(34) && x >= S(POP_PAD) && x < pop_width() - S(POP_PAD))
                 return -10 - k;
     for (int i = 0; p && i < p->nbadges && i < (int)ARRAYSIZE(g_ui.pop_badge_x); i++)
         if (x >= g_ui.pop_badge_x[i] && x < g_ui.pop_badge_x[i] + S(POP_BADGE) && y >= g_ui.pop_badge_y[i] &&
@@ -7783,8 +7848,38 @@ static void composer_changed(void)
 
 static int members_shown(void)
 {
-    return g_ui.show_members && g_ui.view == VIEW_APP && open_is_text() &&
-           (g_ui.guild >= 0 || chan(g_ui.channel)->type == CH_GROUP_DM);
+    return g_ui.show_members && g_ui.view == VIEW_APP && open_is_text() && !g_ui.settings_open &&
+           (g_ui.guild >= 0 || chan(g_ui.channel)->type == CH_GROUP_DM ||
+            (chan(g_ui.channel)->type == CH_DM && chan(g_ui.channel)->user_id[0]));
+}
+
+/* The right column's width: a DM shows the other person's profile there, wider than a member list. */
+static int side_panel_w(void)
+{
+    return members_shown() && chan(g_ui.channel)->type == CH_DM ? S(PROFILE_W) : S(MEMBERS_W);
+}
+
+/* Opens or closes the profile beside a 1:1 DM to match what is shown. */
+static void dm_profile_sync(void)
+{
+    const channel_t *c = g_ui.model && g_ui.channel >= 0 ? chan(g_ui.channel) : NULL;
+    int want = c && members_shown() && c->type == CH_DM;
+
+    if (g_ui.pop && g_ui.pop_docked && (!want || lstrcmpA(g_ui.pop_user, c->user_id) != 0))
+        pop_close();
+    if (want && !g_ui.pop) {
+        HWND focus = GetFocus();
+        pop_open(c->user_id, model_str(g_ui.model, c->name), c->avatar, 0, 0, 0);
+        if (g_ui.pop) {
+            g_ui.pop_docked = 1;
+            if (g_ui.pop_edit) {
+                DestroyWindow(g_ui.pop_edit);
+                g_ui.pop_edit = NULL;
+            }
+            pop_place();
+            SetFocus(focus && IsWindow(focus) ? focus : g_ui.composer);
+        }
+    }
 }
 
 /* A group DM's members, us included, sorted by name: fills ids, avatars and names, returns how many. */
@@ -7825,7 +7920,7 @@ static int main_right(void)
     RECT rc;
 
     GetClientRect(g_ui.wnd, &rc);
-    return rc.right - (members_shown() ? S(MEMBERS_W) : 0);
+    return rc.right - (members_shown() ? side_panel_w() : 0);
 }
 
 static unsigned status_color(int status)
@@ -7942,13 +8037,14 @@ static void paint_dm_members(RECT rc, int x0)
 
 static void paint_members(RECT rc)
 {
-    int x0 = rc.right - S(MEMBERS_W), y = S(HEADER_H) + S(8) - g_ui.ml_scroll;
+    int x0 = rc.right - side_panel_w(), y = S(HEADER_H) + S(8) - g_ui.ml_scroll;
 
-    fill(x0, S(HEADER_H), S(MEMBERS_W), rc.bottom - S(HEADER_H), C_SIDE);
+    fill(x0, S(HEADER_H), side_panel_w(), rc.bottom - S(HEADER_H), C_SIDE);
     fill(x0, S(HEADER_H), S(1) > 1 ? S(1) : 1, rc.bottom - S(HEADER_H), C_LINE);
     if (g_ui.guild < 0) {
-        paint_dm_members(rc, x0);
-        return;
+        if (chan(g_ui.channel)->type == CH_GROUP_DM)
+            paint_dm_members(rc, x0);
+        return; /* a DM: the docked popout covers it */
     }
     r_clip(x0, S(HEADER_H), S(MEMBERS_W), rc.bottom - S(HEADER_H));
     for (int i = 0; i < g_ui.ml.n; i++) {
@@ -10969,6 +11065,7 @@ static void settings_close(void)
     place_composer();
     place_friend_input();
     place_search();
+    dm_profile_sync();
     redraw();
 }
 
@@ -12633,8 +12730,9 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.view == VIEW_APP) {
             int kind, index;
             int action;
-            if (g_ui.pop) {
+            if (g_ui.pop && !g_ui.pop_docked) {
                 pop_close(); /* a click outside only closes the popout */
+                dm_profile_sync();
                 return 0;
             }
             if (g_ui.confirm) {
@@ -12753,6 +12851,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (open_is_text() && y < S(HEADER_H) && x >= header_button_x(HB_MEMBERS) &&
                     x < header_button_x(HB_MEMBERS) + S(32)) {
                     g_ui.show_members ^= 1;
+                    dm_profile_sync();
                     place_composer();
                     invalidate_views();
                     clamp_msg_scroll();
