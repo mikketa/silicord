@@ -41,6 +41,8 @@ Silicord is not affiliated with or endorsed by Discord Inc.
 
 Get `silicord.exe` from the [latest release](https://github.com/mikketa/silicord/releases/latest). It is a single portable executable: no installer, no dependencies. Release builds are made by GitHub Actions from the tagged commit; see the [Code Signing Policy](#code-signing-policy).
 
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
 ## Usage
 
 Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings › Scan QR Code), then confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works.
