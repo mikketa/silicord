@@ -29,28 +29,34 @@
 #include "voice.h"
 #include "audio.h"
 
-/* Palette (GDI COLORREF and GDI+ ARGB). */
+/*
+ * Palette (GDI COLORREF and ARGB): Discord's "Midnight" dark theme, its design
+ * tokens flattened on black (the translucent ones mixed onto the surface they sit on).
+ */
 #define RGBX(r, g, b) RGB(r, g, b), (0xFF000000u | ((r) << 16) | ((g) << 8) | (b))
-enum { C_RAIL, C_SIDE, C_MAIN, C_PANEL, C_ITEM, C_HOVER, C_SELECT, C_LINE, C_INK, C_MUTED, C_FAINT, C_AMBER, C_GREEN, C_TIP,
-       C_MENTION, C_MENTION_HOVER, C_NEW, C_COUNT };
+enum { C_RAIL, C_SIDE, C_MAIN, C_PANEL, C_ITEM, C_HOVER, C_SELECT, C_LINE, C_INK, C_MUTED, C_FAINT, C_BRAND, C_GREEN, C_TIP,
+       C_MENTION, C_MENTION_HOVER, C_NEW, C_WARN, C_RED, C_TEXT, C_COUNT };
 static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
-    {RGBX(0x0A, 0x0A, 0x0A)}, /* rail */
-    {RGBX(0x11, 0x11, 0x11)}, /* channel column */
-    {RGBX(0x16, 0x16, 0x16)}, /* main pane */
-    {RGBX(0x0D, 0x0D, 0x0D)}, /* user panel */
-    {RGBX(0x1F, 0x1F, 0x1F)}, /* server icon placeholder */
-    {RGBX(0x1B, 0x1B, 0x1B)}, /* hovered row */
-    {RGBX(0x26, 0x26, 0x26)}, /* selected row */
-    {RGBX(0x22, 0x22, 0x22)}, /* separators */
-    {RGBX(0xED, 0xE6, 0xD6)}, /* text */
-    {RGBX(0x9A, 0x94, 0x88)}, /* secondary text */
-    {RGBX(0x5F, 0x5B, 0x54)}, /* icons, hints */
-    {RGBX(0xFF, 0xB0, 0x00)}, /* accent */
-    {RGBX(0x3B, 0xA5, 0x5D)}, /* online */
-    {RGBX(0x05, 0x05, 0x05)}, /* tooltip */
-    {RGBX(0x26, 0x21, 0x14)}, /* message that mentions us */
-    {RGBX(0x2C, 0x26, 0x17)}, /* same, hovered */
-    {RGBX(0xF2, 0x3F, 0x43)}, /* NEW line */
+    {RGBX(0x00, 0x00, 0x00)}, /* rail and title bar: app-frame-background */
+    {RGBX(0x00, 0x00, 0x00)}, /* channel column: background-base-lowest */
+    {RGBX(0x00, 0x00, 0x00)}, /* main pane: chat-background */
+    {RGBX(0x00, 0x00, 0x00)}, /* user panel */
+    {RGBX(0x12, 0x12, 0x14)}, /* buttons, placeholders: background-surface-higher */
+    {RGBX(0x12, 0x12, 0x13)}, /* hovered row: interactive-background-hover */
+    {RGBX(0x24, 0x24, 0x26)}, /* selected row: interactive-background-selected */
+    {RGBX(0x1E, 0x1E, 0x20)}, /* separators: border-subtle */
+    {RGBX(0xDC, 0xDC, 0xDF)}, /* names, titles, active: text-strong */
+    {RGBX(0x96, 0x97, 0x9E)}, /* secondary text, idle icons: interactive-text-default */
+    {RGBX(0x81, 0x82, 0x8A)}, /* hints, timestamps: text-muted */
+    {RGBX(0x58, 0x65, 0xF2)}, /* accent: brand-500 */
+    {RGBX(0x23, 0xA5, 0x5A)}, /* online: status-online */
+    {RGBX(0x17, 0x18, 0x1B)}, /* tooltip: background-surface-highest */
+    {RGBX(0x13, 0x0D, 0x00)}, /* message that mentions us: message-mentioned-background */
+    {RGBX(0x1A, 0x12, 0x02)}, /* same, hovered */
+    {RGBX(0xF2, 0x3F, 0x43)}, /* NEW line: status-danger */
+    {RGBX(0xF0, 0xB2, 0x32)}, /* connecting, warnings: status-warning */
+    {RGBX(0xF2, 0x3F, 0x43)}, /* errors, destructive actions: status-danger */
+    {RGBX(0xD4, 0xD5, 0xD8)}, /* message text: text-default */
 };
 #define GDI(c) (k_color[c].gdi)
 #define ARGB(c) (k_color[c].argb)
@@ -65,8 +71,10 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 
 /* Layout constants at 96 DPI. */
 #define RAIL_W 72
-#define ICON 48
-#define RAIL_STEP 56
+#define ICON 40
+#define RAIL_STEP 48
+#define RAIL_FIRST 56 /* the first server, under home and its separator */
+#define PANEL_GAP 8   /* around the floating user panel */
 #define SIDE_W 240
 #define HEADER_H 48
 #define PANEL_H 56
@@ -76,7 +84,8 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ROW_H 34
 
 enum { VIEW_LOGIN, VIEW_LOADING, VIEW_APP };
-enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF, HIT_VOICE_CAMERA, HIT_VOICE_SHARE };
+enum { HIT_NONE, HIT_HOME, HIT_GUILD, HIT_CHANNEL, HIT_LOGOUT, HIT_RETRY, HIT_SELF, HIT_FRIENDS, HIT_FOLDER, HIT_VOICE_LEAVE, HIT_VOICE_MUTE, HIT_VOICE_DEAF, HIT_VOICE_CAMERA, HIT_VOICE_SHARE,
+       HIT_MIC, HIT_DEAFEN, HIT_VOICE_MENU, HIT_NAV, HIT_DM_SEARCH, HIT_NEW_DM };
 
 typedef struct {
     char key[96];
@@ -173,9 +182,16 @@ typedef struct {
 } typing_t;
 
 typedef struct {
-    HWND wnd;
+    HWND wnd;          /* the app, a child of `top` under the title bar */
+    HWND top;          /* the window itself: frame and title bar */
+    HWND saved_focus;  /* given back when the window is activated again */
+    int tb_hover, tb_down;
+    /* Back and forward in the title bar: channel ids, "" for the friends page. */
+    char hist[32][24];
+    int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
-    r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid;
+    r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
+    r_font_t *f_nav, *f_section, *f_small_mid;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -193,6 +209,7 @@ typedef struct {
     int last_dm;
     unsigned char *collapsed;  /* per channel (categories) */
     int rail_scroll, side_scroll;
+    int home_page; /* HOME_*: what home shows when no conversation is open */
     unsigned char folder_open[64];
     int hover_kind, hover_index;
     image_t *images;
@@ -326,6 +343,7 @@ typedef struct {
     int friend_tab, friend_scroll, friend_hover, friend_act;
     int tab_x[5], tab_w[5];
     HWND friend_edit;
+    HWND friend_search;   /* filters the friends list by name */
     sb_t friend_result;
 
     /* Composer suggestions. */
@@ -592,7 +610,7 @@ static void draw_wordmark(int x, int y, int unit)
             for (int col = 0; col < 5; col++)
                 if ((k_word[g][row] >> (4 - col)) & 1)
                     fill(x + (g * 6 + col) * unit, y + row * unit, unit, unit, C_INK);
-    fill(x + 48 * unit, y, 4 * unit, 7 * unit, C_AMBER);
+    fill(x + 48 * unit, y, 4 * unit, 7 * unit, C_BRAND);
 }
 
 static int wordmark_width(int unit)
@@ -1062,7 +1080,7 @@ static RECT login_card(void)
 
 static void paint_step(int x, int y, const char *n, const char *label)
 {
-    r_circle(x, y, S(24), ARGB(C_AMBER));
+    r_circle(x, y, S(24), ARGB(C_BRAND));
     text(g_ui.f_small, C_RAIL, rect(x, y, S(24), S(24)), n, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     text(g_ui.f_body, C_INK, rect(x + S(38), y, S(360), S(24)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
@@ -1088,7 +1106,7 @@ static void paint_login(RECT rc)
 
     r_round(tx, ty, tile, tile, S(12), g_ui.scanned.len ? ARGB(C_PANEL) : ARGB(C_INK));
     if (g_ui.scanned.len) {
-        text_w(g_ui.f_icon_big, C_AMBER, rect(tx, ty + S(52), tile, S(48)), ICON_CHECK, -1, DT_CENTER | DT_SINGLELINE);
+        text_w(g_ui.f_icon_big, C_BRAND, rect(tx, ty + S(52), tile, S(48)), ICON_CHECK, -1, DT_CENTER | DT_SINGLELINE);
         text(g_ui.f_h, C_INK, rect(tx + S(8), ty + S(116), tile - S(16), S(24)), g_ui.scanned.data,
              DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         text(g_ui.f_small, C_MUTED, rect(tx, ty + S(144), tile, S(20)), "Confirm the login on your phone",
@@ -1103,12 +1121,12 @@ static void paint_login(RECT rc)
         /* Silicord mark in the middle: level M error correction absorbs it. */
         r_round(tx + tile / 2 - S(15), ty + tile / 2 - S(15), S(30), S(30), S(8), ARGB(C_INK));
         r_round(tx + tile / 2 - S(12), ty + tile / 2 - S(12), S(24), S(24), S(6), ARGB(C_RAIL));
-        draw_mark(tx + tile / 2 - S(8), ty + tile / 2 - S(8), S(1), C_AMBER);
+        draw_mark(tx + tile / 2 - S(8), ty + tile / 2 - S(8), S(1), C_BRAND);
     } else {
         text(g_ui.f_body, C_RAIL, rect(tx, ty, tile, tile), "Getting a code\xE2\x80\xA6",
              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    text(g_ui.f_body, C_AMBER, rect(0, card.bottom + S(24), rc.right, S(24)), str_or_empty(&g_ui.status),
+    text(g_ui.f_body, C_BRAND, rect(0, card.bottom + S(24), rc.right, S(24)), str_or_empty(&g_ui.status),
          DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -1145,7 +1163,7 @@ static int folder_is_open(int f)
 static int rail_rows(void)
 {
     const model_t *m = g_ui.model;
-    int n = 0, y = S(12) + S(RAIL_STEP) + S(12) - g_ui.rail_scroll;
+    int n = 0, y = S(RAIL_FIRST) - g_ui.rail_scroll;
 
     for (unsigned i = 0; m && i < m->nguilds && n < RAIL_MAX; i++) {
         int f = m->guilds[i].folder;
@@ -1172,7 +1190,7 @@ static int rail_y(int i) /* i = -1 for home; a guild in a closed folder gives it
     int n;
 
     if (i < 0)
-        return S(12) - g_ui.rail_scroll;
+        return -g_ui.rail_scroll;
     n = rail_rows();
     for (int k = 0; k < n; k++)
         if (g_rail.kind[k] == RAIL_GUILD && g_rail.index[k] == i)
@@ -1243,6 +1261,12 @@ static int hidden(unsigned first, unsigned i)
 }
 
 #define DM_ROW_H 44
+/* Above the conversations, as in Discord: Friends, Nitro, Shop and Quests, a line, then "Direct Messages". */
+#define NAV_ROW 40
+#define NAVS 4
+#define DM_SECTION 37
+#define DM_TOP (NAVS * NAV_ROW + 13 + DM_SECTION)
+enum { HOME_FRIENDS, HOME_NITRO, HOME_SHOP, HOME_QUESTS };
 
 /* ---- Voice channels: who is in them ---- */
 
@@ -1396,11 +1420,11 @@ static void update_ringing(void)
     if (ring != g_ui.ring_sound) {
         g_ui.ring_sound = ring;
         if (ring) {
-            FLASHWINFO fw = {sizeof fw, g_ui.wnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0};
+            FLASHWINFO fw = {sizeof fw, g_ui.top, FLASHW_TRAY | FLASHW_TIMERNOFG, 0, 0};
             PlaySoundW(L"Notification.Looping.Call", NULL, SND_ALIAS | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
             FlashWindowEx(&fw);
         } else {
-            FLASHWINFO fw = {sizeof fw, g_ui.wnd, FLASHW_STOP, 0, 0};
+            FLASHWINFO fw = {sizeof fw, g_ui.top, FLASHW_STOP, 0, 0};
             PlaySoundW(NULL, NULL, 0);
             FlashWindowEx(&fw);
         }
@@ -1940,10 +1964,16 @@ static int row_height(unsigned i)
     return type == CH_CATEGORY ? S(CAT_H) : is_dm_type(type) ? S(DM_ROW_H) : S(ROW_H);
 }
 
+/* Top of the channel list under the header: home puts its links above the conversations. */
+static int side_list_top(void)
+{
+    return S(8) + (g_ui.guild < 0 ? S(DM_TOP) : 0);
+}
+
 static int side_content(void)
 {
     unsigned first, count;
-    int h = S(8);
+    int h = side_list_top();
 
     if (!side_range(&first, &count))
         return 0;
@@ -1961,14 +1991,48 @@ static int voice_bar_h(void)
 /* The voice bar's row of buttons, left to right, each this wide. */
 static const int k_voice_buttons[4] = {HIT_VOICE_SHARE, HIT_VOICE_CAMERA, HIT_VOICE_MUTE, HIT_VOICE_DEAF};
 
+static int panel_right(void);
+
 static int voice_button_w(void)
 {
-    return (S(SIDE_W) - S(16) - 3 * S(8)) / 4;
+    return (panel_right() - S(PANEL_GAP) - S(16) - 3 * S(8)) / 4;
+}
+
+/*
+ * The floating panel at the bottom left, over the rail and the channel list,
+ * as in Discord: the voice connection (while in a call) above our name.
+ */
+static int panel_top(RECT rc)
+{
+    return rc.bottom - S(PANEL_GAP) - S(PANEL_H) - voice_bar_h();
+}
+
+static int user_row_y(RECT rc)
+{
+    return rc.bottom - S(PANEL_GAP) - S(PANEL_H);
+}
+
+static int panel_right(void)
+{
+    return S(RAIL_W + SIDE_W) - S(PANEL_GAP);
+}
+
+/* The user row's buttons, right to left: settings, deafen's menu, deafen, mute's menu, mute. */
+static const int k_panel_buttons[5] = {HIT_LOGOUT, HIT_VOICE_MENU, HIT_DEAFEN, HIT_VOICE_MENU, HIT_MIC};
+static const int k_panel_button_w[5] = {32, 18, 32, 18, 32};
+
+static int panel_button_x(int k)
+{
+    int x = panel_right() - S(8);
+
+    for (int i = 0; i <= k; i++)
+        x -= S(k_panel_button_w[i]) + (i == 2 ? S(6) : 0);
+    return x;
 }
 
 static int side_view(RECT rc)
 {
-    return rc.bottom - S(HEADER_H) - S(PANEL_H) - voice_bar_h();
+    return panel_top(rc) - S(HEADER_H);
 }
 
 static void clamp_scroll(void)
@@ -1977,7 +2041,7 @@ static void clamp_scroll(void)
     int max;
 
     GetClientRect(g_ui.wnd, &rc);
-    max = rail_content() - rc.bottom;
+    max = rail_content() - (panel_top(rc) - S(PANEL_GAP));
     if (g_ui.rail_scroll > max)
         g_ui.rail_scroll = max;
     if (g_ui.rail_scroll < 0)
@@ -1996,7 +2060,34 @@ static void hit_test(int x, int y, int *kind, int *index)
     *kind = HIT_NONE;
     *index = -1;
     GetClientRect(g_ui.wnd, &rc);
+    if (x >= S(PANEL_GAP) && x < panel_right() && y >= panel_top(rc)) {
+        int vy = panel_top(rc), uy = user_row_y(rc), cy = uy + (S(PANEL_H) - S(32)) / 2;
+        if (voice_bar_h() && y < uy) {
+            int by = vy + S(VOICE_ROW1_H), bw = voice_button_w();
+            int bx = x - S(PANEL_GAP) - S(8), k = bx >= 0 ? bx / (bw + S(8)) : 4;
+            if (y >= vy + (S(VOICE_ROW1_H) - S(32)) / 2 && y < vy + (S(VOICE_ROW1_H) + S(32)) / 2 &&
+                x >= panel_right() - S(40) && x < panel_right() - S(8))
+                *kind = HIT_VOICE_LEAVE;
+            else if (y >= by && y < by + S(32) && k < 4 && bx % (bw + S(8)) < bw)
+                *kind = k_voice_buttons[k];
+            return;
+        }
+        if (y >= cy && y < cy + S(32)) {
+            for (int k = 0; k < 5; k++)
+                if (x >= panel_button_x(k) && x < panel_button_x(k) + S(k_panel_button_w[k])) {
+                    *kind = k_panel_buttons[k];
+                    return;
+                }
+            if (g_ui.disconnected && x >= panel_button_x(4) - S(36) && x < panel_button_x(4) - S(4))
+                *kind = HIT_RETRY;
+            else if (x < panel_button_x(4) - S(4))
+                *kind = HIT_SELF;
+        }
+        return;
+    }
     if (x < S(RAIL_W)) {
+        if (y >= panel_top(rc) - S(PANEL_GAP))
+            return;
         if (y >= rail_y(-1) && y < rail_y(-1) + S(ICON)) {
             *kind = HIT_HOME;
             return;
@@ -2008,34 +2099,28 @@ static void hit_test(int x, int y, int *kind, int *index)
                 return;
             }
     } else if (x < S(RAIL_W + SIDE_W)) {
-        int top = rc.bottom - S(PANEL_H) + (S(PANEL_H) - S(32)) / 2;
-        int right = S(RAIL_W + SIDE_W) - S(8);
-        if (voice_bar_h() && y >= rc.bottom - S(PANEL_H) - voice_bar_h() && y < rc.bottom - S(PANEL_H)) {
-            int top_y = rc.bottom - S(PANEL_H) - voice_bar_h(), vy = top_y + (S(VOICE_ROW1_H) - S(32)) / 2;
-            int by = top_y + S(VOICE_ROW1_H), bw = voice_button_w();
-            int bx = x - S(RAIL_W) - S(8), k = bx >= 0 ? bx / (bw + S(8)) : 4;
-            if (y >= vy && y < vy + S(32) && x >= right - S(32) && x < right)
-                *kind = HIT_VOICE_LEAVE;
-            else if (y >= by && y < by + S(32) && k < 4 && bx % (bw + S(8)) < bw)
-                *kind = k_voice_buttons[k];
-            return;
-        }
-        if (y >= rc.bottom - S(PANEL_H)) {
-            if (y >= top && y < top + S(32) && x >= right - S(32) && x < right)
-                *kind = HIT_LOGOUT;
-            else if (g_ui.disconnected && y >= top && y < top + S(32) && x >= right - S(68) && x < right - S(36))
-                *kind = HIT_RETRY;
-            else if (y >= top && y < top + S(32) && x >= S(RAIL_W) + S(6) && x < S(RAIL_W) + S(176))
-                *kind = HIT_SELF;
-            return;
-        }
         unsigned first, count;
-        if (y < S(HEADER_H) && g_ui.guild < 0 && g_ui.model) {
-            *kind = HIT_FRIENDS;
+        if (y >= panel_top(rc))
             return;
+        if (y < S(HEADER_H) && g_ui.guild < 0 && g_ui.model) {
+            if (y >= S(9) && y < S(40) && x >= S(RAIL_W) + S(8) && x < S(RAIL_W + SIDE_W) - S(8))
+                *kind = HIT_DM_SEARCH;
+            return;
+        }
+        if (y >= S(HEADER_H) && g_ui.guild < 0 && g_ui.model) {
+            int top = S(HEADER_H) + S(8) - g_ui.side_scroll, sec = top + S(NAVS * NAV_ROW) + S(13);
+            if (y >= top && y < top + S(NAVS * NAV_ROW) && x >= S(RAIL_W) + S(8) && x < S(RAIL_W + SIDE_W) - S(8)) {
+                *kind = HIT_NAV;
+                *index = (y - top) / S(NAV_ROW);
+                return;
+            }
+            if (y >= sec && y < sec + S(DM_SECTION) && x >= S(RAIL_W + SIDE_W) - S(40) && x < S(RAIL_W + SIDE_W) - S(8)) {
+                *kind = HIT_NEW_DM;
+                return;
+            }
         }
         if (y >= S(HEADER_H) && side_range(&first, &count)) {
-            int ry = S(HEADER_H) + S(8) - g_ui.side_scroll;
+            int ry = S(HEADER_H) + side_list_top() - g_ui.side_scroll;
             for (unsigned i = first; i < first + count; i++) {
                 int h;
                 if (empty_category(first, count, i) || (chan((int)i)->type != CH_CATEGORY && hidden(first, i)))
@@ -2137,7 +2222,8 @@ static void update_title(void)
         wsprintfW(title, L"(%d) Silicord", n);
     else
         lstrcpyW(title, L"Silicord");
-    SetWindowTextW(g_ui.wnd, title);
+    SetWindowTextW(g_ui.top, title);
+    InvalidateRect(g_ui.top, NULL, FALSE);
 }
 
 /* Red count badge whose right edge is at `right`, vertically centered on `cy`. */
@@ -2166,10 +2252,11 @@ static void paint_pill(int kind, int index, int y, int height, int rest)
         r_round(-S(4), y + (S(ICON) - h) / 2, S(8), h, S(4) < h / 2 ? S(4) : h / 2, ARGB(C_INK));
 }
 
-/* Round when at rest, a rounded square when hovered or selected, morphing between them. */
+/* Server icons are rounded squares, hovered or not, as in Discord's current look. */
 static int icon_radius(float t)
 {
-    return lerp_i(S(ICON) / 2, S(16), t);
+    (void)t;
+    return S(12);
 }
 
 static void paint_rail(RECT rc)
@@ -2178,12 +2265,14 @@ static void paint_rail(RECT rc)
     int home_y = rail_y(-1), sel_home = g_ui.guild < 0, hov_home = g_ui.hover_kind == HIT_HOME;
 
     fill(0, 0, S(RAIL_W), rc.bottom, C_RAIL);
+    r_clip(0, 0, S(RAIL_W), panel_top(rc) - S(PANEL_GAP));
 
-    /* Home: the Silicord mark. */
+    /* Home: the Silicord mark on blurple, where Discord puts its own. */
     {
         float t = tween_on(TW_HOME, 0, sel_home || hov_home, TW_SHAPE, x, home_y, S(ICON), S(ICON));
-        r_round(x, home_y, S(ICON), S(ICON), icon_radius(t), lerp_argb(ARGB(C_ITEM), ARGB(C_AMBER), t));
-        draw_mark(x + S(8), home_y + S(8), S(2), t >= .5f ? C_RAIL : C_AMBER);
+        r_round(x, home_y, S(ICON), S(ICON), icon_radius(t), lerp_argb(ARGB(C_ITEM), ARGB(C_BRAND), t));
+        int unit = S(24) / 16 > 0 ? S(24) / 16 : 1;
+        draw_mark(x + (S(ICON) - 16 * unit) / 2, home_y + (S(ICON) - 16 * unit) / 2, unit, t >= .5f ? C_INK : C_MUTED);
         paint_pill(TW_HOME_PILL, 0, home_y, sel_home ? S(40) : hov_home ? S(20) : 0, 0);
     }
     if (g_ui.model) {
@@ -2194,7 +2283,7 @@ static void paint_rail(RECT rc)
             paint_badge(x + S(ICON) + S(2), home_y + S(ICON) - S(8), mentions);
         }
     }
-    fill(x + S(8), home_y + S(ICON) + S(10), S(32), S(2), C_LINE);
+    fill((S(RAIL_W) - S(32)) / 2, home_y + S(ICON) + S(8), S(32), S(1) > 1 ? S(1) : 1, C_LINE);
 
     /* Open folders: a tinted column behind the folder and its servers. */
     for (int k = 0; k < n; k++) {
@@ -2277,7 +2366,7 @@ static void paint_rail(RECT rc)
         } else {
             wchar_t ini[8];
             initials(model_str(g_ui.model, gd->name), ini, 8);
-            r_round(x, y, S(ICON), S(ICON), radius, lerp_argb(ARGB(C_ITEM), ARGB(C_AMBER), t));
+            r_round(x, y, S(ICON), S(ICON), radius, lerp_argb(ARGB(C_ITEM), ARGB(C_BRAND), t));
             text_w(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial, t >= .5f ? C_RAIL : C_INK,
                    rect(x, y, S(ICON), S(ICON)), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
@@ -2291,6 +2380,7 @@ static void paint_rail(RECT rc)
             }
         }
     }
+    r_unclip();
 }
 
 static void paint_scrollbar(int x, int top, int view, int content, int scroll)
@@ -2322,9 +2412,37 @@ static void paint_channel_row(unsigned i, int y)
     }
     if (is_dm_type(c->type)) {
         r_image_t *img = dm_icon(c);
-        unsigned bg = row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(DM_ROW_H) - S(2), S(6));
+        unsigned bg = row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(DM_ROW_H) - S(2), S(8));
         if (img) {
             r_image(img, x + S(8), y + S(6), S(32), S(32), S(16));
+        } else if (c->faces) {
+            /* A group without a picture: two of its members, one over the other, as in Discord. */
+            const char *f = model_str(g_ui.model, c->faces);
+            char id[2][24] = {"", ""}, av[2][40] = {"", ""};
+            for (int k = 0; k < 2 && *f; k++) {
+                int n = 0;
+                while (*f && *f != ' ' && n < 23)
+                    id[k][n++] = *f++;
+                id[k][n] = 0;
+                if (*f == ' ')
+                    f++;
+                n = 0;
+                while (*f && *f != '\n' && n < 39)
+                    av[k][n++] = *f++;
+                av[k][n] = 0;
+                if (*f == '\n')
+                    f++;
+            }
+            for (int k = 0; k < 2; k++) {
+                int fx = x + S(8) + (k ? S(12) : 0), fy = y + S(6) + (k ? S(12) : 0), d = S(20);
+                r_image_t *face = id[k][0] ? user_avatar(id[k], av[k]) : NULL;
+                if (k)
+                    r_circle(fx - S(2), fy - S(2), d + S(4), bg);
+                if (face)
+                    r_image(face, fx, fy, d, d, d / 2);
+                else if (id[k][0] || !k)
+                    r_circle(fx, fy, d, ARGB(C_ITEM));
+            }
         } else {
             wchar_t ini[8];
             initials(name, ini, 8);
@@ -2337,14 +2455,16 @@ static void paint_channel_row(unsigned i, int y)
             presence_t *pr = c->type == CH_DM && c->user_id[0] ? presence_find(c->user_id) : NULL;
             if (c->type == CH_DM && c->user_id[0])
                 paint_status(x + S(8), y + S(6), S(32), pr ? pr->status : ML_OFFLINE, bg);
-            if (pr && pr->activity.len && pr->status != ML_OFFLINE) {
+            if ((pr && pr->activity.len && pr->status != ML_OFFLINE) || (c->type == CH_GROUP_DM && c->members)) {
+                char members[32];
+                wsprintfA(members, "%d Members", c->members);
                 text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
-                     rect(x + S(50), y + S(3), w - S(56) - badge, S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                text(g_ui.f_small, C_FAINT, rect(x + S(50), y + S(22), w - S(56) - badge, S(17)), pr->activity.data,
-                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                     rect(x + S(52), y + S(3), w - S(58) - badge, S(21)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                text(g_ui.f_small, C_MUTED, rect(x + S(52), y + S(23), w - S(58) - badge, S(16)),
+                     c->type == CH_GROUP_DM ? members : pr->activity.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             } else
             text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED,
-                 rect(x + S(50), y, w - S(56) - badge, S(DM_ROW_H)), name,
+                 rect(x + S(52), y, w - S(58) - badge, S(DM_ROW_H)), name,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (c->mentions)
                 paint_badge(x + w - S(8), y + S(DM_ROW_H) / 2, c->mentions);
@@ -2381,64 +2501,80 @@ static void paint_channel_row(unsigned i, int y)
     }
 }
 
+/* A small icon button: hover eases in a background, `on` shows it red (muted, deafened). */
+static void panel_button(int kind, int x, int y, int w, const wchar_t *glyph, r_font_t *font, int on)
+{
+    float t = tween_on(kind + 2000, x, g_ui.hover_kind == kind, TW_FAST, x, y, w, S(32));
+
+    if (t > 0.f)
+        r_round(x, y, w, S(32), S(8), lerp_argb(ARGB(C_PANEL), 0xFF1E1E20u, t));
+    r_text(font, on ? ARGB(C_RED) : lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t), x, y, w, S(32), glyph, -1,
+           R_CENTER | R_VCENTER | R_SINGLE);
+}
+
+/* Our name and status, with mute, deafen and settings, as in Discord's user panel. */
 static void paint_user_panel(RECT rc)
 {
-    int x0 = S(RAIL_W), y = rc.bottom - S(PANEL_H), cy = y + (S(PANEL_H) - S(32)) / 2;
-    int right = S(RAIL_W + SIDE_W) - S(8);
+    int x0 = S(PANEL_GAP), y = user_row_y(rc), cy = y + (S(PANEL_H) - S(32)) / 2, ax = x0 + S(12);
     const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name)
                                                           : str_or_empty(&g_ui.account);
-    int dot = g_ui.disconnected ? C_FAINT : g_ui.model && !g_ui.reconnecting ? C_GREEN : C_AMBER;
+    int dot = g_ui.disconnected ? C_FAINT : g_ui.model && !g_ui.reconnecting ? C_GREEN : C_WARN;
+    int tw = panel_button_x(4) - S(4) - (ax + S(40)) - (g_ui.disconnected ? S(36) : 0);
+    int muted = g_ui.voice_muted || g_ui.voice_deafened;
+    float hs = tween_on(HIT_SELF + 2000, 0, g_ui.hover_kind == HIT_SELF, TW_FAST, x0, y, S(PANEL_H), S(PANEL_H));
 
-    fill(x0, y, S(SIDE_W), S(PANEL_H), C_PANEL);
+    /* Hovering our name lights it like a button. */
+    if (hs > 0.f)
+        r_round(ax - S(4), cy - S(4), tw + S(48), S(40), S(8), lerp_argb(ARGB(C_PANEL), 0xFF1E1E20u, hs));
     if (g_ui.model && g_ui.model->user_id[0]) {
         r_image_t *img = user_avatar(g_ui.model->user_id, g_ui.model->user_avatar);
         if (img)
-            r_image(img, x0 + S(10), cy, S(32), S(32), S(16));
+            r_image(img, ax, cy, S(32), S(32), S(16));
         else
-            r_circle(x0 + S(10), cy, S(32), ARGB(C_ITEM));
+            r_circle(ax, cy, S(32), ARGB(C_ITEM));
     } else {
-        r_circle(x0 + S(10), cy, S(32), ARGB(C_ITEM));
+        r_circle(ax, cy, S(32), ARGB(C_ITEM));
     }
     if (g_ui.model && !g_ui.disconnected && !g_ui.reconnecting) {
-        paint_status(x0 + S(10), cy, S(32), g_ui.my_status, ARGB(C_PANEL));
+        paint_status(ax, cy, S(32), g_ui.my_status, hs > 0.f ? lerp_argb(ARGB(C_PANEL), 0xFF1E1E20u, hs) : ARGB(C_PANEL));
     } else {
-        r_circle(x0 + S(10) + S(21), cy + S(21), S(14), ARGB(C_PANEL));
-        r_circle(x0 + S(10) + S(23), cy + S(23), S(10), ARGB(dot));
+        r_circle(ax + S(21), cy + S(21), S(14), ARGB(C_PANEL));
+        r_circle(ax + S(23), cy + S(23), S(10), ARGB(dot));
     }
-
-    text(g_ui.f_h, C_INK, rect(x0 + S(52), cy - S(2), S(120), S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    text(g_ui.f_small, C_MUTED, rect(x0 + S(52), cy + S(17), S(120), S(18)),
+    text(g_ui.f_h, C_INK, rect(ax + S(40), cy - S(2), tw, S(20)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    text(g_ui.f_small, C_MUTED, rect(ax + S(40), cy + S(17), tw, S(18)),
          !g_ui.model || g_ui.disconnected || g_ui.reconnecting ? str_or_empty(&g_ui.status) /* connection trouble first */
          : g_ui.model->custom_status                         ? model_str(g_ui.model, g_ui.model->custom_status)
                                                              : status_name(),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    if (g_ui.hover_kind == HIT_LOGOUT)
-        r_round(right - S(32), cy, S(32), S(32), S(6), ARGB(C_SELECT));
-    text_w(g_ui.f_icon, g_ui.hover_kind == HIT_LOGOUT ? C_INK : C_MUTED, rect(right - S(32), cy, S(32), S(32)),
-           g_ui.model ? L"\xE713" : ICON_POWER, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE); /* settings once logged in */
+    /* Mute and deafen with their menus (the voice settings), then settings. */
+    panel_button(HIT_MIC, panel_button_x(4), cy, S(32), muted ? L"\xEC54" : L"\xE720", g_ui.f_icon_mid, muted);
+    panel_button(HIT_VOICE_MENU, panel_button_x(3), cy, S(18), ICON_CHEVRON_DOWN, g_ui.f_caption, 0);
+    panel_button(HIT_DEAFEN, panel_button_x(2), cy, S(32), g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6", g_ui.f_icon_mid,
+                 g_ui.voice_deafened);
+    panel_button(HIT_VOICE_MENU + 100, panel_button_x(1), cy, S(18), ICON_CHEVRON_DOWN, g_ui.f_caption, 0);
+    panel_button(HIT_LOGOUT, panel_button_x(0), cy, S(32), g_ui.model ? L"\xE713" : ICON_POWER, g_ui.f_icon_mid, 0);
     if (g_ui.disconnected) {
+        int rx = panel_button_x(4) - S(36);
         if (g_ui.hover_kind == HIT_RETRY)
-            r_round(right - S(68), cy, S(32), S(32), S(6), ARGB(C_SELECT));
-        text_w(g_ui.f_icon, C_AMBER, rect(right - S(68), cy, S(32), S(32)), ICON_REFRESH, -1,
-               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            r_round(rx, cy, S(32), S(32), S(8), 0xFF1E1E20u);
+        text_w(g_ui.f_icon, C_WARN, rect(rx, cy, S(32), S(32)), ICON_REFRESH, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
-/* Our voice connection: its state, the channel, and a button to leave. */
+/* Our voice connection, at the top of the floating panel: its state, the channel, a button to leave, then our media. */
 static void paint_voice_bar(RECT rc)
 {
-    int h = voice_bar_h(), x0 = S(RAIL_W), right = S(RAIL_W + SIDE_W) - S(8), y, cy, by, bw = voice_button_w();
-    int color = g_ui.voice_state == VOICE_CONNECTED ? C_GREEN : g_ui.voice_state == VOICE_FAILED ? C_FAINT : C_AMBER;
+    int h = voice_bar_h(), x0 = S(PANEL_GAP), right = panel_right() - S(8), y, cy, by, bw = voice_button_w();
+    int color = g_ui.voice_state == VOICE_CONNECTED ? C_GREEN : g_ui.voice_state == VOICE_FAILED ? C_FAINT : C_WARN;
     char code[40], line[160];
 
     if (!h)
         return;
-    y = rc.bottom - S(PANEL_H) - h;
+    y = panel_top(rc);
     cy = y + (S(VOICE_ROW1_H) - S(32)) / 2;
     by = y + S(VOICE_ROW1_H);
-    fill(x0, y, S(SIDE_W), h, C_PANEL);
-    fill(x0 + S(8), y, S(SIDE_W) - S(16), 1, C_LINE);
     text(g_ui.f_h, color, rect(x0 + S(12), cy - S(2), right - x0 - S(52), S(20)),
          g_ui.voice_state == VOICE_CONNECTED ? "Voice Connected" : str_or_empty(&g_ui.voice_status),
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2452,7 +2588,7 @@ static void paint_voice_bar(RECT rc)
     }
     text(g_ui.f_small, C_MUTED, rect(x0 + S(12), cy + S(17), right - x0 - S(52), S(18)), line,
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    /* Screen share, camera, mute and deafen, under it: the icon shows the state, red when on. */
+    /* Screen share, camera, mute and deafen: the icon shows the state, red when on. */
     {
         struct {
             int on;
@@ -2463,15 +2599,53 @@ static void paint_voice_bar(RECT rc)
                   {g_ui.voice_deafened, g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6"}};
         for (int k = 0; k < 4; k++) {
             int bx = x0 + S(8) + k * (bw + S(8)), hover = g_ui.hover_kind == k_voice_buttons[k];
-            r_round(bx, by, bw, S(32), S(6), ARGB(hover ? C_SELECT : C_ITEM));
-            r_text(g_ui.f_icon, b[k].on ? C_BADGE : ARGB(hover ? C_INK : C_MUTED), bx, by, bw, S(32), b[k].icon, -1,
-                   rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
+            float t = tween_on(k_voice_buttons[k] + 2000, 0, hover, TW_FAST, bx, by, bw, S(32));
+            r_round(bx, by, bw, S(32), S(8), lerp_argb(0xFF121214u, 0xFF1E1E20u, t));
+            r_text(g_ui.f_icon, b[k].on ? ARGB(C_RED) : lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t), bx, by, bw, S(32),
+                   b[k].icon, -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
         }
     }
-    if (g_ui.hover_kind == HIT_VOICE_LEAVE)
-        r_round(right - S(32), cy, S(32), S(32), S(6), ARGB(C_SELECT));
-    text_w(g_ui.f_icon, g_ui.hover_kind == HIT_VOICE_LEAVE ? C_INK : C_MUTED, rect(right - S(32), cy, S(32), S(32)),
-           L"\xE778", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    panel_button(HIT_VOICE_LEAVE, right - S(32), cy, S(32), L"\xE778", g_ui.f_icon_mid, 0);
+    fill(x0 + S(8), y + h - S(1), right - x0, S(1) > 1 ? S(1) : 1, C_LINE);
+}
+
+/* The floating panel: rounded, outlined, over the bottom of the rail and the channel list. */
+static void paint_panel(RECT rc)
+{
+    int x0 = S(PANEL_GAP), y = panel_top(rc), w = panel_right() - x0, h = rc.bottom - S(PANEL_GAP) - y;
+
+    r_round(x0, y, w, h, S(8), ARGB(C_PANEL));
+    r_round_outline(x0, y, w, h, S(8), S(1) > 1 ? S(1) : 1, 0xFF18181Au);
+    paint_voice_bar(rc);
+    paint_user_panel(rc);
+}
+
+/* Friends, Nitro, Shop and Quests, a line, then "Direct Messages" and its "+", from y. */
+static void paint_home_links(int x0, int y)
+{
+    static const wchar_t *const icons[NAVS] = {L"\xE716", L"\xE734", L"\xE719", L"\xE7C1"};
+    static const char *const labels[NAVS] = {"Friends", "Nitro", "Shop", "Quests"};
+    int w = S(SIDE_W) - S(16), sec;
+
+    for (int k = 0; k < NAVS; k++) {
+        int ry = y + k * S(NAV_ROW), sel = g_ui.guild < 0 && g_ui.channel < 0 && g_ui.home_page == k;
+        int hov = g_ui.hover_kind == HIT_NAV && g_ui.hover_index == k;
+        row_bg(HIT_NAV, k, sel, hov, ARGB(C_SIDE), x0 + S(8), ry + S(1), w, S(NAV_ROW) - S(2), S(8));
+        text_w(g_ui.f_icon_mid, sel || hov ? C_INK : C_MUTED, rect(x0 + S(16), ry, S(24), S(NAV_ROW)), icons[k], -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_nav, sel || hov ? C_INK : C_MUTED, rect(x0 + S(52), ry, w - S(52), S(NAV_ROW)), labels[k],
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    sec = y + S(NAVS * NAV_ROW) + S(12);
+    fill(x0 + S(8), sec, w, S(1) > 1 ? S(1) : 1, C_LINE);
+    sec += S(1);
+    {
+        int hov = g_ui.hover_kind == HIT_NEW_DM;
+        text(g_ui.f_section, hov ? C_INK : C_MUTED, rect(x0 + S(16), sec, w - S(48), S(DM_SECTION)), "Direct Messages",
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        text_w(g_ui.f_icon, hov ? C_INK : C_MUTED, rect(x0 + S(SIDE_W) - S(40), sec, S(32), S(DM_SECTION)), L"\xE710", -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 }
 
 static void paint_side(RECT rc)
@@ -2488,6 +2662,9 @@ static void paint_side(RECT rc)
                                             : "Direct Messages";
 
         r_clip(x0, S(HEADER_H), S(SIDE_W), view);
+        if (g_ui.guild < 0)
+            paint_home_links(x0, S(HEADER_H) + S(8) - g_ui.side_scroll);
+        y += g_ui.guild < 0 ? S(DM_TOP) : 0;
         voice_request_names();
         for (unsigned i = first; i < first + count; i++) {
             if (empty_category(first, count, i) || (chan((int)i)->type != CH_CATEGORY && hidden(first, i)))
@@ -2503,12 +2680,12 @@ static void paint_side(RECT rc)
         r_unclip();
 
         if (g_ui.guild < 0) {
-            int sel = friends_view(), hov = g_ui.hover_kind == HIT_FRIENDS;
-            row_bg(HIT_FRIENDS, 0, sel, hov, ARGB(C_SIDE), x0 + S(8), S(6), S(SIDE_W) - S(16), S(HEADER_H) - S(12), S(6));
-            text_w(g_ui.f_icon_mid, sel ? C_INK : C_MUTED, rect(x0 + S(16), 0, S(32), S(HEADER_H)), L"\xE716", -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            text(g_ui.f_h, sel ? C_INK : C_MUTED, rect(x0 + S(56), 0, S(SIDE_W) - S(72), S(HEADER_H)), "Friends",
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            /* "Find or start a conversation": the quick switcher, as in Discord. */
+            float t = tween_on(HIT_DM_SEARCH, 0, g_ui.hover_kind == HIT_DM_SEARCH, TW_FAST, x0 + S(8), S(9), S(SIDE_W) - S(16), S(31));
+            r_round(x0 + S(8), S(9), S(SIDE_W) - S(16), S(31), S(8), lerp_argb(0xFF121213u, 0xFF1A1A1Cu, t));
+            r_round_outline(x0 + S(8), S(9), S(SIDE_W) - S(16), S(31), S(8), S(1) > 1 ? S(1) : 1, 0xFF27272Au);
+            text(g_ui.f_small_mid, t > .5f ? C_INK : C_TEXT, rect(x0 + S(8), S(9), S(SIDE_W) - S(16), S(31)),
+                 "Find or start a conversation", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         } else {
             text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), title,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2520,9 +2697,8 @@ static void paint_side(RECT rc)
         text(g_ui.f_h, C_INK, rect(x0 + S(16), 0, S(SIDE_W) - S(32), S(HEADER_H)), "Direct Messages",
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
-    fill(x0, S(HEADER_H) - 1, S(SIDE_W), 1, C_LINE);
-    paint_voice_bar(rc);
-    paint_user_panel(rc);
+    fill(x0, S(HEADER_H) - S(1), S(SIDE_W), S(1) > 1 ? S(1) : 1, C_LINE);
+    fill(x0 + S(SIDE_W) - S(1), 0, S(1) > 1 ? S(1) : 1, rc.bottom, C_LINE); /* against the chat */
 }
 
 /* ---- Messages ---- */
@@ -2559,6 +2735,7 @@ static int pins_button_x(void);
 static int call_button_x(void);
 static void paint_settings(RECT rc);
 static void settings_open(void);
+static void settings_open_voice(void);
 static int run_menu(HMENU menu);
 static void place_search(void);
 static void place_friend_input(void);
@@ -3243,7 +3420,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                         r_round(x + S(16), ay, aw * pct / 100 > S(8) ? aw * pct / 100 : S(8), S(40), S(8),
                                 an->me ? 0x66FFB000u : 0x33FFFFFFu);
                     if (an->me)
-                        r_round_outline(x + S(16), ay, aw, S(40), S(8), S(2) > 1 ? S(2) : 1, ARGB(C_AMBER));
+                        r_round_outline(x + S(16), ay, aw, S(40), S(8), S(2) > 1 ? S(2) : 1, ARGB(C_BRAND));
                     text(g_ui.f_body, C_INK, rect(x + S(28), ay, aw - S(90), S(40)), an->text.data ? an->text.data : "",
                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                     if (show) {
@@ -3364,7 +3541,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             if (draw && r_visible(y, S(REACTION_H))) {
                 r_round(rx, y, pw, S(REACTION_H), S(8), r->me ? 0x33FFB000u : 0xFF1E1E1E);
                 if (r->me)
-                    r_round_outline(rx, y, pw, S(REACTION_H), S(8), 1, ARGB(C_AMBER));
+                    r_round_outline(rx, y, pw, S(REACTION_H), S(8), 1, ARGB(C_BRAND));
                 if (r->emoji_id[0]) {
                     r_image_t *img = emoji_image(r->emoji_id, S(18));
                     if (img)
@@ -3373,7 +3550,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                     text(g_ui.f_body, C_INK, rect(rx + S(6), y, S(24), S(REACTION_H)), r->emoji.data ? r->emoji.data : "",
                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
-                text(g_ui.f_small, r->me ? C_AMBER : C_MUTED, rect(rx + S(32), y, cw + S(4), S(REACTION_H)), count,
+                text(g_ui.f_small, r->me ? C_BRAND : C_MUTED, rect(rx + S(32), y, cw + S(4), S(REACTION_H)), count,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
             if (hit_part && hit(hx, hy, rx, y, pw, S(REACTION_H)))
@@ -4128,7 +4305,7 @@ static void paint_message(int i, int x0, int y, int w)
         /* Messages that ping us, like Discord: tinted with a bar on the left. */
         int top = y + (m->grouped == 1 ? 0 : S(12));
         fill(x0, top, w, h - (top - y), g_ui.hover_msg == i ? C_MENTION_HOVER : C_MENTION);
-        fill(x0, top, S(2), h - (top - y), C_AMBER);
+        r_fill(x0, top, S(2), h - (top - y), 0xFFCE8100u); /* text-feedback-warning */
     } else {
         row_bg(TW_MESSAGE, i, 0, g_ui.hover_msg == i, ARGB(C_MAIN), x0, y + (m->grouped == 1 ? 0 : S(12)), w,
                h - (m->grouped == 1 ? 0 : S(12)), 0);
@@ -4384,17 +4561,28 @@ static void paint_main(RECT rc)
             {
                 int open = g_ui.picker && g_ui.picker_mode == PICK_COMPOSER;
                 float t = tween_on(TW_EMOJI, 0, open || g_ui.hover_emoji, TW_FAST, x0 + w - S(60), cy, S(40), S(COMPOSER_H));
-                r_text(g_ui.f_icon_mid, lerp_argb(ARGB(C_MUTED), ARGB(C_AMBER), t), x0 + w - S(60), cy, S(40), S(COMPOSER_H),
+                r_text(g_ui.f_icon_mid, lerp_argb(ARGB(C_MUTED), ARGB(C_BRAND), t), x0 + w - S(60), cy, S(40), S(COMPOSER_H),
                        L"\xE76E", -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
             }
             if (g_ui.send_error.len)
-                text(g_ui.f_small, C_AMBER, rect(x0 + S(20), cy - S(20) - (g_ui.bar ? S(BAR_H) : 0), w - S(40), S(18)),
+                text(g_ui.f_small, C_RED, rect(x0 + S(20), cy - S(20) - (g_ui.bar ? S(BAR_H) : 0), w - S(40), S(18)),
                      g_ui.send_error.data, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             paint_typing(x0, w, rc.bottom - S(22));
         }
     } else if (friends_view()) {
         fill(x0, S(HEADER_H) - 1, w, 1, C_LINE);
         paint_friends(rc, x0, w);
+    } else if (g_ui.model && g_ui.guild < 0 && g_ui.channel < 0) {
+        /* Nitro, Shop, Quests: their header, the page itself comes with its own step. */
+        static const wchar_t *const icons[NAVS] = {L"\xE716", L"\xE734", L"\xE719", L"\xE7C1"};
+        static const char *const titles[NAVS] = {"Friends", "Nitro", "Shop", "Quests"};
+        int k = g_ui.home_page >= 0 && g_ui.home_page < NAVS ? g_ui.home_page : 0;
+        fill(x0, S(HEADER_H) - S(1), w, S(1) > 1 ? S(1) : 1, C_LINE);
+        text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(16), 0, S(24), S(HEADER_H)), icons[k], -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_h, C_INK, rect(x0 + S(48), 0, w - S(64), S(HEADER_H)), titles[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2 - S(12), w, S(24)), "Not in Silicord yet.",
+             DT_CENTER | DT_SINGLELINE);
     } else {
         int unit = S(4);
         int y = rc.bottom / 2 - S(60);
@@ -4726,6 +4914,11 @@ static void paint_app(RECT rc)
         paint_members(rc);
     paint_side(rc);
     paint_rail(rc);
+    /* The panels sit in a frame with a rounded top left corner, outlined, as in Discord. */
+    r_clip(S(RAIL_W), 0, rc.right - S(RAIL_W), rc.bottom);
+    r_round_outline(S(RAIL_W), 0, rc.right, rc.bottom + S(40), S(8), S(1) > 1 ? S(1) : 1, ARGB(C_LINE));
+    r_unclip();
+    paint_panel(rc);
     paint_tooltip();
     paint_reactors();
     paint_confirm();
@@ -4738,7 +4931,7 @@ static void paint_app(RECT rc)
 
 static int window_active(void)
 {
-    return GetForegroundWindow() == g_ui.wnd && !IsIconic(g_ui.wnd);
+    return GetForegroundWindow() == g_ui.top && !IsIconic(g_ui.top);
 }
 
 /* Only while the window is in front: nothing moves, nothing wakes up otherwise. */
@@ -4909,13 +5102,19 @@ static void make_fonts(void)
     g_ui.f_name = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
     g_ui.f_emoji = r_font(L"Segoe UI Emoji", S(24), FW_NORMAL, 0);
     g_ui.f_icon_mid = r_font(icon_family(), S(20), FW_NORMAL, 0);
+    g_ui.f_caption = r_font(icon_family(), S(10), FW_NORMAL, 0);
+    g_ui.f_icon_tb = r_font(icon_family(), S(16), FW_NORMAL, 0);
+    g_ui.f_tb = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
+    g_ui.f_nav = r_font(L"Segoe UI", S(16), FW_SEMIBOLD, 0);
+    g_ui.f_section = r_font(L"Segoe UI", S(14), FW_NORMAL, 0);
+    g_ui.f_small_mid = r_font(L"Segoe UI", S(14), FW_SEMIBOLD, 0);
     build_name_fonts();
 
     g_ui.rich = (r_rich_style_t){
         .body = g_ui.f_body, .mono = g_ui.f_mono, .h1 = g_ui.f_h1, .h2 = g_ui.f_h2, .h3 = g_ui.f_h3,
         .subtext = g_ui.f_small,
-        .ink = ARGB(C_INK), .muted = ARGB(C_MUTED), .link = 0xFF6CB6FFu, .mention = 0xFFFFC857u,
-        .mention_bg = 0x33FFB000u, .code_bg = 0xFF0F0F0Fu, .quote_bar = 0xFF3A3A3Au, .spoiler = 0xFF2E2E2Eu,
+        .ink = ARGB(C_TEXT), .muted = ARGB(C_MUTED), .link = 0xFF2781E7u, .mention = 0xFF8CA0FDu, /* text-link, mention-foreground */
+        .mention_bg = 0x3D5865F2u, .code_bg = 0xFF0A0A0Cu, .quote_bar = 0xFF424246u, .spoiler = 0xFF17181Bu,
         .quote_indent = S(16), .code_pad = S(8), .block_gap = S(4), .radius = S(6),
         .emoji_px = S(22), .jumbo_px = S(48), .emoji = emoji_image,
     };
@@ -4950,8 +5149,8 @@ static void set_icons(UINT dpi)
             DestroyIcon(sm);
         return;
     }
-    SendMessageW(g_ui.wnd, WM_SETICON, ICON_BIG, (LPARAM)big);
-    SendMessageW(g_ui.wnd, WM_SETICON, ICON_SMALL, (LPARAM)sm);
+    SendMessageW(g_ui.top, WM_SETICON, ICON_BIG, (LPARAM)big);
+    SendMessageW(g_ui.top, WM_SETICON, ICON_SMALL, (LPARAM)sm);
     g_ui.tray.hIcon = sm;
     g_ui.tray.hBalloonIcon = big;
     if (g_ui.tray.hWnd) {
@@ -4998,7 +5197,7 @@ static void notify(int i, const activity_t *a)
     int g = model_channel_guild(g_ui.model, (unsigned)i);
     const char *author = a->author.data ? a->author.data : "";
     char title[200];
-    FLASHWINFO fw = {sizeof fw, g_ui.wnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
+    FLASHWINFO fw = {sizeof fw, g_ui.top, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
 
     if (g >= 0)
         wsprintfA(title, "%.60s (#%.60s, %.60s)", author, model_str(g_ui.model, c->name),
@@ -5115,9 +5314,9 @@ static void on_activity(activity_t *a)
 
 static void show_window(void)
 {
-    if (IsIconic(g_ui.wnd))
-        ShowWindow(g_ui.wnd, SW_RESTORE);
-    SetForegroundWindow(g_ui.wnd);
+    if (IsIconic(g_ui.top))
+        ShowWindow(g_ui.top, SW_RESTORE);
+    SetForegroundWindow(g_ui.top);
 }
 
 /* ---- Selection ---- */
@@ -5136,12 +5335,31 @@ static void place_composer(void)
     ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
 }
 
+static void hist_push(const char *id)
+{
+    if (g_ui.hist_nav || (g_ui.hist_n && lstrcmpA(g_ui.hist[g_ui.hist_pos], id) == 0))
+        return;
+    if (g_ui.hist_n) /* forward is lost, as in a browser */
+        g_ui.hist_n = g_ui.hist_pos + 1;
+    if (g_ui.hist_n == ARRAYSIZE(g_ui.hist)) {
+        for (int i = 1; i < g_ui.hist_n; i++)
+            lstrcpyA(g_ui.hist[i - 1], g_ui.hist[i]);
+        g_ui.hist_n--;
+    }
+    lstrcpynA(g_ui.hist[g_ui.hist_n], id, sizeof g_ui.hist[0]);
+    g_ui.hist_pos = g_ui.hist_n++;
+    if (g_ui.top)
+        InvalidateRect(g_ui.top, NULL, FALSE);
+}
+
 static void open_channel(int index)
 {
     const channel_t *c;
     wchar_t *hint;
     char text[160];
 
+    if (g_ui.model)
+        hist_push(index >= 0 ? chan(index)->id : "");
     pop_close();
     g_ui.channel = index;
     g_ui.friend_hover = -1;
@@ -5277,6 +5495,10 @@ static void on_click(int kind, int index)
             stream_refresh();
         }
         break;
+    case HIT_VOICE_MENU:
+        settings_open_voice();
+        break;
+    case HIT_MIC:
     case HIT_VOICE_MUTE:
         g_ui.voice_muted = !(g_ui.voice_muted || g_ui.voice_deafened);
         if (!g_ui.voice_muted)
@@ -5284,6 +5506,7 @@ static void on_click(int kind, int index)
         app_voice_set(g_ui.voice_muted, g_ui.voice_deafened);
         redraw();
         break;
+    case HIT_DEAFEN:
     case HIT_VOICE_DEAF:
         g_ui.voice_deafened = !g_ui.voice_deafened;
         app_voice_set(g_ui.voice_muted, g_ui.voice_deafened);
@@ -5299,9 +5522,17 @@ static void on_click(int kind, int index)
         redraw();
         break;
     case HIT_FRIENDS:
+        index = HOME_FRIENDS;
+        /* fall through */
+    case HIT_NAV:
+        g_ui.home_page = index;
         g_ui.last_dm = -1;
         open_channel(-1);
         redraw();
+        break;
+    case HIT_DM_SEARCH:
+    case HIT_NEW_DM:
+        qs_open();
         break;
     case HIT_RETRY:
         g_ui.disconnected = 0;
@@ -7026,7 +7257,7 @@ static void paint_toolbar(void)
             text_w(g_ui.f_body, C_INK, rect(x, y, S(TOOL_BTN), S(TOOL_BTN)), k_quick[btn[k]], -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         else
-            text_w(g_ui.f_icon, btn[k] == TOOL_DELETE && g_ui.hover_tool == k ? C_AMBER : C_MUTED,
+            text_w(g_ui.f_icon, btn[k] == TOOL_DELETE && g_ui.hover_tool == k ? C_RED : C_MUTED,
                    rect(x, y, S(TOOL_BTN), S(TOOL_BTN)),
                    btn[k] == TOOL_ADD ? L"\xE76E" : btn[k] == TOOL_REPLY ? L"\xE97A" : btn[k] == TOOL_EDIT ? L"\xE70F" : L"\xE74D", -1,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -7126,8 +7357,8 @@ static void paint_bar(int x0, int w, int cy)
         int zx = x0 + w - S(128), tw = S(34), th = S(20), tx = zx + S(64) - tw - S(4), ty = y + (S(BAR_H) - th) / 2;
         int hov = g_ui.bar_hover == 1, kd = th - S(6);
         float t = tween_on(TW_MENTION, 0, g_ui.bar_mention, TW_SHAPE, zx, ty, S(64), th);
-        unsigned off = hov ? 0xFF4A4A4Au : 0xFF3A3A3Au, on = hov ? 0xFFFFC233u : ARGB(C_AMBER);
-        r_text(g_ui.f_h, lerp_argb(ARGB(hov ? C_MUTED : C_FAINT), ARGB(C_AMBER), t), zx, y, tx - zx - S(6), S(BAR_H), L"@", -1,
+        unsigned off = hov ? 0xFF4A4A4Au : 0xFF3A3A3Au, on = hov ? 0xFF4752C4u : ARGB(C_BRAND);
+        r_text(g_ui.f_h, lerp_argb(ARGB(hov ? C_MUTED : C_FAINT), ARGB(C_BRAND), t), zx, y, tx - zx - S(6), S(BAR_H), L"@", -1,
                rflags(DT_RIGHT | DT_VCENTER | DT_SINGLELINE));
         r_round(tx, ty, tw, th, th / 2, lerp_argb(off, on, t));
         r_circle(lerp_i(tx + S(3), tx + tw - S(3) - kd, t), ty + S(3), kd, lerp_argb(0xFFB5AFA4u, 0xFF181818u, t));
@@ -9075,7 +9306,7 @@ static void rels_clear(void)
 
 static int friends_view(void)
 {
-    return g_ui.view == VIEW_APP && g_ui.model && g_ui.guild < 0 && g_ui.channel < 0;
+    return g_ui.view == VIEW_APP && g_ui.model && g_ui.guild < 0 && g_ui.channel < 0 && g_ui.home_page == HOME_FRIENDS;
 }
 
 static int in_tab(const relation_t *r, int tab)
@@ -9091,13 +9322,48 @@ static int in_tab(const relation_t *r, int tab)
     return 0;
 }
 
+/* The friends page, as in Discord: search, "Online - 3", the rows; "Active Now" on the right when there is room. */
+#define FR_SEARCH_H 36
+#define FR_ACTIVE_W 360
+#define FR_PAD 24
+
+static int friends_active_w(int w)
+{
+    return w >= S(1000) ? S(FR_ACTIVE_W) : 0;
+}
+
+static int friends_search_y(void)
+{
+    return S(HEADER_H) + S(16);
+}
+
+static int friends_list_y(void)
+{
+    return friends_search_y() + S(FR_SEARCH_H) + S(20) + S(28);
+}
+
+/* What the search box holds, lowercased by the comparison. */
+static int friend_matches(const relation_t *r)
+{
+    wchar_t q[64];
+    sb_t u = {0};
+    int ok;
+
+    if (!g_ui.friend_search || !IsWindowVisible(g_ui.friend_search) || !GetWindowTextW(g_ui.friend_search, q, ARRAYSIZE(q)))
+        return 1;
+    wide_to_utf8(q, (size_t)lstrlenW(q), &u);
+    ok = (r->name.data && find_str_ci(r->name.data, u.data)) || (r->username.data && find_str_ci(r->username.data, u.data));
+    sb_free(&u);
+    return ok;
+}
+
 /* Rows of the open tab, sorted by name. */
 static int friend_rows(int *out, int max)
 {
     int n = 0;
 
     for (int i = 0; i < g_ui.nrels && n < max; i++)
-        if (in_tab(&g_ui.rels[i], g_ui.friend_tab))
+        if (in_tab(&g_ui.rels[i], g_ui.friend_tab) && friend_matches(&g_ui.rels[i]))
             out[n++] = i;
     for (int a = 1; a < n; a++) {
         int x = out[a], b = a;
@@ -9130,69 +9396,140 @@ static int row_actions(const relation_t *r, int *acts)
     return 2;
 }
 
+/* A round button of the friends list: message, accept, ignore, more. */
+static void friend_button(int bx, int by, const wchar_t *glyph, int hot, unsigned hot_ink)
+{
+    r_circle(bx, by, S(36), hot ? 0xFF1E1E20u : 0xFF121214u);
+    r_text(g_ui.f_icon, hot ? hot_ink : ARGB(C_MUTED), bx, by, S(36), S(36), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+}
+
+/* "Active Now": friends playing, listening or streaming, one card each. */
+static void paint_active_now(RECT rc, int x, int w)
+{
+    int y = S(HEADER_H) + S(16), shown = 0;
+
+    fill(x, S(HEADER_H), S(1) > 1 ? S(1) : 1, rc.bottom - S(HEADER_H), C_LINE);
+    x += S(16);
+    w -= S(32);
+    text(g_ui.f_h2, C_INK, rect(x, y, w, S(28)), "Active Now", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    y += S(44);
+    for (int i = 0; i < g_ui.nrels && y < rc.bottom - S(80); i++) {
+        const relation_t *r = &g_ui.rels[i];
+        const presence_t *pr = presence_find(r->id);
+        r_image_t *img;
+        if (r->type != REL_FRIEND || !pr || !pr->activity.len || pr->status == ML_OFFLINE)
+            continue;
+        r_round(x, y, w, S(72), S(8), 0xFF0A0A0Cu);
+        r_round_outline(x, y, w, S(72), S(8), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+        img = user_avatar(r->id, r->avatar);
+        if (img)
+            r_image(img, x + S(16), y + S(16), S(40), S(40), S(20));
+        else
+            r_circle(x + S(16), y + S(16), S(40), ARGB(C_ITEM));
+        paint_status(x + S(16), y + S(16), S(40), pr->status, 0xFF0A0A0Cu);
+        text(g_ui.f_h, C_INK, rect(x + S(68), y + S(14), w - S(84), S(22)), r->name.data ? r->name.data : "",
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_small, C_MUTED, rect(x + S(68), y + S(38), w - S(84), S(18)), pr->activity.data,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        y += S(80);
+        shown++;
+    }
+    if (!shown) {
+        text(g_ui.f_nav, C_INK, rect(x, y + S(8), w, S(22)), "It's quiet for now...", DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_section, C_MUTED, rect(x + S(8), y + S(36), w - S(16), S(60)),
+             "When a friend starts an activity\xE2\x80\x94like playing a game or hanging out on voice\xE2\x80\x94we'll show it here!",
+             DT_CENTER | DT_WORDBREAK);
+    }
+}
+
 static void paint_friends(RECT rc, int x0, int w)
 {
     static const char *const tabs[TAB_COUNT] = {"Online", "All", "Pending", "Blocked", "Add Friend"};
     static int rows[512], n;
     static unsigned rows_frame;
-    int x = x0 + S(16), y;
+    int aw = friends_active_w(w), lw = w - aw, x = x0 + S(16), y;
 
-    /* Header: title and tabs. */
-    text_w(g_ui.f_icon, C_MUTED, rect(x, 0, S(24), S(HEADER_H)), L"\xE716", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    /* Header: the icon, "Friends", a dot, then the tabs; Add Friend is a blurple button. */
+    text_w(g_ui.f_icon_mid, C_MUTED, rect(x, 0, S(24), S(HEADER_H)), L"\xE716", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     text(g_ui.f_h, C_INK, rect(x + S(32), 0, S(80), S(HEADER_H)), "Friends", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    x += S(112);
-    fill(x, S(14), 1, S(20), C_LINE);
+    x += S(32) + text_width(g_ui.f_h, "Friends") + S(12);
+    r_circle(x, S(HEADER_H) / 2 - S(2), S(4), ARGB(C_FAINT));
     x += S(16);
     for (int t = 0; t < TAB_COUNT; t++) {
-        int tw = text_width(g_ui.f_h, tabs[t]) + S(16), sel = g_ui.friend_tab == t;
-        int pending = 0;
+        int tw = text_width(g_ui.f_nav, tabs[t]) + S(24), sel = g_ui.friend_tab == t, hov = g_ui.friend_hover == -10 - t;
+        int pending = 0, ty = (S(HEADER_H) - S(32)) / 2;
+        float h;
         if (t == TAB_PENDING)
             for (int i = 0; i < g_ui.nrels; i++)
                 pending += g_ui.rels[i].type == REL_INCOMING;
+        if (t == TAB_PENDING && !pending && !sel) {
+            g_ui.tab_x[t] = g_ui.tab_w[t] = -100000; /* Discord shows Pending only with requests */
+            continue;
+        }
         if (pending)
             tw += S(24);
         g_ui.tab_x[t] = x;
         g_ui.tab_w[t] = tw;
-        if (t == TAB_ADD)
-            r_round(x, S(10), tw, S(28), S(6), sel ? 0x2623A55Au : 0xFF23A55Au);
-        else if (sel || g_ui.friend_hover == -10 - t)
-            r_round(x, S(10), tw, S(28), S(6), sel ? ARGB(C_SELECT) : ARGB(C_HOVER));
-        text(g_ui.f_h, t == TAB_ADD ? (sel ? C_GREEN : C_INK) : sel ? C_INK : C_MUTED, rect(x + S(8), 0, tw - S(16), S(HEADER_H)),
-             tabs[t], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        h = tween_on(TW_FRIEND + 100, t, hov, TW_FAST, x, ty, tw, S(32));
+        if (t == TAB_ADD) {
+            if (!sel)
+                r_round(x, ty, tw, S(32), S(8), lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, h));
+            r_text(g_ui.f_nav, sel ? 0xFF8CA0FDu : 0xFFFFFFFFu, x, ty, tw, S(32), L"Add Friend", -1,
+                   R_CENTER | R_VCENTER | R_SINGLE);
+        } else {
+            if (sel || h > 0.f)
+                r_round(x, ty, tw, S(32), S(8), sel ? ARGB(C_SELECT) : lerp_argb(ARGB(C_MAIN), ARGB(C_HOVER), h));
+            text(g_ui.f_nav, sel || hov ? C_INK : C_MUTED, rect(x + S(12), ty, tw - S(24), S(32)), tabs[t],
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
         if (pending)
-            paint_badge(x + tw - S(6), S(HEADER_H) / 2, pending);
+            paint_badge(x + tw - S(8), S(HEADER_H) / 2, pending);
         x += tw + S(8);
     }
+    if (aw)
+        paint_active_now(rc, x0 + lw, aw);
 
     y = S(HEADER_H) + S(16);
     if (g_ui.friend_tab == TAB_ADD) {
-        text(g_ui.f_h, C_INK, rect(x0 + S(30), y, w - S(60), S(24)), "ADD FRIEND", DT_LEFT | DT_SINGLELINE);
-        text(g_ui.f_body, C_MUTED, rect(x0 + S(30), y + S(28), w - S(60), S(22)),
+        int bw = S(180), fy = y + S(64);
+        text(g_ui.f_h2, C_INK, rect(x0 + S(FR_PAD), y, lw - S(2 * FR_PAD), S(28)), "Add Friend", DT_LEFT | DT_SINGLELINE);
+        text(g_ui.f_section, C_MUTED, rect(x0 + S(FR_PAD), y + S(32), lw - S(2 * FR_PAD), S(22)),
              "You can add friends with their Discord username.", DT_LEFT | DT_SINGLELINE);
-        r_round(x0 + S(30), y + S(64), w - S(60), S(52), S(8), 0xFF0B0B0B);
-        r_round(x0 + w - S(30) - S(170), y + S(74), S(160), S(32), S(4), 0xFF5865F2u);
-        text(g_ui.f_small, C_INK, rect(x0 + w - S(30) - S(170), y + S(74), S(160), S(32)), "Send Friend Request",
+        r_round(x0 + S(FR_PAD), fy, lw - S(2 * FR_PAD), S(52), S(8), 0xFF121214u);
+        r_round_outline(x0 + S(FR_PAD), fy, lw - S(2 * FR_PAD), S(52), S(8), S(1) > 1 ? S(1) : 1, 0xFF27272Au);
+        r_round(x0 + lw - S(FR_PAD) - S(10) - bw, fy + S(10), bw, S(32), S(8), ARGB(C_BRAND));
+        text(g_ui.f_small_mid, C_INK, rect(x0 + lw - S(FR_PAD) - S(10) - bw, fy + S(10), bw, S(32)), "Send Friend Request",
              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         if (g_ui.friend_result.len)
-            text(g_ui.f_small, lstrcmpA(g_ui.friend_result.data, "Success") > 0 ? C_GREEN : C_AMBER,
-                 rect(x0 + S(30), y + S(124), w - S(60), S(20)), g_ui.friend_result.data, DT_LEFT | DT_SINGLELINE);
+            text(g_ui.f_small, lstrcmpA(g_ui.friend_result.data, "Success") > 0 ? C_GREEN : C_RED,
+                 rect(x0 + S(FR_PAD), fy + S(60), lw - S(2 * FR_PAD), S(20)), g_ui.friend_result.data, DT_LEFT | DT_SINGLELINE);
+        fill(x0, fy + S(100), lw, S(1) > 1 ? S(1) : 1, C_LINE);
         return;
     }
+
+    /* Search, drawn around the edit control that place_friend_input() puts in it. */
+    r_round(x0 + S(FR_PAD), friends_search_y(), lw - S(2 * FR_PAD), S(FR_SEARCH_H), S(8), 0xFF121214u);
+    r_round_outline(x0 + S(FR_PAD), friends_search_y(), lw - S(2 * FR_PAD), S(FR_SEARCH_H), S(8), S(1) > 1 ? S(1) : 1,
+                    0xFF27272Au);
+    text_w(g_ui.f_icon, C_MUTED, rect(x0 + lw - S(FR_PAD) - S(36), friends_search_y(), S(28), S(FR_SEARCH_H)), L"\xE721", -1,
+           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     /* The frame is painted in bands: look up statuses and sort once, not for each band. */
     if (rows_frame != g_ui.frame) {
         n = friend_rows(rows, 512);
         rows_frame = g_ui.frame;
     }
+    y = friends_search_y() + S(FR_SEARCH_H) + S(20);
     {
         char title[64];
-        static const char *const names[] = {"ONLINE", "ALL FRIENDS", "PENDING", "BLOCKED"};
+        static const char *const names[] = {"Online", "All friends", "Pending", "Blocked"};
         wsprintfA(title, "%s \xE2\x80\x94 %d", names[g_ui.friend_tab], n);
-        text(g_ui.f_cat, C_MUTED, rect(x0 + S(30), y, w - S(60), S(20)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        text(g_ui.f_small_mid, C_MUTED, rect(x0 + S(FR_PAD) + S(6), y, lw - S(2 * FR_PAD), S(20)), title,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
-    y += S(28);
+    y = friends_list_y();
     if (!n) {
-        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, w, S(24)),
+        text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2, lw, S(24)),
              g_ui.friend_tab == TAB_ONLINE    ? "No one's around to play with Wumpus."
              : g_ui.friend_tab == TAB_PENDING ? "There are no pending friend requests."
              : g_ui.friend_tab == TAB_BLOCKED ? "You can't unblock the Wumpus."
@@ -9200,29 +9537,39 @@ static void paint_friends(RECT rc, int x0, int w)
              DT_CENTER | DT_SINGLELINE);
         return;
     }
-    r_clip(x0, y, w, rc.bottom - y);
+    r_clip(x0, y, lw, rc.bottom - y);
     y -= g_ui.friend_scroll;
     for (int k = 0; k < n; k++, y += S(FR_ROW)) {
         const relation_t *r = &g_ui.rels[rows[k]];
         r_image_t *img;
-        int acts[2], na, st = user_status(r->id);
+        int acts[2], na, st = user_status(r->id), hov = g_ui.friend_hover == k;
+        int ax = x0 + S(FR_PAD) + S(8);
         const presence_t *pr = presence_find(r->id);
         char sub[160];
+        unsigned bg;
         if (!r_visible(y, S(FR_ROW)))
             continue;
-        fill(x0 + S(30), y, w - S(60), 1, C_LINE);
-        unsigned bg = row_bg(TW_FRIEND, k, 0, g_ui.friend_hover == k, ARGB(C_MAIN), x0 + S(20), y + S(1), w - S(40),
-                             S(FR_ROW) - S(2), S(8));
+        /* A line between rows, hidden next to the hovered one as in Discord. */
+        if (k && !hov && g_ui.friend_hover != k - 1)
+            fill(x0 + S(FR_PAD) + S(8), y, lw - S(2 * FR_PAD) - S(16), S(1) > 1 ? S(1) : 1, C_LINE);
+        bg = row_bg(TW_FRIEND, k, 0, hov, ARGB(C_MAIN), x0 + S(FR_PAD) - S(4), y + S(1), lw - S(2 * FR_PAD) + S(8),
+                    S(FR_ROW) - S(2), S(8));
         img = user_avatar(r->id, r->avatar);
         if (img)
-            r_image(img, x0 + S(30), y + S(15), S(32), S(32), S(16));
+            r_image(img, ax, y + S(15), S(32), S(32), S(16));
         else
-            r_circle(x0 + S(30), y + S(15), S(32), ARGB(C_ITEM));
+            r_circle(ax, y + S(15), S(32), ARGB(C_ITEM));
         if (r->type == REL_FRIEND)
-            paint_status(x0 + S(30), y + S(15), S(32), st == ML_UNKNOWN ? ML_OFFLINE : st,
-                         bg);
-        text(g_ui.f_h, C_INK, rect(x0 + S(74), y + S(10), w - S(260), S(22)), r->name.data ? r->name.data : "",
-             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            paint_status(ax, y + S(15), S(32), st == ML_UNKNOWN ? ML_OFFLINE : st, bg);
+        {
+            /* The name, then on hover the username beside it, as Discord does. */
+            int nw = text_width(g_ui.f_h, r->name.data ? r->name.data : "");
+            text(g_ui.f_h, C_INK, rect(ax + S(44), y + S(10), lw - S(260), S(22)), r->name.data ? r->name.data : "",
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (hov && r->username.data && nw < lw - S(360))
+                text(g_ui.f_section, C_MUTED, rect(ax + S(44) + nw + S(6), y + S(11), S(200), S(22)), r->username.data,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
         if (r->type == REL_INCOMING)
             lstrcpyA(sub, "Incoming Friend Request");
         else if (r->type == REL_OUTGOING)
@@ -9233,15 +9580,14 @@ static void paint_friends(RECT rc, int x0, int w)
             lstrcpynA(sub, pr->activity.data, sizeof sub);
         else
             lstrcpyA(sub, st == ML_ONLINE ? "Online" : st == ML_IDLE ? "Idle" : st == ML_DND ? "Do Not Disturb" : "Offline");
-        text(g_ui.f_small, C_MUTED, rect(x0 + S(74), y + S(32), w - S(260), S(18)), sub, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        text(g_ui.f_section, C_MUTED, rect(ax + S(44), y + S(32), lw - S(260), S(18)), sub,
+             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         na = row_actions(r, acts);
         for (int a = 0; a < na; a++) {
-            int bx = x0 + w - S(30) - S(36) - a * S(44), by = y + S(13);
             static const wchar_t *const icons[] = {L"\xE8BD", L"\xE73E", L"\xE711", L"\xE711", L"\xE711"};
-            int hot = g_ui.friend_hover == k && g_ui.friend_act == a;
-            r_circle(bx, by, S(36), hot ? 0xFF2A2A2A : 0xFF1B1B1B);
-            text_w(g_ui.f_icon, acts[a] == ACT_ACCEPT && hot ? C_GREEN : (acts[a] != ACT_MESSAGE && hot) ? C_AMBER : C_MUTED,
-                   rect(bx, by, S(36), S(36)), icons[acts[a]], -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            int hot = hov && g_ui.friend_act == a;
+            friend_button(x0 + lw - S(FR_PAD) - S(8) - S(36) - a * S(46), y + S(13), icons[acts[a]], hot,
+                          acts[a] == ACT_ACCEPT ? ARGB(C_GREEN) : acts[a] != ACT_MESSAGE ? ARGB(C_RED) : ARGB(C_INK));
         }
     }
     r_unclip();
@@ -9257,27 +9603,28 @@ static int friends_hit(int x, int y, int *act)
         return -1;
     if (y < S(HEADER_H)) {
         for (int t = 0; t < TAB_COUNT; t++)
-            if (x >= g_ui.tab_x[t] && x < g_ui.tab_x[t] + g_ui.tab_w[t] && y >= S(10) && y < S(38))
+            if (x >= g_ui.tab_x[t] && x < g_ui.tab_x[t] + g_ui.tab_w[t] && y >= S(8) && y < S(40))
                 return -10 - t;
         return -1;
     }
     if (g_ui.friend_tab == TAB_ADD) {
-        int by = S(HEADER_H) + S(16) + S(74);
-        if (x >= x0 + w - S(30) - S(170) && x < x0 + w - S(40) && y >= by && y < by + S(32))
+        int by = S(HEADER_H) + S(16) + S(64) + S(10), lw = w - friends_active_w(w);
+        if (x >= x0 + lw - S(FR_PAD) - S(10) - S(180) && x < x0 + lw - S(FR_PAD) - S(10) && y >= by && y < by + S(32))
             return -20;
         return -1;
     }
     n = friend_rows(rows, 512);
-    top = S(HEADER_H) + S(44) - g_ui.friend_scroll;
-    if (y < S(HEADER_H) + S(44))
+    w -= friends_active_w(w);
+    top = friends_list_y() - g_ui.friend_scroll;
+    if (y < friends_list_y())
         return -1;
     for (int k = 0; k < n; k++) {
         int ry = top + k * S(FR_ROW), acts[2], na;
-        if (y < ry || y >= ry + S(FR_ROW) || x < x0 + S(20) || x >= x0 + w - S(20))
+        if (y < ry || y >= ry + S(FR_ROW) || x < x0 + S(FR_PAD) - S(4) || x >= x0 + w - S(FR_PAD) + S(4))
             continue;
         na = row_actions(&g_ui.rels[rows[k]], acts);
         for (int a = 0; a < na; a++) {
-            int bx = x0 + w - S(30) - S(36) - a * S(44);
+            int bx = x0 + w - S(FR_PAD) - S(8) - S(36) - a * S(46);
             if (x >= bx && x < bx + S(36) && y >= ry + S(13) && y < ry + S(49))
                 *act = a;
         }
@@ -9340,8 +9687,24 @@ static void friends_click(int x, int y)
 /* The username box of the Add Friend tab is a real EDIT control. */
 static void place_friend_input(void)
 {
-    int show = friends_view() && g_ui.friend_tab == TAB_ADD;
+    int show = friends_view() && g_ui.friend_tab == TAB_ADD, search = friends_view() && g_ui.friend_tab != TAB_ADD;
     int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0, y = S(HEADER_H) + S(16) + S(64);
+
+    w -= friends_active_w(w);
+    if (search && !g_ui.friend_search) {
+        HFONT font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
+        g_ui.friend_search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0,
+                                             g_ui.wnd, NULL, NULL, NULL);
+        SendMessageW(g_ui.friend_search, WM_SETFONT, (WPARAM)font, FALSE);
+        SendMessageW(g_ui.friend_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search");
+        SendMessageW(g_ui.friend_search, EM_LIMITTEXT, 32, 0);
+    }
+    if (g_ui.friend_search) {
+        if (search)
+            MoveWindow(g_ui.friend_search, x0 + S(FR_PAD) + S(12), friends_search_y() + (S(FR_SEARCH_H) - S(22)) / 2,
+                       w - S(2 * FR_PAD) - S(56), S(22), TRUE);
+        ShowWindow(g_ui.friend_search, search ? SW_SHOWNA : SW_HIDE);
+    }
 
     if (show && !g_ui.friend_edit) {
         HFONT font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
@@ -9353,7 +9716,7 @@ static void place_friend_input(void)
     }
     if (g_ui.friend_edit) {
         if (show)
-            MoveWindow(g_ui.friend_edit, x0 + S(46), y + S(16), w - S(46) - S(30) - S(190), S(22), TRUE);
+            MoveWindow(g_ui.friend_edit, x0 + S(FR_PAD) + S(14), y + S(15), w - S(2 * FR_PAD) - S(214), S(22), TRUE);
         ShowWindow(g_ui.friend_edit, show ? SW_SHOWNA : SW_HIDE);
     }
 }
@@ -10044,7 +10407,7 @@ static void place_settings_edit(void)
 static void paint_button(int x, int y, int w, const char *label, int id, int primary)
 {
     int hover = g_ui.settings_hover == id;
-    unsigned fillc = primary ? (hover ? 0xFFFFC23Du : ARGB(C_AMBER)) : (hover ? 0xFF3A3A3A : 0xFF2E2E2E);
+    unsigned fillc = primary ? (hover ? 0xFF4752C4u : ARGB(C_BRAND)) : (hover ? 0xFF3A3A3A : 0xFF2E2E2E);
 
     r_round(x, y, w, S(38), S(6), fillc);
     text(g_ui.f_h, primary ? C_RAIL : C_INK, rect(x, y, w, S(38)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -10070,7 +10433,7 @@ static void paint_slider(int x, int y, int w, int value, int min, int max, int m
         int mx = x + (int)((long long)(meter - min) * w / (max - min));
         r_round(x, ty, mx - x, S(8), S(4), meter > value ? ARGB(C_GREEN) : 0xFF6A6A6A);
     } else if (meter <= -1000) {
-        r_round(x, ty, kx - x, S(8), S(4), ARGB(C_AMBER));
+        r_round(x, ty, kx - x, S(8), S(4), ARGB(C_BRAND));
     }
     r_round(kx - S(5), y + S(2), S(10), S(24), S(3), g_ui.settings_hover == id || g_ui.set_drag == id ? 0xFFFFFFFFu : 0xFFE0E0E0u);
     set_hit(x - S(8), y, w + S(16), S(28), id);
@@ -10081,9 +10444,9 @@ static int paint_radio(int x, int y, int w, const char *label, int on, int id)
 {
     if (g_ui.settings_hover == id || on)
         r_round(x, y, w, S(40), S(6), on ? ARGB(C_SELECT) : ARGB(C_HOVER));
-    r_round_outline(x + S(12), y + S(10), S(20), S(20), S(10), S(2), on ? ARGB(C_AMBER) : ARGB(C_MUTED));
+    r_round_outline(x + S(12), y + S(10), S(20), S(20), S(10), S(2), on ? ARGB(C_BRAND) : ARGB(C_MUTED));
     if (on)
-        r_circle(x + S(17), y + S(15), S(10), ARGB(C_AMBER));
+        r_circle(x + S(17), y + S(15), S(10), ARGB(C_BRAND));
     text(g_ui.f_body, on ? C_INK : C_MUTED, rect(x + S(44), y, w - S(56), S(40)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     set_hit(x, y, w, S(40), id);
     return y + S(44);
@@ -10124,7 +10487,7 @@ static int paint_toggle(int x, int y, int w, const char *title, const char *desc
 
     text(g_ui.f_h, C_INK, rect(x, y + S(4), w - S(64), S(22)), title, DT_LEFT | DT_SINGLELINE);
     text(g_ui.f_small, C_MUTED, rect(x, y + S(28), w - S(64), S(36)), desc, DT_LEFT | DT_WORDBREAK);
-    r_round(sx, sy, S(44), S(24), S(12), on ? ARGB(C_AMBER) : 0xFF4A4A4A);
+    r_round(sx, sy, S(44), S(24), S(12), on ? ARGB(C_BRAND) : 0xFF4A4A4A);
     r_circle(on ? sx + S(22) : sx + S(2), sy + S(2), S(20), 0xFFFFFFFFu);
     set_hit(x, y, w, S(SET_ROW), id);
     fill(x, y + S(SET_ROW) - S(12), w, 1, C_LINE);
@@ -10271,8 +10634,8 @@ static void paint_settings(RECT rc)
                 key_name(v->ptt_key, label, ARRAYSIZE(label));
             r_round(x, y, col, S(40), S(6), 0xFF1E1E1E);
             if (g_ui.set_record)
-                r_round_outline(x, y, col, S(40), S(6), 1, ARGB(C_AMBER));
-            text_w(g_ui.f_body, g_ui.set_record ? C_AMBER : C_INK, rect(x + S(12), y, col - S(24), S(40)), label, -1,
+                r_round_outline(x, y, col, S(40), S(6), 1, ARGB(C_BRAND));
+            text_w(g_ui.f_body, g_ui.set_record ? C_BRAND : C_INK, rect(x + S(12), y, col - S(24), S(40)), label, -1,
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             set_hit(x, y, col, S(40), SH_PTT_KEY);
             paint_button(x + col + S(12), y + S(1), S(160), g_ui.set_record ? "Stop Recording" : "Record Keybind", SH_PTT_KEY, 0);
@@ -10363,7 +10726,17 @@ static void settings_open(void)
         ShowWindow(g_ui.search_edit, SW_HIDE);
     if (g_ui.friend_edit)
         ShowWindow(g_ui.friend_edit, SW_HIDE);
+    if (g_ui.friend_search)
+        ShowWindow(g_ui.friend_search, SW_HIDE);
     SetFocus(g_ui.wnd);
+    redraw();
+}
+
+/* From the user panel's menus: the voice settings. */
+static void settings_open_voice(void)
+{
+    settings_open();
+    g_ui.settings_page = SET_VOICE;
     redraw();
 }
 
@@ -10972,7 +11345,7 @@ static void user_menu(const char *user_id, const char *name, const char *avatar,
 static int voice_user_at(int x, int y)
 {
     unsigned first, count;
-    int kind, index, ry = S(HEADER_H) + S(8) - g_ui.side_scroll, row, n = 0;
+    int kind, index, ry = S(HEADER_H) + side_list_top() - g_ui.side_scroll, row, n = 0;
 
     hit_test(x, y, &kind, &index);
     if (kind != HIT_CHANNEL || !is_voice_type(chan(index)->type) || !side_range(&first, &count))
@@ -11488,7 +11861,7 @@ static void paint_forum(RECT rc, int x0, int w)
     }
     /* New Post, above the posts as in Discord. */
     g_ui.forum_new = rect(x0 + S(24), y, S(120), S(36));
-    r_round(x0 + S(24), y, S(120), S(36), S(6), ARGB(C_AMBER));
+    r_round(x0 + S(24), y, S(120), S(36), S(6), ARGB(C_BRAND));
     text(g_ui.f_h, C_RAIL, g_ui.forum_new, "New Post", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     y += S(52);
     if (!g_ui.nposts) {
@@ -11922,9 +12295,21 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
         if ((HWND)lp == g_ui.composer && HIWORD(wp) == EN_CHANGE)
             composer_changed();
+        if ((HWND)lp == g_ui.friend_search && HIWORD(wp) == EN_CHANGE) {
+            g_ui.friend_scroll = 0;
+            redraw();
+        }
         break;
     case WM_CTLCOLOREDIT:
-        if ((HWND)lp == g_ui.search_edit || (HWND)lp == g_ui.friend_edit || (HWND)lp == g_ui.settings_edit) {
+        if ((HWND)lp == g_ui.friend_search || (HWND)lp == g_ui.friend_edit) {
+            static HBRUSH field;
+            if (!field)
+                field = CreateSolidBrush(RGB(0x12, 0x12, 0x14));
+            SetTextColor((HDC)wp, GDI(C_TEXT));
+            SetBkColor((HDC)wp, RGB(0x12, 0x12, 0x14));
+            return (LRESULT)field;
+        }
+        if ((HWND)lp == g_ui.search_edit || (HWND)lp == g_ui.settings_edit) {
             if ((HWND)lp == g_ui.settings_edit) {
                 static HBRUSH box;
                 if (!box)
@@ -11943,19 +12328,6 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTextColor((HDC)wp, GDI(C_INK));
         SetBkColor((HDC)wp, RGB(0x1F, 0x1F, 0x1F));
         return (LRESULT)g_ui.b_composer;
-    case WM_GETMINMAXINFO:
-        ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(940, GetDpiForWindow(wnd), 96);
-        ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(620, GetDpiForWindow(wnd), 96);
-        return 0;
-    case WM_DPICHANGED: {
-        RECT *r = (RECT *)lp;
-        g_ui.dpi = HIWORD(wp);
-        make_fonts();
-        set_icons(g_ui.dpi);
-        SetWindowPos(wnd, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
-        return 0;
-    }
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT:
@@ -12289,7 +12661,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             g_ui.ack_pending = 0;
         }
         return 0;
-    case WM_ACTIVATE:
+    case WM_ACTIVATE: /* forwarded by the frame */
         if (LOWORD(wp) != WA_INACTIVE)
             redraw(); /* animations pick up again on the next paint */
         /* Coming back to the window counts as reading the open channel. */
@@ -12298,7 +12670,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             mark_read(g_ui.channel);
             redraw();
         }
-        break;
+        return 0;
     case WM_TRAY:
         switch (LOWORD(lp)) {
         case NIN_BALLOONUSERCLICK:
@@ -12312,6 +12684,302 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         }
         return 0;
+    default:
+        if (msg >= UI_QR && msg <= UI_STREAM) {
+            on_worker(msg, wp, lp);
+            return 0;
+        }
+        break;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* ---- Window frame: a title bar of our own, as Discord draws it ---- */
+
+#define TITLE_H 32
+#define TB_BTN_W 36 /* minimize, maximize, close */
+enum { TB_NONE, TB_BACK, TB_FORWARD, TB_INBOX, TB_HELP, TB_MIN, TB_MAX, TB_CLOSE };
+
+/* Part of the title bar at (x, y), in the frame's client coordinates. */
+static int tb_part(int x, int y)
+{
+    RECT rc;
+    int r;
+
+    GetClientRect(g_ui.top, &rc);
+    r = rc.right;
+    if (y < 0 || y >= S(TITLE_H))
+        return TB_NONE;
+    if (x >= r - S(TB_BTN_W))
+        return TB_CLOSE;
+    if (x >= r - 2 * S(TB_BTN_W))
+        return TB_MAX;
+    if (x >= r - 3 * S(TB_BTN_W))
+        return TB_MIN;
+    if (x >= r - S(158) && x < r - S(126))
+        return TB_HELP;
+    if (x >= r - S(194) && x < r - S(162))
+        return TB_INBOX;
+    if (x >= S(10) && x < S(36))
+        return TB_BACK;
+    if (x >= S(36) && x < S(62))
+        return TB_FORWARD;
+    return TB_NONE;
+}
+
+/* What the window shows, for the middle of the title bar and the taskbar. */
+static const char *tb_title(r_image_t **icon, const wchar_t **glyph)
+{
+    *icon = NULL;
+    *glyph = NULL;
+    if (g_ui.view != VIEW_APP || !g_ui.model)
+        return "Silicord";
+    if (g_ui.settings_open) {
+        *glyph = L"\xE713";
+        return "User Settings";
+    }
+    if (g_ui.guild >= 0) {
+        *icon = guild_icon(&g_ui.model->guilds[g_ui.guild]);
+        return model_str(g_ui.model, g_ui.model->guilds[g_ui.guild].name);
+    }
+    if (friends_view()) {
+        *glyph = L"\xE716";
+        return "Friends";
+    }
+    *glyph = L"\xE8BD";
+    return "Direct Messages";
+}
+
+static void paint_titlebar(RECT rc)
+{
+    int r = rc.right, cy = S(TITLE_H) / 2, h = g_ui.tb_hover;
+    int back = g_ui.hist_pos > 0, fwd = g_ui.hist_pos + 1 < g_ui.hist_n;
+    unsigned idle = ARGB(C_MUTED), hot = ARGB(C_INK), off = 0xFF4B4C4Fu;
+    const wchar_t *glyph;
+    r_image_t *icon;
+    const char *title = tb_title(&icon, &glyph);
+    wchar_t *wt = utf8_to_wide(title, lstrlenA(title));
+    int tw = r_text_width(g_ui.f_tb, wt, -1), iw = icon || glyph ? S(20) + S(8) : 0, tx;
+
+    fill(0, 0, r, S(TITLE_H), C_RAIL);
+    /* Back and forward, dimmed with nowhere to go. */
+    r_text(g_ui.f_icon_tb, !back ? off : h == TB_BACK ? hot : idle, S(10), 0, S(26), S(TITLE_H), L"\xE72B", -1,
+           R_CENTER | R_VCENTER | R_SINGLE);
+    r_text(g_ui.f_icon_tb, !fwd ? off : h == TB_FORWARD ? hot : idle, S(36), 0, S(26), S(TITLE_H), L"\xE72A", -1,
+           R_CENTER | R_VCENTER | R_SINGLE);
+
+    /* In the middle: where we are, with its icon. */
+    if (tw > r / 2)
+        tw = r / 2;
+    tx = (r - tw - iw) / 2;
+    if (icon)
+        r_image(icon, tx, cy - S(10), S(20), S(20), S(6));
+    else if (glyph)
+        r_text(g_ui.f_icon_tb, idle, tx, 0, S(20), S(TITLE_H), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+    r_text(g_ui.f_tb, ARGB(C_TEXT), tx + iw, 0, tw, S(TITLE_H), wt, -1, R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
+    mem_free(wt);
+
+    /* Inbox and help, then the window's buttons. */
+    r_text(g_ui.f_icon_tb, h == TB_INBOX || (g_ui.pins_open && g_ui.pins_inbox) ? hot : idle, r - S(194), 0, S(32),
+           S(TITLE_H), L"\xE715", -1, R_CENTER | R_VCENTER | R_SINGLE);
+    r_text(g_ui.f_icon_tb, h == TB_HELP ? hot : idle, r - S(158), 0, S(32), S(TITLE_H), L"\xE897", -1,
+           R_CENTER | R_VCENTER | R_SINGLE);
+    fill(r - 3 * S(TB_BTN_W) - S(6), cy - S(10), S(1) > 1 ? S(1) : 1, S(20), C_LINE);
+    {
+        const wchar_t *g[3] = {L"\xE921", IsZoomed(g_ui.top) ? L"\xE923" : L"\xE922", L"\xE8BB"};
+        for (int k = 0; k < 3; k++) {
+            int bx = r - (3 - k) * S(TB_BTN_W), part = TB_MIN + k, on = h == part;
+            if (on)
+                r_fill(bx, 0, S(TB_BTN_W), S(TITLE_H), part == TB_CLOSE ? 0xFFD83C3Eu : 0xFF1E1E20u);
+            r_text(g_ui.f_caption, on ? (part == TB_CLOSE ? 0xFFFFFFFFu : hot) : idle, bx, 0, S(TB_BTN_W), S(TITLE_H), g[k],
+                   -1, R_CENTER | R_VCENTER | R_SINGLE);
+        }
+    }
+}
+
+static void tb_set_hover(int part)
+{
+    if (part != g_ui.tb_hover) {
+        g_ui.tb_hover = part;
+        InvalidateRect(g_ui.top, NULL, FALSE);
+    }
+}
+
+static void hist_go(int step)
+{
+    int pos = g_ui.hist_pos + step, c;
+
+    if (!g_ui.model || pos < 0 || pos >= g_ui.hist_n)
+        return;
+    g_ui.hist_pos = pos;
+    g_ui.hist_nav = 1;
+    if (!g_ui.hist[pos][0]) {
+        g_ui.last_dm = -1;
+        select_guild(-1);
+    } else if ((c = model_find_channel(g_ui.model, g_ui.hist[pos])) >= 0) {
+        go_to_channel(c);
+    }
+    g_ui.hist_nav = 0;
+    InvalidateRect(g_ui.top, NULL, FALSE);
+}
+
+static void tb_click(int part)
+{
+    switch (part) {
+    case TB_BACK:
+        hist_go(-1);
+        break;
+    case TB_FORWARD:
+        hist_go(1);
+        break;
+    case TB_INBOX:
+        pins_toggle(1);
+        redraw();
+        break;
+    case TB_HELP:
+        ShellExecuteW(NULL, L"open", L"https://github.com/mikketa/silicord#readme", NULL, NULL, SW_SHOWNORMAL);
+        break;
+    case TB_MIN:
+        ShowWindow(g_ui.top, SW_MINIMIZE);
+        break;
+    case TB_MAX:
+        ShowWindow(g_ui.top, IsZoomed(g_ui.top) ? SW_RESTORE : SW_MAXIMIZE);
+        break;
+    case TB_CLOSE:
+        SendMessageW(g_ui.top, WM_CLOSE, 0, 0);
+        break;
+    }
+}
+
+static int frame_border(HWND wnd, int x)
+{
+    UINT dpi = GetDpiForWindow(wnd);
+
+    return GetSystemMetricsForDpi(x ? SM_CXFRAME : SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+static LRESULT CALLBACK frame_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_CREATE:
+        g_ui.top = wnd;
+        return 0;
+    case WM_NCCALCSIZE:
+        /* No caption: the client area reaches the top. The other borders stay, to resize by. */
+        if (wp) {
+            RECT *r = &((NCCALCSIZE_PARAMS *)lp)->rgrc[0];
+            r->left += frame_border(wnd, 1);
+            r->right -= frame_border(wnd, 1);
+            r->bottom -= frame_border(wnd, 0);
+            if (IsZoomed(wnd)) /* maximized, the frame hangs off the screen */
+                r->top += frame_border(wnd, 0);
+            return 0;
+        }
+        break;
+    case WM_NCHITTEST: {
+        LRESULT hit = DefWindowProcW(wnd, msg, wp, lp);
+        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (hit != HTCLIENT)
+            return hit;
+        ScreenToClient(wnd, &pt);
+        if (!IsZoomed(wnd) && pt.y < frame_border(wnd, 0))
+            return HTTOP;
+        switch (tb_part(pt.x, pt.y)) {
+        case TB_MIN:
+            return HTMINBUTTON;
+        case TB_MAX:
+            return HTMAXBUTTON; /* Windows 11 shows its snap layouts over it */
+        case TB_CLOSE:
+            return HTCLOSE;
+        case TB_NONE:
+            return pt.y < S(TITLE_H) ? HTCAPTION : HTCLIENT;
+        }
+        return HTCLIENT;
+    }
+    case WM_NCMOUSEMOVE: {
+        TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE | TME_NONCLIENT, wnd, 0};
+        int part = wp == HTMINBUTTON ? TB_MIN : wp == HTMAXBUTTON ? TB_MAX : wp == HTCLOSE ? TB_CLOSE : TB_NONE;
+        TrackMouseEvent(&tme);
+        tb_set_hover(part);
+        if (part != TB_NONE)
+            return 0;
+        break;
+    }
+    case WM_NCMOUSELEAVE:
+    case WM_MOUSELEAVE:
+        tb_set_hover(TB_NONE);
+        break;
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK:
+        if (wp == HTMINBUTTON || wp == HTMAXBUTTON || wp == HTCLOSE) {
+            g_ui.tb_down = (int)wp;
+            return 0; /* not DefWindowProc: it would draw the classic buttons */
+        }
+        break;
+    case WM_NCLBUTTONUP:
+        if (wp == HTMINBUTTON || wp == HTMAXBUTTON || wp == HTCLOSE) {
+            if (g_ui.tb_down == (int)wp)
+                tb_click(wp == HTMINBUTTON ? TB_MIN : wp == HTMAXBUTTON ? TB_MAX : TB_CLOSE);
+            g_ui.tb_down = 0;
+            return 0;
+        }
+        break;
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, wnd, 0};
+        TrackMouseEvent(&tme);
+        tb_set_hover(tb_part(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        tb_click(tb_part(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
+        return 0;
+    case WM_SIZE:
+        if (!g_ui.wnd)
+            return 0;
+        if (wp == SIZE_MINIMIZED) {
+            SendMessageW(g_ui.wnd, WM_SIZE, SIZE_MINIMIZED, 0);
+            return 0;
+        }
+        MoveWindow(g_ui.wnd, 0, S(TITLE_H), LOWORD(lp), HIWORD(lp) - S(TITLE_H), TRUE);
+        InvalidateRect(wnd, NULL, FALSE);
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) {
+            g_ui.saved_focus = GetFocus();
+        } else if (!HIWORD(wp)) {
+            HWND f = g_ui.saved_focus;
+            SetFocus(f && IsWindow(f) && IsChild(wnd, f) ? f : g_ui.wnd);
+        }
+        if (g_ui.wnd)
+            SendMessageW(g_ui.wnd, WM_ACTIVATE, wp, lp);
+        return 0;
+    case WM_SETFOCUS:
+        if (g_ui.wnd)
+            SetFocus(g_ui.wnd);
+        return 0;
+    case WM_GETMINMAXINFO:
+        ((MINMAXINFO *)lp)->ptMinTrackSize.x = MulDiv(940, GetDpiForWindow(wnd), 96);
+        ((MINMAXINFO *)lp)->ptMinTrackSize.y = MulDiv(620, GetDpiForWindow(wnd), 96);
+        return 0;
+    case WM_DPICHANGED: {
+        RECT *r = (RECT *)lp;
+        g_ui.dpi = HIWORD(wp);
+        make_fonts();
+        set_icons(g_ui.dpi);
+        SetWindowPos(wnd, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        paint_frame(wnd, paint_titlebar);
+        return 0;
     case WM_CLOSE:
         Shell_NotifyIconW(NIM_DELETE, &g_ui.tray);
         app_quit();
@@ -12319,12 +12987,6 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
-    default:
-        if (msg >= UI_QR && msg <= UI_STREAM) {
-            on_worker(msg, wp, lp);
-            return 0;
-        }
-        break;
     }
     return DefWindowProcW(wnd, msg, wp, lp);
 }
@@ -12348,6 +13010,9 @@ HWND ui_create(HINSTANCE inst)
     wc.hIconSm = load_icon(SM_CXSMICON, dpi);
     wc.lpszClassName = L"Silicord";
     RegisterClassExW(&wc);
+    wc.lpfnWndProc = frame_proc;
+    wc.lpszClassName = L"SilicordFrame";
+    RegisterClassExW(&wc);
     wc.lpfnWndProc = pop_proc;
     wc.hIcon = wc.hIconSm = NULL;
     wc.lpszClassName = L"SilicordPopout";
@@ -12359,12 +13024,20 @@ HWND ui_create(HINSTANCE inst)
     wc.lpszClassName = L"SilicordSwitch";
     RegisterClassExW(&wc);
 
-    g_ui.wnd = CreateWindowExW(0, L"Silicord", L"Silicord", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                               CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1200, dpi, 96), MulDiv(760, dpi, 96),
-                               NULL, NULL, inst, NULL);
-    DwmSetWindowAttribute(g_ui.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
-    DwmSetWindowAttribute(g_ui.wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof caption);
-    set_icons(GetDpiForWindow(g_ui.wnd));
+    /* The frame, then the app inside it under the title bar. */
+    CreateWindowExW(0, L"SilicordFrame", L"Silicord", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                    MulDiv(1200, dpi, 96), MulDiv(760, dpi, 96), NULL, NULL, inst, NULL);
+    DwmSetWindowAttribute(g_ui.top, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
+    DwmSetWindowAttribute(g_ui.top, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof caption);
+    SetWindowPos(g_ui.top, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    CreateWindowExW(0, L"Silicord", L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, g_ui.top, NULL,
+                    inst, NULL);
+    {
+        RECT rc;
+        GetClientRect(g_ui.top, &rc);
+        MoveWindow(g_ui.wnd, 0, S(TITLE_H), rc.right, rc.bottom - S(TITLE_H), FALSE);
+    }
+    set_icons(GetDpiForWindow(g_ui.top));
 
     g_ui.tray.cbSize = sizeof g_ui.tray;
     g_ui.tray.hWnd = g_ui.wnd;
@@ -12376,5 +13049,5 @@ HWND ui_create(HINSTANCE inst)
     Shell_NotifyIconW(NIM_ADD, &g_ui.tray);
     g_ui.tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_ui.tray);
-    return g_ui.wnd;
+    return g_ui.top;
 }
