@@ -160,4 +160,6 @@ long long msg_iso_ms(const char *iso);
 
 /* Milliseconds since the Unix epoch encoded in a snowflake: DISCORD_EPOCH plus its top 42 bits. */
 #define DISCORD_EPOCH 1420070400000ll
+/* Windows' FILETIME counts 100 ns from 1601: the Unix epoch comes this many milliseconds later. */
+#define FILETIME_UNIX_MS 11644473600000ull
 long long snowflake_ms(const char *id);

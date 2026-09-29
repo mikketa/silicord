@@ -1408,8 +1408,7 @@ static unsigned long long nonce_now(void)
     GetSystemTimeAsFileTime(&ft);
     now.LowPart = ft.dwLowDateTime;
     now.HighPart = ft.dwHighDateTime;
-    /* 100 ns ticks since 1601 to milliseconds since 1970, then since Discord's epoch. */
-    return (now.QuadPart / 10000 - 11644473600000ull - (unsigned long long)DISCORD_EPOCH) << 22;
+    return (now.QuadPart / 10000 - FILETIME_UNIX_MS - (unsigned long long)DISCORD_EPOCH) << 22;
 }
 
 static DWORD WINAPI send_main(LPVOID arg)

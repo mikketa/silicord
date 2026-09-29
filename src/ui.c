@@ -1682,7 +1682,7 @@ static long long now_ms(void)
     GetSystemTimeAsFileTime(&ft);
     t.LowPart = ft.dwLowDateTime;
     t.HighPart = ft.dwHighDateTime;
-    return (long long)(t.QuadPart / 10000 - 11644473600000ull);
+    return (long long)(t.QuadPart / 10000 - FILETIME_UNIX_MS);
 }
 
 static int channel_muted(unsigned i)
@@ -2203,7 +2203,7 @@ static SYSTEMTIME local_time(const char *id)
     FILETIME ft;
     SYSTEMTIME utc, local;
 
-    t.QuadPart = ((unsigned long long)snowflake_ms(id) + 11644473600000ull) * 10000ull;
+    t.QuadPart = ((unsigned long long)snowflake_ms(id) + FILETIME_UNIX_MS) * 10000ull;
     ft.dwLowDateTime = t.LowPart;
     ft.dwHighDateTime = t.HighPart;
     FileTimeToSystemTime(&ft, &utc);
@@ -3153,7 +3153,7 @@ static void maybe_load_older(void)
 static long long local_offset_ms(const char *date)
 {
     long long ms = msg_iso_ms(date);
-    unsigned long long t = (unsigned long long)ms * 10000ull + 116444736000000000ull;
+    unsigned long long t = ((unsigned long long)ms + FILETIME_UNIX_MS) * 10000ull;
     FILETIME ft, uft;
     SYSTEMTIME local, utc;
     ULARGE_INTEGER u;
@@ -3212,7 +3212,7 @@ static void long_date_no_weekday(const SYSTEMTIME *st, wchar_t *out, int n)
 /* Discord's <t:unix:style> in the user's locale: t, T, d, D, f (default), F, or R for "3 hours ago". */
 static void format_timestamp(long long secs, char style, sb_t *out)
 {
-    unsigned long long t = (unsigned long long)(secs * 10000000ll + 116444736000000000ll);
+    unsigned long long t = ((unsigned long long)(secs * 1000) + FILETIME_UNIX_MS) * 10000ull;
     FILETIME ft, local;
     SYSTEMTIME st;
     wchar_t date[80], clock[32], text[128];
