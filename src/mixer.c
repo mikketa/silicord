@@ -18,7 +18,6 @@ struct mixer_voice {
     unsigned last_seq;
     float volume;
     int level;
-    float pcm[5760 * 2];
 };
 
 void mixer_init(mixer_t *m)
@@ -87,17 +86,17 @@ void mixer_push(mixer_t *m, unsigned long long user, unsigned seq, const unsigne
         if (gap > 1 && gap - 1 <= MAX_CONCEALED) {
             /* Conceal the lost packets, a frame of the last duration each. */
             for (unsigned k = 0; k < gap - 1; k++) {
-                got = opus_decode(&v->dec, NULL, 0, v->pcm, v->dec.frame_size);
+                got = opus_decode(&v->dec, NULL, 0, m->pcm, v->dec.frame_size);
                 if (got > 0)
-                    enqueue(v, v->pcm, got);
+                    enqueue(v, m->pcm, got);
             }
         }
     }
     v->last_seq = seq;
     v->have_seq = 1;
-    got = opus_decode(&v->dec, opus, n, v->pcm, 0);
+    got = opus_decode(&v->dec, opus, n, m->pcm, 0);
     if (got > 0)
-        enqueue(v, v->pcm, got);
+        enqueue(v, m->pcm, got);
 }
 
 void mixer_pull(mixer_t *m, float *out)

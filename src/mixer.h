@@ -16,6 +16,7 @@ typedef struct {
     int nvoices;
     float gain;    /* output volume, 1 by default */
     int deafened;  /* when set, nothing is played */
+    float pcm[5760 * 2]; /* a decoded packet on its way to a speaker's queue */
 } mixer_t;
 
 void mixer_init(mixer_t *m);
