@@ -551,6 +551,8 @@ static void voice_state_changed(void *ctx, int state, const char *text)
 
     (void)ctx;
     if (state == VOICE_CONNECTED) {
+        /* Still running when we moved to another channel or voice server: it encodes with g_encoder. */
+        audio_mode(AUDIO_OFF);
         opus_encoder_init(&g_encoder);
         g_mic_hang = 0;
         audio_mode(AUDIO_CALL);
