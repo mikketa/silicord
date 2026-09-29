@@ -83,6 +83,12 @@ typedef struct {
     HWND wnd;        /* window that drew it, for animations */
 } image_t;
 
+/* A panel's messages measured once per paint (the panel is painted in bands): body and extras heights. */
+typedef struct {
+    int *th, *eh;
+    unsigned frame;
+} panel_layout_t;
+
 /* Decoded images kept in memory; images off screen beyond this are dropped (the disk cache keeps them). */
 #define IMAGE_BUDGET (16u << 20)
 /* Time a paint may spend decoding images from the disk cache before deferring the rest. */
@@ -209,6 +215,7 @@ typedef struct {
     msg_batch_t *results;      /* search results, NULL while searching */
     int results_open, results_scroll, results_content, result_hover;
     int result_y[64], result_h[64];
+    panel_layout_t result_layout;
     int detached;              /* showing older messages after a jump: new ones are not appended */
     void *posts;               /* forum posts (post_t) */
     int nposts, forum_loaded, forum_scroll, forum_content, post_hover;
@@ -256,6 +263,7 @@ typedef struct {
     int nuvol;
     sb_t voice_status;
     int pin_top[64], pin_h[64]; /* where the panel's messages are, unscrolled, for clicks */
+    panel_layout_t pin_layout;
     int hover_msg;
     sb_t send_error;
     HWND composer;
@@ -2998,10 +3006,35 @@ static void batch_drop_views(msg_batch_t *b)
         drop_view(&b->msgs[i]);
 }
 
-static void panel_batch_free(msg_batch_t *b)
+static void panel_batch_free(msg_batch_t *b, panel_layout_t *l)
 {
     batch_drop_views(b);
     msg_batch_free(b);
+    mem_free(l->th);
+    mem_free(l->eh);
+    l->th = l->eh = NULL;
+    l->frame = 0;
+}
+
+/* Measures b's messages, text tw wide and at most max_th high, at the first band of a paint. */
+static void panel_measure(panel_layout_t *l, msg_batch_t *b, int x, int tw, int max_th)
+{
+    if (l->frame == g_ui.frame)
+        return;
+    l->frame = g_ui.frame;
+    l->th = mem_realloc(l->th, sizeof *l->th * (size_t)(b->n ? b->n : 1));
+    l->eh = mem_realloc(l->eh, sizeof *l->eh * (size_t)(b->n ? b->n : 1));
+    for (int k = 0; k < b->n; k++) {
+        msg_t *m = &b->msgs[k];
+        int th = 0;
+        if (m->text.len) {
+            wchar_t *body = plain_text(&m->text);
+            th = r_text_height(g_ui.f_body, body, -1, tw);
+            mem_free(body);
+        }
+        l->th[k] = th > max_th ? max_th : th;
+        l->eh[k] = msg_extras(m, x, 0, tw, 0, 0, 0, NULL);
+    }
 }
 
 static void invalidate_views(void)
@@ -8693,7 +8726,7 @@ static int call_button_x(void)
 
 static void pins_close(void)
 {
-    panel_batch_free(g_ui.pins);
+    panel_batch_free(g_ui.pins, &g_ui.pin_layout);
     g_ui.pins = NULL;
     g_ui.pins_open = 0;
     g_ui.pins_inbox = 0;
@@ -8777,16 +8810,22 @@ static void paint_pins(void)
     }
     r_clip(r.left, r.top + S(49), r.right - r.left, r.bottom - r.top - S(50));
     y = r.top + S(56) - g_ui.pins_scroll;
+    panel_measure(&g_ui.pin_layout, g_ui.pins, r.left + S(60), r.right - r.left - S(76), S(88));
     for (int k = g_ui.pins->n; k-- > 0;) { /* newest first */
         msg_t *m = &g_ui.pins->msgs[k];
-        int tw = r.right - r.left - S(76), th;
-        wchar_t *body = plain_text(&m->text), when[64];
-        r_image_t *img = user_avatar(m->author_id, m->avatar);
-        int eh;
-        th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
-        if (th > S(88))
-            th = S(88);
-        eh = msg_extras(m, r.left + S(60), 0, tw, 0, 0, 0, NULL);
+        int tw = r.right - r.left - S(76), th = g_ui.pin_layout.th[k], eh = g_ui.pin_layout.eh[k];
+        wchar_t *body, when[64];
+        r_image_t *img;
+        if (k < (int)ARRAYSIZE(g_ui.pin_top)) {
+            g_ui.pin_top[k] = y + g_ui.pins_scroll;
+            g_ui.pin_h[k] = S(40) + th + eh + S(12);
+        }
+        if (!r_visible(y, S(40) + th + eh + S(12))) {
+            y += S(40) + th + eh + S(20);
+            continue;
+        }
+        body = plain_text(&m->text);
+        img = user_avatar(m->author_id, m->avatar);
         r_round(r.left + S(8), y, r.right - r.left - S(16), S(40) + th + eh + S(12), S(6), 0xFF181818);
         if (img)
             r_image(img, r.left + S(16), y + S(10), S(32), S(32), S(16));
@@ -8815,10 +8854,6 @@ static void paint_pins(void)
         if (eh)
             msg_extras(m, r.left + S(60), y + S(30) + th, tw, 1, 0, 0, NULL);
         mem_free(body);
-        if (k < (int)ARRAYSIZE(g_ui.pin_top)) {
-            g_ui.pin_top[k] = y + g_ui.pins_scroll;
-            g_ui.pin_h[k] = S(40) + th + eh + S(12);
-        }
         y += S(40) + th + eh + S(20);
     }
     g_ui.pins_content = y + g_ui.pins_scroll - (r.top + S(56));
@@ -10397,7 +10432,7 @@ static void place_search(void)
 
 static void search_close(void)
 {
-    panel_batch_free(g_ui.results);
+    panel_batch_free(g_ui.results, &g_ui.result_layout);
     g_ui.results = NULL;
     g_ui.results_open = 0;
     g_ui.results_scroll = 0;
@@ -10574,19 +10609,23 @@ static void paint_search(void)
         return;
     r_clip(r.left, r.top + S(49), r.right - r.left, r.bottom - r.top - S(50));
     y = r.top + S(56) - g_ui.results_scroll;
+    /* Pictures, GIFs and embeds come along, as in Discord's results. */
+    panel_measure(&g_ui.result_layout, g_ui.results, r.left + S(60), r.right - r.left - S(76), S(66));
     for (int k = 0; k < g_ui.results->n; k++) {
         msg_t *m = &g_ui.results->msgs[k];
-        int tw = r.right - r.left - S(76), th, c = model_find_channel(g_ui.model, m->channel_id);
-        wchar_t *body = plain_text(&m->text), when[64];
-        r_image_t *img = user_avatar(m->author_id, m->avatar);
+        int tw = r.right - r.left - S(76), th = g_ui.result_layout.th[k], eh = g_ui.result_layout.eh[k], c;
+        wchar_t *body, when[64];
+        r_image_t *img;
         char where[96];
-        int eh;
-        th = m->text.len ? r_text_height(g_ui.f_body, body, -1, tw) : 0;
-        if (th > S(66))
-            th = S(66);
-        /* Pictures, GIFs and embeds come along, as in Discord's results. */
-        eh = msg_extras(m, r.left + S(60), 0, tw, 0, 0, 0, NULL);
         g_ui.result_y[k < 64 ? k : 63] = y;
+        g_ui.result_h[k < 64 ? k : 63] = S(20) + S(40) + th + eh + S(16);
+        if (!r_visible(y, S(20) + S(40) + th + S(8) + eh)) {
+            y += S(20) + S(40) + th + eh + S(16);
+            continue;
+        }
+        c = model_find_channel(g_ui.model, m->channel_id);
+        body = plain_text(&m->text);
+        img = user_avatar(m->author_id, m->avatar);
         wsprintfA(where, "# %.80s", c >= 0 ? model_str(g_ui.model, chan(c)->name) : "unknown");
         text(g_ui.f_cat, C_MUTED, rect(r.left + S(16), y, tw, S(18)), where, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         y += S(20);
@@ -10605,7 +10644,6 @@ static void paint_search(void)
             msg_extras(m, r.left + S(60), y + S(28) + th, tw, 1, 0, 0, NULL);
         mem_free(body);
         y += S(40) + th + eh + S(16);
-        g_ui.result_h[k < 64 ? k : 63] = y - g_ui.result_y[k < 64 ? k : 63];
     }
     g_ui.results_content = y + g_ui.results_scroll - (r.top + S(56));
     r_unclip();
