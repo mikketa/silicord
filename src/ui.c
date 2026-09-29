@@ -6662,14 +6662,9 @@ static void composer_changed(void)
 
     if (!open_is_text())
         return;
-    if (g_ui.bar == BAR_EDIT || GetWindowTextLengthW(g_ui.composer) <= 0) {
-        ac_update();
-        redraw();
-        return;
-    }
     ac_update();
     redraw();
-    if (now - g_ui.typing_sent > 8000) {
+    if (g_ui.bar != BAR_EDIT && GetWindowTextLengthW(g_ui.composer) > 0 && now - g_ui.typing_sent > 8000) {
         g_ui.typing_sent = now;
         app_typing(g_ui.msgs_channel);
     }
@@ -6863,12 +6858,10 @@ static int ml_hit(int x, int y, int *top)
 /* Asks for the part of the list being scrolled to (Discord streams it by ranges of 100). */
 static void ml_request_visible(void)
 {
-    RECT rc;
     int yy = S(HEADER_H) + S(8) - g_ui.ml_scroll, first = -1;
 
     if (!members_shown())
         return;
-    GetClientRect(g_ui.wnd, &rc);
     for (int i = 0; i < g_ui.ml.n && first < 0; i++) {
         yy += ml_row_h(&g_ui.ml.items[i]);
         if (yy > S(HEADER_H))
@@ -8541,7 +8534,6 @@ static void paint_friends(RECT rc, int x0, int w)
 /* Row and action under (x, y) in the friends view; tabs report -10 - tab. */
 static int friends_hit(int x, int y, int *act)
 {
-    RECT rc;
     int x0 = S(RAIL_W + SIDE_W), w = main_right() - x0, rows[512], n, top;
 
     *act = -1;
@@ -8559,7 +8551,6 @@ static int friends_hit(int x, int y, int *act)
             return -20;
         return -1;
     }
-    GetClientRect(g_ui.wnd, &rc);
     n = friend_rows(rows, 512);
     top = S(HEADER_H) + S(44) - g_ui.friend_scroll;
     if (y < S(HEADER_H) + S(44))
