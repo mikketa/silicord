@@ -20,6 +20,7 @@ extern "C" {
 
 extern "C" {
 #include "apng.h"
+#include "lottie.h"
 #include "mem.h"
 }
 
@@ -34,6 +35,16 @@ inline void operator delete(void *, place_t, void *) {}
 struct r_font {
     IDWriteTextFormat *format;
     IDWriteInlineObject *ellipsis;
+};
+
+/* Direct2D drawing on the CPU into a w x h bitmap, from which our pixels are copied. */
+struct svg_target_t {
+    ID2D1Factory *f;
+    IWICImagingFactory *wic;
+    IWICBitmap *bmp;
+    ID2D1RenderTarget *rt;
+    ID2D1DeviceContext5 *dc;
+    UINT w, h;
 };
 
 struct r_image {
@@ -54,6 +65,9 @@ struct r_image {
     RECT area;            /* of the current frame, in the canvas */
     BYTE *saved;          /* canvas before the current frame, for disposal 3 */
     apng_t *apng;         /* animated PNGs (avatar decorations) play through their own decoder */
+    lottie_t *lottie;     /* Lottie stickers: each frame drawn as SVG when due */
+    double lottie_first, lottie_step;
+    svg_target_t *target; /* ... into a Direct2D target kept while it plays (UI thread) */
 };
 
 static IDWriteFactory *g_dw;
@@ -636,9 +650,41 @@ static UINT meta_uint(IWICMetadataQueryReader *q, const wchar_t *name, UINT fall
     return out;
 }
 
+static void svg_size(const BYTE *p, size_t n, float *w, float *h);
+static int svg_target_open(svg_target_t *t, UINT w, UINT h);
+static void svg_target_close(svg_target_t *t);
+static int svg_draw(svg_target_t *t, const void *data, size_t n, float sw, float sh, BYTE *out);
+
+/*
+ * Draws frame `index` of a Lottie animation in place of the last. Its
+ * Direct2D target stays between frames: making one costs more than drawing.
+ */
+static int lottie_frame(r_image_t *img, UINT index)
+{
+    sb_t svg = {0};
+    float sw, sh;
+    int ok;
+
+    if (!img->target) {
+        img->target = (svg_target_t *)mem_alloc(sizeof *img->target);
+        if (!svg_target_open(img->target, img->w, img->h)) {
+            mem_free(img->target);
+            img->target = NULL;
+            return 0;
+        }
+    }
+    lottie_svg(img->lottie, img->lottie_first + index * img->lottie_step, &svg);
+    svg_size((const BYTE *)svg.data, svg.len, &sw, &sh);
+    ok = sw > 0 && sh > 0 && svg_draw(img->target, svg.data, svg.len, sw, sh, img->pixels);
+    sb_free(&svg);
+    return ok;
+}
+
 /* Composes frame `index` over the canvas, applying the previous frame's disposal first. */
 static int compose(r_image_t *img, UINT index)
 {
+    if (img->lottie)
+        return lottie_frame(img, index);
     if (img->apng) {
         unsigned ms = apng_next(img->apng, img->pixels);
         if (!ms)
@@ -816,7 +862,8 @@ extern "C" unsigned r_image_advance(r_image_t *img, unsigned now)
 extern "C" size_t r_image_bytes(const r_image_t *img)
 {
     return img ? sizeof *img + (size_t)img->w * img->h * 4 * (img->saved ? 2 : 1) + img->file_n +
-                     (img->apng ? apng_bytes(img->apng) : 0)
+                     (img->apng ? apng_bytes(img->apng) : 0) + lottie_bytes(img->lottie) +
+                     (img->target ? (size_t)img->w * img->h * 4 : 0)
                : 0;
 }
 
@@ -2036,6 +2083,94 @@ static char *svg_inline_styles(const char *in, size_t n, size_t *out_n)
     return o.p;
 }
 
+static void svg_target_close(svg_target_t *t)
+{
+    if (t->dc)
+        t->dc->Release();
+    if (t->rt)
+        t->rt->Release();
+    if (t->bmp)
+        t->bmp->Release();
+    if (t->wic)
+        t->wic->Release();
+    if (t->f)
+        t->f->Release();
+    memset(t, 0, sizeof *t);
+}
+
+static int svg_target_open(svg_target_t *t, UINT w, UINT h)
+{
+    D2D1_RENDER_TARGET_PROPERTIES props = {D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                                           {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96, 96,
+                                           D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT};
+
+    memset(t, 0, sizeof *t);
+    t->w = w;
+    t->h = h;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), NULL, (void **)&t->f)) &&
+        SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory),
+                                   (void **)&t->wic)) &&
+        SUCCEEDED(t->wic->CreateBitmap(w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &t->bmp)) &&
+        SUCCEEDED(t->f->CreateWicBitmapRenderTarget(t->bmp, &props, &t->rt)) &&
+        SUCCEEDED(t->rt->QueryInterface(__uuidof(ID2D1DeviceContext5), (void **)&t->dc)))
+        return 1;
+    svg_target_close(t);
+    return 0;
+}
+
+/* Draws an SVG of size sw x sh scaled to the whole target, then copies the pixels into `out`. */
+static int svg_draw(svg_target_t *t, const void *data, size_t n, float sw, float sh, BYTE *out)
+{
+    ID2D1SvgDocument *doc = NULL;
+    IStream *st = NULL;
+    HGLOBAL mem;
+    int ok = 0;
+
+    {
+        size_t in_n;
+        char *inl = svg_inline_styles((const char *)data, n, &in_n);
+        if (inl) {
+            data = inl;
+            n = in_n;
+        }
+        mem = GlobalAlloc(GMEM_MOVEABLE, n);
+        if (mem) {
+            memcpy(GlobalLock(mem), data, n);
+            GlobalUnlock(mem);
+        }
+        if (inl)
+            mem_free(inl);
+        if (!mem)
+            return 0;
+    }
+    if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &st))) {
+        GlobalFree(mem); /* the stream owns it once made */
+        return 0;
+    }
+    if (SUCCEEDED(t->dc->CreateSvgDocument(st, D2D1_SIZE_F{sw, sh}, &doc))) {
+        /* Drawn at its own size, scaled to ours: with or without a viewBox, it fills the bitmap. */
+        D2D1_COLOR_F clear = {0, 0, 0, 0};
+        D2D1_MATRIX_3X2_F scale = {(float)t->w / sw, 0, 0, (float)t->h / sh, 0, 0};
+        D2D1_COLOR_F ink = {0xDC / 255.f, 0xDC / 255.f, 0xDF / 255.f, 1};
+        ID2D1SvgElement *root = NULL;
+        /* Art painted with currentColor takes the text color, as it would in Discord's dark theme. */
+        doc->GetRoot(&root);
+        if (root) {
+            root->SetAttributeValue(L"color", D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR, &ink, sizeof ink);
+            root->Release();
+        }
+        t->dc->BeginDraw();
+        t->dc->Clear(&clear);
+        t->dc->SetTransform(&scale);
+        t->dc->DrawSvgDocument(doc);
+        ok = SUCCEEDED(t->dc->EndDraw()) && SUCCEEDED(t->bmp->CopyPixels(NULL, t->w * 4, t->w * t->h * 4, out));
+        doc->Release();
+    }
+    st->Release();
+    return ok;
+}
+
 /*
  * An SVG (the art of Discord's pages): Direct2D draws it once, on the CPU,
  * into a bitmap of ours; its factory and target go right after, so nothing
@@ -2043,14 +2178,7 @@ static char *svg_inline_styles(const char *in, size_t n, size_t *out_n)
  */
 static r_image_t *svg_decode(const void *data, size_t n, int max_px)
 {
-    ID2D1Factory *f = NULL;
-    IWICImagingFactory *wic = NULL;
-    IWICBitmap *bmp = NULL;
-    ID2D1RenderTarget *rt = NULL;
-    ID2D1DeviceContext5 *dc = NULL;
-    ID2D1SvgDocument *doc = NULL;
-    IStream *st = NULL;
-    HGLOBAL mem;
+    svg_target_t t;
     r_image_t *img = NULL;
     float sw, sh;
     UINT w, h;
@@ -2067,88 +2195,53 @@ static r_image_t *svg_decode(const void *data, size_t n, int max_px)
         h = (UINT)max_px;
         w = (UINT)((float)max_px * sw / sh + .5f);
     }
-    if (!w || !h || w > 4096 || h > 4096)
+    if (!w || !h || w > 4096 || h > 4096 || !svg_target_open(&t, w, h))
         return NULL;
-    {
-        size_t in_n;
-        char *inl = svg_inline_styles((const char *)data, n, &in_n);
-        if (inl) {
-            data = inl;
-            n = in_n;
-        }
-        mem = GlobalAlloc(GMEM_MOVEABLE, n);
-        if (mem) {
-            memcpy(GlobalLock(mem), data, n);
-            GlobalUnlock(mem);
-        }
-        if (inl)
-            mem_free(inl);
-        if (!mem)
-            return NULL;
+    img = (r_image_t *)mem_alloc(sizeof *img);
+    img->w = w;
+    img->h = h;
+    img->pixels = (BYTE *)mem_alloc((size_t)w * h * 4);
+    if (svg_draw(&t, data, n, sw, sh, img->pixels)) {
+        img->average = average_of(img);
+    } else {
+        mem_free(img->pixels);
+        mem_free(img);
+        img = NULL;
     }
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (SUCCEEDED(CreateStreamOnHGlobal(mem, TRUE, &st)) &&
-        SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), NULL, (void **)&f)) &&
-        SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory),
-                                   (void **)&wic)) &&
-        SUCCEEDED(wic->CreateBitmap(w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bmp))) {
-        D2D1_RENDER_TARGET_PROPERTIES props = {D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                                               {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96, 96,
-                                               D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT};
-        if (SUCCEEDED(f->CreateWicBitmapRenderTarget(bmp, &props, &rt)) &&
-            SUCCEEDED(rt->QueryInterface(__uuidof(ID2D1DeviceContext5), (void **)&dc)) &&
-            SUCCEEDED(dc->CreateSvgDocument(st, D2D1_SIZE_F{sw, sh}, &doc))) {
-            /* Drawn at its own size, scaled to ours: with or without a viewBox, it fills the bitmap. */
-            D2D1_COLOR_F clear = {0, 0, 0, 0};
-            D2D1_MATRIX_3X2_F scale = {(float)w / sw, 0, 0, (float)h / sh, 0, 0};
-            D2D1_COLOR_F ink = {0xDC / 255.f, 0xDC / 255.f, 0xDF / 255.f, 1};
-            ID2D1SvgElement *root = NULL;
-            /* Art painted with currentColor takes the text color, as it would in Discord's dark theme. */
-            doc->GetRoot(&root);
-            if (root) {
-                root->SetAttributeValue(L"color", D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR, &ink, sizeof ink);
-                root->Release();
-            }
-            dc->BeginDraw();
-            dc->Clear(&clear);
-            dc->SetTransform(&scale);
-            dc->DrawSvgDocument(doc);
-            if (SUCCEEDED(dc->EndDraw())) {
-                img = (r_image_t *)mem_alloc(sizeof *img);
-                img->w = w;
-                img->h = h;
-                img->pixels = (BYTE *)mem_alloc((size_t)w * h * 4);
-                if (FAILED(bmp->CopyPixels(NULL, w * 4, w * h * 4, img->pixels))) {
-                    mem_free(img->pixels);
-                    mem_free(img);
-                    img = NULL;
-                } else {
-                    img->average = average_of(img);
-                }
-            }
-        }
-    } else if (!st) {
-        GlobalFree(mem); /* the stream owns it once made */
+    svg_target_close(&t);
+    return img;
+}
+
+/*
+ * A Lottie animation (animated stickers): its first frame now, the others
+ * drawn from the JSON as they come due, at up to 30 frames a second.
+ */
+static r_image_t *lottie_decode(lottie_t *L, int max_px)
+{
+    sb_t svg = {0};
+    r_image_t *img;
+    double first, last, fps, step;
+
+    lottie_info(L, &first, &last, &fps);
+    step = fps > 30 ? fps / 30 : 1;
+    lottie_svg(L, first, &svg);
+    img = svg_decode(svg.data, svg.len, max_px);
+    sb_free(&svg);
+    if (!img || fps <= 0 || last - first < 2 * step || (last - first) / step >= 10000) {
+        lottie_free(L); /* a still */
+    } else {
+        img->lottie = L;
+        img->lottie_first = first;
+        img->lottie_step = step;
+        img->frames = (UINT)((last - first) / step);
+        img->delay = (UINT)(1000 * step / fps + .5);
     }
-    if (doc)
-        doc->Release();
-    if (dc)
-        dc->Release();
-    if (rt)
-        rt->Release();
-    if (bmp)
-        bmp->Release();
-    if (wic)
-        wic->Release();
-    if (f)
-        f->Release();
-    if (st)
-        st->Release();
     return img;
 }
 
 extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
 {
+    lottie_t *lottie;
     IWICImagingFactory *wic = NULL;
     IWICStream *stream = NULL;
     IWICBitmapDecoder *dec = NULL;
@@ -2161,6 +2254,8 @@ extern "C" r_image_t *r_image_decode(const void *data, size_t n, int max_px)
 
     if (is_svg((const BYTE *)data, n))
         return svg_decode(data, n, max_px);
+    if ((lottie = lottie_load((const char *)data, n)) != NULL)
+        return lottie_decode(lottie, max_px);
     /* Worker threads call this: make sure COM is up (once per thread is enough). */
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory),
@@ -2247,6 +2342,11 @@ extern "C" void r_image_free(r_image_t *img)
     if (img->wic)
         img->wic->Release();
     apng_free(img->apng);
+    lottie_free(img->lottie);
+    if (img->target) {
+        svg_target_close(img->target);
+        mem_free(img->target);
+    }
     mem_free(img->file);
     mem_free(img->saved);
     mem_free(img->pixels);
