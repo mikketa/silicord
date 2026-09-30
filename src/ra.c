@@ -9,8 +9,6 @@
 
 #define RA_HOST L"remote-auth-gateway.discord.gg"
 #define RA_PATH L"/?v=2"
-/* The gateway rejects upgrades that do not come from the Discord origin. */
-#define RA_HEADERS L"Origin: https://discord.com"
 #define QR_URL_PREFIX "https://discord.com/ra/"
 
 enum { STOP, CONTINUE, DONE };
@@ -168,7 +166,7 @@ static int exchange_ticket(ra_t *r, json_t root)
                decrypt_field(r, root2, "encrypted_token", r->token)) {
         ok = 1;
     } else if (json_parse(resp.body.data, resp.body.len, &root2) && json_get(root2, "captcha_key", &v)) {
-        status(r, "Discord asked for a captcha. Log in with a token instead.");
+        status(r, "The check was not completed.");
     } else {
         sb_t text = {0};
         sb_add(&text, "Login failed (HTTP ");
@@ -244,6 +242,7 @@ int ra_login(const ra_events_t *ev, sb_t *token)
     ra_t *r = &g_ra;
     sb_t msg = {0};
     int result = STOP;
+    wchar_t headers[1024];
 
     ra_reset_once(r);
     if (cancelled(r))
@@ -258,7 +257,8 @@ int ra_login(const ra_events_t *ev, sb_t *token)
         return 0;
     }
 
-    if (!ws_connect(&r->ws, RA_HOST, INTERNET_DEFAULT_HTTPS_PORT, RA_PATH, RA_HEADERS)) {
+    if (!http_ws_headers(headers, 1024) ||
+        !ws_connect(&r->ws, RA_HOST, INTERNET_DEFAULT_HTTPS_PORT, RA_PATH, headers)) {
         status(r, "Could not reach the login server");
     } else if (!cancelled(r)) {
         while (ws_recv(&r->ws, &msg) && (result = handle(r, &msg)) == CONTINUE)

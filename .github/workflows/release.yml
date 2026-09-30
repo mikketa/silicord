@@ -75,6 +75,7 @@ jobs:
           } else {
             Copy-Item build/silicord.exe dist/
           }
+          Copy-Item build/WebView2Loader.dll dist/
 
       - name: Publish the release
         shell: pwsh
@@ -83,10 +84,10 @@ jobs:
         run: |
           $signed = if ($env:SIGNPATH_API_TOKEN) { "Signed through SignPath." } else { "This build is not signed yet: Smart App Control blocks it." }
           $notes = @"
-          A native Discord client for Windows: a single portable ``silicord.exe``, see the [README](https://github.com/mikketa/silicord#readme) for what it does and how to use it.
+          A native Discord client for Windows. Put ``WebView2Loader.dll`` in the same folder as ``silicord.exe``. See the [README](https://github.com/mikketa/silicord#readme) for what it does and how to use it.
 
           Built by GitHub Actions from $env:GITHUB_SHA. $signed See the [Code Signing Policy](https://github.com/mikketa/silicord#code-signing-policy).
 
           Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
           "@
-          gh release create $env:GITHUB_REF_NAME dist/silicord.exe --title "Silicord $env:VERSION" --notes $notes
+          gh release create $env:GITHUB_REF_NAME dist/silicord.exe dist/WebView2Loader.dll --title "Silicord $env:VERSION" --notes $notes

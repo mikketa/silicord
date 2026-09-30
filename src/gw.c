@@ -1,5 +1,6 @@
 #include <windows.h>
 #include "gw.h"
+#include "http.h"
 #include "inflate.h"
 #include "sb.h"
 #include "sc_asm.h"
@@ -83,7 +84,9 @@ static int send_identify(gw_t *g)
      * split in two (PRIORITIZED_READY_PAYLOAD). READY_SUPPLEMENTAL then carries
      * every friend's presence, which READY alone leaves out for those in servers.
      */
-    sb_add(&msg, ",\"capabilities\":48,\"properties\":{\"os\":\"Windows\",\"browser\":\"Silicord\",\"device\":\"Silicord\"}}}");
+    sb_add(&msg, ",\"capabilities\":48,\"properties\":");
+    http_identify_properties(&msg);
+    sb_add(&msg, "}}");
     ok = ws_send(&g->ws, &msg);
     sb_free(&msg);
     return ok;
@@ -265,6 +268,7 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
     sb_t msg = {0};
     int result = CONTINUE;
     const wchar_t *host;
+    wchar_t headers[1024];
 
     init_once(g);
     *established = 0;
@@ -279,7 +283,7 @@ gw_result_t gw_run(const char *token, const gw_events_t *ev, int resume, int *es
     g->resuming = resume && g->session_id[0];
     host = g->resuming && g->resume_host[0] ? g->resume_host : GW_HOST;
 
-    if (!ws_connect(&g->ws, host, INTERNET_DEFAULT_HTTPS_PORT, GW_PATH, NULL)) {
+    if (!http_ws_headers(headers, 1024) || !ws_connect(&g->ws, host, INTERNET_DEFAULT_HTTPS_PORT, GW_PATH, headers)) {
         g->resume_host[0] = 0; /* next time, try the main host */
         status(g, "Could not reach the gateway");
         return cancelled(g) ? GW_STOPPED : (g->session_id[0] ? GW_RESUME : GW_REIDENTIFY);

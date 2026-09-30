@@ -65,6 +65,7 @@ add_library(silicord_core STATIC
   src/picture.c
   src/msg.c
   src/profile.c
+  src/props.c
   src/qr.c
   src/rt.c
   src/rtp.c
@@ -85,6 +86,8 @@ add_executable(silicord
   src/cred.c
   src/gw.c
   src/http.c
+  src/cap.c
+  src/solve.c
   src/img.c
   src/ra.c
   src/render.cpp
@@ -106,6 +109,29 @@ target_compile_definitions(silicord PRIVATE
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
 target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 d2d1 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid d3d11 dxgi dxguid)
 
+# Captcha display loads WebView2Loader.dll from the exe directory. The DLL is the
+# official loader from Microsoft.Web.WebView2; the runtime itself stays the one Windows already has.
+set(WV2_VERSION 1.0.3240.44)
+set(WV2_DLL ${CMAKE_BINARY_DIR}/WebView2Loader.dll)
+if(NOT EXISTS ${WV2_DLL})
+  set(WV2_ZIP ${CMAKE_BINARY_DIR}/webview2.zip)
+  file(DOWNLOAD
+    https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${WV2_VERSION}
+    ${WV2_ZIP}
+    TLS_VERIFY ON
+    STATUS wv2_status)
+  list(GET wv2_status 0 wv2_code)
+  if(NOT wv2_code EQUAL 0)
+    message(FATAL_ERROR "Could not download WebView2Loader (${wv2_status})")
+  endif()
+  file(ARCHIVE_EXTRACT INPUT ${WV2_ZIP} DESTINATION ${CMAKE_BINARY_DIR}/webview2
+       PATTERNS build/native/x64/WebView2Loader.dll)
+  file(COPY ${CMAKE_BINARY_DIR}/webview2/build/native/x64/WebView2Loader.dll DESTINATION ${CMAKE_BINARY_DIR})
+endif()
+add_custom_command(TARGET silicord POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WV2_DLL} $<TARGET_FILE_DIR:silicord>
+  VERBATIM)
+
 enable_testing()
 # tests/<name>_test.c, built like the client; extra arguments are libraries to link.
 function(silicord_test_exe name)
@@ -122,7 +148,7 @@ function(silicord_test name)
   add_test(NAME ${name} COMMAND ${name}_test)
 endfunction()
 
-foreach(name stats str json msg model md profile command aes rtp opus vp8_rtp mixer hpke p256 sha2 search apng inflate
+foreach(name stats str json msg model md profile props command aes rtp opus vp8_rtp mixer hpke p256 sha2 search apng inflate
              emoji memberlist picture lottie)
   silicord_test(${name})
 endforeach()

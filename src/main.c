@@ -8,6 +8,7 @@
 #include "mem.h"
 #include "model.h"
 #include "msg.h"
+#include "props.h"
 #include "ra.h"
 #include "sb.h"
 #include "ui.h"
@@ -2012,7 +2013,9 @@ static DWORD WINAPI send_main(LPVOID arg)
         ui_post_batch(b);
     } else {
         char text[96];
-        if (resp.status == 429)
+        if (props_wants_captcha(resp.body.data, resp.body.len))
+            lstrcpyA(text, "The check was not completed.");
+        else if (resp.status == 429)
             lstrcpyA(text, "You are sending messages too fast");
         else if (resp.status == 403)
             lstrcpyA(text, "You cannot send messages in this channel");
@@ -2324,9 +2327,12 @@ static DWORD WINAPI relation_main(LPVOID arg)
         sb_add(&body, ",\"discriminator\":null}");
         http_request("POST", "/users/@me/relationships", j->token.data, body.data, body.len, &resp);
         sb_free(&body);
-        ui_post(UI_FRIEND_RESULT, ui_text(resp.status == 204 || resp.status == 200
-                                              ? "Success! Your friend request was sent."
-                                              : "Hm, didn't work. Double check that the username is correct."));
+        const char *msg = "Hm, didn't work. Double check that the username is correct.";
+        if (resp.status == 204 || resp.status == 200)
+            msg = "Success! Your friend request was sent.";
+        else if (props_wants_captcha(resp.body.data, resp.body.len))
+            msg = "The check was not completed.";
+        ui_post(UI_FRIEND_RESULT, ui_text(msg));
     }
     http_resp_free(&resp);
     free_job(j);
@@ -2978,8 +2984,17 @@ static DWORD WINAPI quests_main(LPVOID arg)
         wsprintfA(line, "HTTP %u, %u bytes", resp.status, (unsigned)resp.body.len);
         log_line("[quests] ", line);
     }
-    if (resp.status == 200)
+    if (resp.status == 200) {
+        /* then our Orbs balance, shown in the page's header: the quests, a NUL, the balance */
         sb_addn(p, resp.body.data, resp.body.len);
+        http_resp_free(&resp);
+        resp = (http_resp_t){0};
+        get_rate_limited("/users/@me/virtual-currency/balance", j->token.data, &resp);
+        if (resp.status == 200) {
+            sb_addn(p, "", 1);
+            sb_addn(p, resp.body.data, resp.body.len);
+        }
+    }
     ui_post(UI_QUESTS, p);
     http_resp_free(&resp);
     free_job(j);

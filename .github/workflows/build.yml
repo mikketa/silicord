@@ -35,7 +35,9 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: silicord-win64
-          path: build/silicord.exe
+          path: |
+            build/silicord.exe
+            build/WebView2Loader.dll
 
   # The portable core, its tests and a fuzzer under AddressSanitizer and UBSan.
   linux-sanitizers:

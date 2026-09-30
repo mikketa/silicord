@@ -13,6 +13,9 @@
 #include <psapi.h>
 #include <mmsystem.h>
 #include "ui.h"
+#include "cap.h"
+#include "solve.h"
+#include "json.h"
 #include "render.h"
 #include "img.h"
 #include "md.h"
@@ -197,7 +200,7 @@ typedef struct {
     int hist_n, hist_pos, hist_nav;
     r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
-    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan, *f_welcome;
+    r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan, *f_welcome, *f_orbs;
     r_rich_style_t rich;
     int hover_link;
     HICON icon_big, icon_small;
@@ -461,6 +464,7 @@ typedef struct member {
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1,
                     .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE, .upload_hover = -1,
                     .friend_hover = -1};
+static DWORD g_ui_thread;
 
 static void paint_status(int x, int y, int d, int status, unsigned bg);
 static const char *status_name(void);
@@ -513,12 +517,25 @@ sb_t *ui_text(const char *text)
     return sb;
 }
 
-void ui_post(UINT msg, sb_t *payload)
+int ui_post(UINT msg, sb_t *payload)
 {
-    if (!PostMessageW(g_ui.wnd, msg, 0, (LPARAM)payload) && payload) {
+    if (PostMessageW(g_ui.wnd, msg, 0, (LPARAM)payload))
+        return 1;
+    if (payload) {
         sb_free(payload);
         mem_free(payload);
     }
+    return 0;
+}
+
+int ui_on_ui_thread(void)
+{
+    return g_ui_thread != 0 && GetCurrentThreadId() == g_ui_thread;
+}
+
+HWND ui_window(void)
+{
+    return g_ui.wnd;
 }
 
 void ui_post_model(model_t *model)
@@ -2495,17 +2512,67 @@ static void paint_scrollbar(int x, int top, int view, int content, int scroll)
  * Line icons of our own in Discord's style: a 24 unit grid, strokes 2 units
  * wide with round ends. Rendered once per size as masks, tinted when drawn.
  */
-enum { SI_HASH, SI_CHEVRON_DOWN, SI_CHEVRON_RIGHT, SI_COUNT };
+enum { SI_HASH, SI_CHEVRON_DOWN, SI_CHEVRON_RIGHT, SI_ORB, SI_COUNT };
 static const char *const k_sicon[SI_COUNT] = {
     "M10.5 3.5 8.5 20.5M16.5 3.5l-2 17M4.5 8.5h16M3.5 15.5h16",
     "M6 9.5l6 6 6-6",
     "M9.5 6l6 6-6 6",
+    "M12 3.5l6.5 8.5-6.5 8.5-6.5-8.5z", /* an orb's diamond */
+};
+
+/*
+ * Discord's own filled icons (same 24 unit grid), each in place of the
+ * Segoe glyph that stood for it. Drawn through sicon() as SI_COUNT + index.
+ */
+static const struct {
+    wchar_t glyph;
+    const char *svg;
+} k_dicon[] = {
+    {0xE716, /* friends: a waving person */
+     "<path d=\"M13 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z\"/><path d=\"M3 5v-.75C3 3.56 3.56 3 4.25 3s1.24.56 1.33 1.25C6.12 8.65 "
+     "9.46 12 13 12h1a8 8 0 0 1 8 8 2 2 0 0 1-2 2 .21.21 0 0 1-.2-.15 7.65 7.65 0 0 0-1.32-2.3c-.15-.2-.42-.06-.39.17l.25 "
+     "2c.02.15-.1.28-.25.28H9a2 2 0 0 1-2-2v-2.22c0-1.57-.67-3.05-1.53-4.37A15.85 15.85 0 0 1 3 5Z\"/>"},
+    {0xE734, /* nitro: the wheel */
+     "<path d=\"M16.23 12c0 1.29-.95 2.25-2.22 2.25A2.18 2.18 0 0 1 11.8 12c0-1.29.95-2.25 2.22-2.25 1.27 0 2.22.96 2.22 "
+     "2.25ZM23 12c0 5.01-4 9-8.99 9a8.93 8.93 0 0 1-8.75-6.9H3.34l-.9-4.2H5.3c.26-.96.68-1.890 1.21-2.7H1.89L1 3h12.74C19.13 "
+     "3 23 6.99 23 12Zm-4.26 0c0-2.67-2.1-4.8-4.73-4.8A4.74 4.74 0 0 0 9.28 12c0 2.67 2.1 4.8 4.73 4.8a4.74 4.74 0 0 0 "
+     "4.73-4.8Z\"/>"},
+    {0xE719, /* shop: a storefront */
+     "<path d=\"M2.63 4.19A3 3 0 0 1 5.53 2H7a1 1 0 0 1 1 1v3.98a3.07 3.07 0 0 1-.3 1.35A2.97 2.97 0 0 1 4.98 10c-2 "
+     "0-3.44-1.9-2.9-3.83l.55-1.98ZM10 2a1 1 0 0 0-1 1v4a3 3 0 0 0 3 3 3 3 0 0 0 3-2.97V3a1 1 0 0 0-1-1h-4ZM17 2a1 1 0 0 "
+     "0-1 1v3.98a3.65 3.65 0 0 0 0 .05A2.95 2.95 0 0 0 19.02 10c2 0 3.44-1.9 2.9-3.83l-.55-1.98A3 3 0 0 0 18.47 2H17Z\"/>"
+     "<path d=\"M21 11.42V19a3 3 0 0 1-3 3h-2.75a.25.25 0 0 1-.25-.25V16a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v5.75c0 "
+     ".14-.11.25-.25.25H6a3 3 0 0 1-3-3v-7.58c0-.18.2-.3.37-.24a4.46 4.46 0 0 0 4.94-1.1c.1-.12.3-.12.4 0a4.49 4.49 0 0 0 "
+     "6.58 0c.1-.12.3-.12.4 0a4.45 4.45 0 0 0 4.94 1.1c.17-.07.37.06.37.24Z\"/>"},
+    {0xE7C1, /* quests: a laurel */
+     "<path d=\"M7.5 21.7a8.95 8.95 0 0 1 9 0 1 1 0 0 0 1-1.73c-.6-.35-1.24-.64-1.9-.87.54-.3 1.05-.65 1.52-1.07a3.98 "
+     "3.98 0 0 0 5.49-1.8.77.77 0 0 0-.24-.95 3.98 3.98 0 0 0-2.02-.76A4 4 0 0 0 23 10.47a.76.76 0 0 0-.71-.71 4.06 4.06 0 "
+     "0 0-1.6.22 3.99 3.99 0 0 0 .54-5.35.77.77 0 0 0-.95-.24c-.75.36-1.370.95-1.77 1.67V6a4 4 0 0 0-4.9-3.9.77.77 0 0 "
+     "0-.6.72 4 4 0 0 0 3.7 4.17c.89 1.3 1.3 2.95 1.3 4.51 0 3.66-2.75 6.5-6 6.5s-6-2.84-6-6.5c0-1.56.41-3.21 1.3-4.51A4 4 "
+     "0 0 0 11 2.82a.77.77 0 0 0-.6-.72 4.01 4.01 0 0 0-4.9 3.96A4.02 4.02 0 0 0 3.73 4.4a.77.77 0 0 0-.95.24 3.98 3.98 0 "
+     "0 0 .55 5.35 4 4 0 0 0-1.6-.22.76.76 0 0 0-.72.71l-.01.28a4 4 0 0 0 2.65 3.77c-.75.06-1.45.33-2.020.76-.3.22-.4.62-.24"
+     ".95a4 4 0 0 0 5.49 1.8c.47.42.98.78 1.53 1.07-.67.23-1.3.52-1.91.87a1 1 0 1 0 1 1.73Z\"/>"},
+    {0xE8BD, /* a speech bubble */
+     "<path d=\"M12 22a10 10 0 1 0-8.45-4.64c.13.19.11.44-.04.61l-2.06 2.37A1 1 0 0 0 2.2 22H12Z\"/>"},
+    {0xE715, /* the inbox */
+     "<path fill-rule=\"evenodd\" d=\"M5 2a3 3 0 0 0-3 3v14a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3V5a3 3 0 0 0-3-3H5ZM4 5.5C4 "
+     "4.67 4.67 4 5.5 4h13c.83 0 1.5.67 1.5 1.5v6c0 .83-.67 1.5-1.5 1.5h-2.65c-.5 0-.85.5-.85 1a3 3 0 1 1-6 0c0-.5-.35-1-.85"
+     "-1H5.5A1.5 1.5 0 0 1 4 11.5v-6Z\"/>"},
+    {0xE897, /* help: a disc with a question mark cut out */
+     "<path fill-rule=\"evenodd\" d=\"M12 23a11 11 0 1 0 0-22 11 11 0 0 0 0 22Zm-.28-16c-.98 0-1.81.47-2.27 1.14A1 1 0 1 1 "
+     "7.8 7.01 4.73 4.73 0 0 1 11.72 5c2.5 0 4.65 1.88 4.65 4.38 0 2.1-1.54 3.77-3.52 4.24l.14 1a1 1 0 0 1-1.98.27l-.28-2a1 "
+     "1 0 0 1 .99-1.14c1.540 0 2.65-1.14 2.65-2.38 0-1.23-1.1-2.37-2.65-2.37ZM13 17.88a1.13 1.13 0 1 1-2.25 0 1.13 1.13 0 0 "
+     "1 2.25 0Z\"/>"},
+    {0xE8F1, /* a speech bubble with a plus: new group message */
+     "<path d=\"M19 14a1 1 0 0 1 1 1v3h3a1 1 0 1 1 0 2h-3v3a1 1 0 1 1-2 0v-3h-3a1 1 0 1 1 0-2h3v-3a1 1 0 0 1 1-1Z\"/>"
+     "<path d=\"M20.76 12.57c.4.3 1.23.13 1.24-.37V12a10 10 0 1 0-18.44 5.36c.12.19.1.44-.04.61l-2.07 2.37A1 1 0 0 0 2.2 "
+     "22h10c.5-.01.67-.84.37-1.24A3 3 0 0 1 15 16h.5a.5.5 0 0 0 .5-.5V15a3 3 0 0 1 4.76-2.43Z\"/>"},
 };
 
 static struct {
     int id, px;
     r_image_t *img;
-} g_sicons[24];
+} g_sicons[48];
 
 static void sicon(int id, int x, int y, int px, unsigned argb)
 {
@@ -2518,13 +2585,21 @@ static void sicon(int id, int x, int y, int px, unsigned argb)
             break;
         }
     if (!img) {
-        char svg[512];
-        int n = wsprintfA(svg,
-                          "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\">"
-                          "<path fill=\"none\" stroke=\"#fff\" stroke-width=\"2\" stroke-linecap=\"round\" "
-                          "stroke-linejoin=\"round\" d=\"%s\"/></svg>",
-                          k_sicon[id]);
-        if (!(img = r_image_decode(svg, (size_t)n, px)))
+        sb_t svg = {0};
+        sb_add(&svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"");
+        if (id < SI_COUNT) {
+            sb_add(&svg, "><path fill=\"none\" stroke=\"#fff\" stroke-width=\"2\" stroke-linecap=\"round\" "
+                         "stroke-linejoin=\"round\" d=\"");
+            sb_add(&svg, k_sicon[id]);
+            sb_add(&svg, "\"/>");
+        } else {
+            sb_add(&svg, " fill=\"#fff\">");
+            sb_add(&svg, k_dicon[id - SI_COUNT].svg);
+        }
+        sb_add(&svg, "</svg>");
+        img = r_image_decode(svg.data, svg.len, px);
+        sb_free(&svg);
+        if (!img)
             return;
         if (k == (int)ARRAYSIZE(g_sicons)) { /* full: the first goes */
             r_image_free(g_sicons[0].img);
@@ -2535,6 +2610,17 @@ static void sicon(int id, int x, int y, int px, unsigned argb)
         g_sicons[k].img = img;
     }
     r_image_tint(img, x, y, argb);
+}
+
+/* Discord's icon for a Segoe glyph, px wide, centered on (cx, cy). Returns 0 when it has none. */
+static int dicon(const wchar_t *glyph, int cx, int cy, int px, unsigned argb)
+{
+    for (int k = 0; k < (int)ARRAYSIZE(k_dicon); k++)
+        if (glyph && glyph[0] == k_dicon[k].glyph && !glyph[1]) {
+            sicon(SI_COUNT + k, cx - px / 2, cy - px / 2, px, argb);
+            return 1;
+        }
+    return 0;
 }
 
 static void paint_channel_row(unsigned i, int y)
@@ -2756,8 +2842,7 @@ static void paint_home_links(int x0, int y)
         int ry = y + k * S(NAV_ROW), sel = g_ui.guild < 0 && g_ui.channel < 0 && g_ui.home_page == k;
         int hov = g_ui.hover_kind == HIT_NAV && g_ui.hover_index == k;
         row_bg(HIT_NAV, k, sel, hov, ARGB(C_SIDE), x0 + S(8), ry + S(1), w, S(NAV_ROW) - S(2), S(8));
-        text_w(g_ui.f_icon_mid, sel || hov ? C_INK : C_MUTED, rect(x0 + S(16), ry, S(24), S(NAV_ROW)), icons[k], -1,
-               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        dicon(icons[k], x0 + S(28), ry + S(NAV_ROW) / 2, S(19), sel || hov ? ARGB(C_INK) : ARGB(C_MUTED));
         text(g_ui.f_nav, sel || hov ? C_INK : C_MUTED, rect(x0 + S(52), ry, w - S(52), S(NAV_ROW)), labels[k],
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
@@ -3440,6 +3525,8 @@ static r_image_t *sticker_image(const char *id, int format)
     wsprintfA(key, "st:%s", id);
     if (format == 4)
         wsprintfA(path, "https://media.discordapp.net/stickers/%s.gif?size=160", id);
+    else if (format == 3) /* Lottie: only the animation's JSON exists */
+        wsprintfA(path, "/stickers/%s.json", id);
     else
         wsprintfA(path, "/stickers/%s.png?size=160", id);
     return image_get(key, path, S(160));
@@ -3767,19 +3854,12 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
     /* Sticker. */
     if (m->sticker_id[0]) {
         y += gap;
-        if (m->sticker_format == 3) { /* Lottie animation: only the name */
-            if (draw)
-                text(g_ui.f_small, C_MUTED, rect(x, y, w, S(18)), m->sticker_name.data ? m->sticker_name.data : "Sticker",
-                     DT_LEFT | DT_SINGLELINE);
-            y += S(18);
-        } else {
-            if (draw && r_visible(y, S(160))) {
-                r_image_t *img = sticker_image(m->sticker_id, m->sticker_format);
-                if (img)
-                    r_image(img, x, y, S(160), S(160), 0);
-            }
-            y += S(160);
+        if (draw && r_visible(y, S(160))) {
+            r_image_t *img = sticker_image(m->sticker_id, m->sticker_format);
+            if (img)
+                r_image(img, x, y, S(160), S(160), 0);
         }
+        y += S(160);
     }
 
     /* A bot's buttons and select menus, row by row. */
@@ -4637,12 +4717,57 @@ static void paint_message(int i, int x0, int y, int w)
     }
 
     if (m->system) {
-        char line[160];
-        text(g_ui.f_body, C_GREEN, rect(x0 + S(16), y + S(16), S(40), S(22)), "\xE2\x86\x92", DT_CENTER | DT_SINGLELINE);
-        /* "Ann joined the server.", "Ann's poll ... has closed." */
-        wsprintfA(line, "%.60s%s%.90s", m->author.data ? m->author.data : "",
-                  m->text.data && m->text.data[0] == '\'' ? "" : " ", m->text.data ? m->text.data : "");
-        text(g_ui.f_body, C_MUTED, rect(tx, y + S(16), tw, S(22)), line, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        /*
+         * As Discord: its icon (a phone for calls, green, red when we missed
+         * it), the author's name in white, the rest muted, then the time.
+         */
+        char before[64] = "", after[120], id[28];
+        const char *name = m->author.data ? m->author.data : "";
+        int missed = 0, x = tx, cw;
+        wchar_t when[64];
+        if (m->call) {
+            wsprintfA(id, " %.24s ", g_ui.model ? g_ui.model->user_id : "");
+            missed = g_ui.model && lstrcmpA(m->author_id, g_ui.model->user_id) &&
+                     !(m->call_people.data && find_in(m->call_people.data, id, 0));
+        }
+        if (m->call)
+            r_text(g_ui.f_icon_tb, missed ? ARGB(C_RED) : ARGB(C_GREEN), x0 + S(16), y + S(16), S(40), S(22), L"\xE717", -1,
+                   R_CENTER | R_VCENTER | R_SINGLE);
+        else
+            text(g_ui.f_body, C_GREEN, rect(x0 + S(16), y + S(16), S(40), S(22)), "\xE2\x86\x92", DT_CENTER | DT_SINGLELINE);
+        if (m->call) {
+            char lasted[48] = "";
+            long long t = m->call_secs;
+            if (m->call == 2) /* Discord's durations: a few seconds, a minute, 5 minutes, an hour, 2 hours */
+                wsprintfA(lasted, " that lasted %s",
+                          t < 45 ? "a few seconds" : t < 90 ? "a minute" : "");
+            if (m->call == 2 && t >= 90 && t < 2700)
+                wsprintfA(lasted, " that lasted %d minutes", (int)((t + 30) / 60));
+            else if (m->call == 2 && t >= 2700 && t < 5400)
+                lstrcpyA(lasted, " that lasted an hour");
+            else if (m->call == 2 && t >= 5400)
+                wsprintfA(lasted, " that lasted %d hours", (int)((t + 1800) / 3600));
+            if (missed)
+                lstrcpyA(before, "You missed a call from ");
+            wsprintfA(after, "%s%s.", missed ? "" : " started a call", lasted);
+        } else {
+            /* "Ann joined the server.", "Ann's poll ... has closed." */
+            wsprintfA(after, "%s%.110s", m->text.data && m->text.data[0] == '\'' ? "" : " ", m->text.data ? m->text.data : "");
+        }
+        if (before[0]) {
+            cw = text_width(g_ui.f_body, before);
+            text(g_ui.f_body, C_MUTED, rect(x, y + S(16), tw, S(22)), before, DT_LEFT | DT_SINGLELINE);
+            x += cw;
+        }
+        cw = text_width(g_ui.f_h, name);
+        text(g_ui.f_h, C_INK, rect(x, y + S(16), tx + tw - x, S(22)), name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        x += cw;
+        cw = text_width(g_ui.f_body, after);
+        text(g_ui.f_body, C_MUTED, rect(x, y + S(16), tx + tw - x, S(22)), after, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        x += cw + S(8);
+        format_time(m->id, when, ARRAYSIZE(when));
+        if (x < tx + tw)
+            text_w(g_ui.f_small, C_FAINT, rect(x, y + S(18), tx + tw - x, S(18)), when, -1, DT_LEFT | DT_SINGLELINE);
         return;
     }
     if (m->grouped != 1) {
@@ -5985,6 +6110,7 @@ static void make_fonts(void)
     g_ui.f_menu = r_font(L"Segoe UI", S(14), FW_MEDIUM, 0);
     g_ui.f_chan = r_font(L"Segoe UI", S(16), FW_MEDIUM, 0);
     g_ui.f_welcome = r_font(L"Segoe UI", S(32), FW_BOLD, 0);
+    g_ui.f_orbs = r_font(L"Segoe UI", S(44), FW_BLACK, 0);
     g_ui.f_gif = r_font(L"Segoe UI", S(10), FW_BOLD, 0);
     /* Discord's marketing headings: heavy italic capitals (Segoe UI Black stands in for its own face). */
     g_ui.f_nitro = r_font(L"Segoe UI", S(64), FW_BLACK, 1);
@@ -6755,6 +6881,268 @@ static void clear_session(void)
     sb_clear(&g_ui.account);
 }
 
+/* ---- Discord's check, drawn over the client until the user finishes it ---- */
+
+#define CHECK_BTN 1
+#define CHECK_BAR 48
+
+static HWND g_check_wnd;
+static HWND g_check_btn;
+static HFONT g_check_font;
+static HHOOK g_check_hook;
+static int g_check_font_dpi;
+static int g_check_live;
+static int g_check_busy;
+static sb_t g_check_line;
+
+static void check_close_click(void);
+static LRESULT CALLBACK check_key_hook(int code, WPARAM wp, LPARAM lp);
+
+static void check_hook(int on)
+{
+    if (on && !g_check_hook)
+        g_check_hook = SetWindowsHookExW(WH_KEYBOARD, check_key_hook, NULL, GetCurrentThreadId());
+    else if (!on && g_check_hook) {
+        UnhookWindowsHookEx(g_check_hook);
+        g_check_hook = NULL;
+    }
+}
+
+static LRESULT CALLBACK check_key_hook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && wp == VK_ESCAPE && (lp & (LPARAM)0x80000000) == 0 && g_check_wnd &&
+        IsWindowVisible(g_check_wnd)) {
+        check_close_click();
+        return 1;
+    }
+    return CallNextHookEx(g_check_hook, code, wp, lp);
+}
+
+static void check_font_update(void)
+{
+    if (g_check_font && g_check_font_dpi == g_ui.dpi)
+        return;
+    if (g_check_font)
+        DeleteObject(g_check_font);
+    g_check_font = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_check_font_dpi = g_ui.dpi;
+    if (g_check_btn && g_check_font)
+        SendMessageW(g_check_btn, WM_SETFONT, (WPARAM)g_check_font, TRUE);
+}
+
+static void check_layout(void)
+{
+    RECT rc, web;
+    int bw, bh;
+
+    if (!g_check_wnd)
+        return;
+    check_font_update();
+    GetClientRect(g_check_wnd, &rc);
+    bw = S(96);
+    bh = S(32);
+    if (g_check_btn)
+        MoveWindow(g_check_btn, rc.right - bw - S(16), S(8), bw, bh, TRUE);
+    web.left = S(8);
+    web.top = S(CHECK_BAR);
+    web.right = rc.right > S(16) ? rc.right - S(8) : rc.right;
+    web.bottom = rc.bottom > S(16) ? rc.bottom - S(8) : rc.bottom;
+    cap_bounds(web, g_ui.dpi);
+}
+
+static void check_place(void)
+{
+    RECT rc;
+
+    if (!g_check_wnd || !g_ui.wnd || !IsWindowVisible(g_check_wnd))
+        return;
+    GetClientRect(g_ui.wnd, &rc);
+    SetWindowPos(g_check_wnd, HWND_TOP, 0, 0, rc.right, rc.bottom, SWP_NOACTIVATE);
+}
+
+static void check_hide(void)
+{
+    check_hook(0);
+    cap_close();
+    if (g_check_wnd)
+        ShowWindow(g_check_wnd, SW_HIDE);
+    sb_clear(&g_check_line);
+}
+
+/* `hide` 0 leaves the window up so the error can be read. The worker is released either way. */
+static void check_finish(const char *token, const char *err, int hide)
+{
+    if (g_check_live) {
+        g_check_live = 0;
+        if (token && token[0])
+            solve_done(token);
+        else
+            solve_fail(err && err[0] ? err : "The check was not completed.");
+    }
+    if (hide) {
+        check_hide();
+        return;
+    }
+    sb_clear(&g_check_line);
+    if (err && err[0])
+        sb_add(&g_check_line, err);
+    if (g_check_btn)
+        SetWindowTextW(g_check_btn, L"Close");
+    cap_close();
+    if (g_check_wnd) {
+        InvalidateRect(g_check_wnd, NULL, FALSE);
+        if (g_check_btn)
+            SetFocus(g_check_btn);
+    }
+}
+
+static void check_close_click(void)
+{
+    if (g_check_busy)
+        return;
+    g_check_busy = 1;
+    if (g_check_live)
+        check_finish(NULL, "The check was cancelled.", 1);
+    else
+        check_finish(NULL, NULL, 1);
+    g_check_busy = 0;
+}
+
+static void check_cap_done(void *ctx, const char *token, const char *err)
+{
+    (void)ctx;
+    if (token && token[0])
+        check_finish(token, NULL, 1);
+    else
+        check_finish(NULL, err && err[0] ? err : "The check was not completed.", 0);
+}
+
+static void check_paint(HWND wnd)
+{
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(wnd, &ps);
+    RECT rc, tr;
+    HGDIOBJ old = NULL;
+
+    GetClientRect(wnd, &rc);
+    FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    check_font_update();
+    if (g_check_font)
+        old = SelectObject(dc, g_check_font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GDI(C_INK));
+    tr = rc;
+    tr.left = S(16);
+    tr.right -= S(120);
+    tr.top = S(8);
+    tr.bottom = S(CHECK_BAR);
+    DrawTextW(dc, L"Discord asked for a check before continuing.", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (g_check_line.len && g_check_line.data) {
+        wchar_t *w = utf8_to_wide(g_check_line.data, g_check_line.len);
+        tr.top = S(CHECK_BAR + 8);
+        tr.right = rc.right - S(16);
+        tr.bottom = rc.bottom - S(16);
+        SetTextColor(dc, GDI(C_WARN));
+        DrawTextW(dc, w, -1, &tr, DT_LEFT | DT_WORDBREAK);
+        mem_free(w);
+    }
+    if (old)
+        SelectObject(dc, old);
+    EndPaint(wnd, &ps);
+}
+
+static LRESULT CALLBACK check_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_SIZE:
+        check_layout();
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == CHECK_BTN)
+            check_close_click();
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE)
+            check_close_click();
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (g_check_btn)
+            SetFocus(g_check_btn);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        check_paint(wnd);
+        return 0;
+    case WM_DESTROY:
+        check_hook(0);
+        return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+static void check_ensure(void)
+{
+    if (g_check_wnd || !g_ui.wnd)
+        return;
+    g_check_wnd = CreateWindowExW(0, L"SilicordCheck", L"", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0,
+                                  g_ui.wnd, NULL, NULL, NULL);
+    g_check_btn = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, g_check_wnd,
+                                  (HMENU)(INT_PTR)CHECK_BTN, NULL, NULL);
+}
+
+static int check_field(json_t obj, const char *key, sb_t *out)
+{
+    json_t v;
+
+    return json_get(obj, key, &v) && json_type(v) == JSON_STRING && json_str(v, out);
+}
+
+static void show_check(const sb_t *payload)
+{
+    json_t root, invis;
+    sb_t service = {0}, sitekey = {0}, rqdata = {0};
+    cap_req_t req;
+    RECT web;
+
+    if (!payload || !payload->data || !json_parse(payload->data, payload->len, &root) ||
+        !check_field(root, "sitekey", &sitekey)) {
+        check_hide();
+        solve_fail("Discord's check could not be read.");
+        goto done;
+    }
+    check_field(root, "service", &service);
+    check_field(root, "rqdata", &rqdata);
+    req.service = service.len ? service.data : "hcaptcha";
+    req.sitekey = sitekey.data;
+    req.rqdata = rqdata.len ? rqdata.data : "";
+    req.invisible = json_get(root, "invisible", &invis) && json_type(invis) == JSON_TRUE;
+    check_ensure();
+    if (!g_check_wnd) {
+        solve_fail("Could not show the check. Install the Microsoft Edge WebView2 runtime.");
+        goto done;
+    }
+    sb_clear(&g_check_line);
+    SetWindowTextW(g_check_btn, L"Cancel");
+    g_check_live = 1;
+    check_hook(1);
+    ShowWindow(g_check_wnd, SW_SHOW);
+    check_place();
+    GetClientRect(g_check_wnd, &web);
+    web.left = S(8);
+    web.top = S(CHECK_BAR);
+    web.right = web.right > S(16) ? web.right - S(8) : web.right;
+    web.bottom = web.bottom > S(16) ? web.bottom - S(8) : web.bottom;
+    SetFocus(g_check_btn);
+    if (!cap_open(g_check_wnd, web, g_ui.dpi, &req, check_cap_done, NULL))
+        check_finish(NULL, "Could not show the check. Install the Microsoft Edge WebView2 runtime.", 0);
+done:
+    sb_free(&service);
+    sb_free(&sitekey);
+    sb_free(&rqdata);
+}
+
 /* ---- Messages from workers ---- */
 
 static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
@@ -6939,6 +7327,9 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
             g_ui.pending_dm[0] = 0;
             go_to_channel(map_channel(g_ui.model, s));
         }
+        break;
+    case UI_CAPTCHA:
+        show_check(p);
         break;
     case UI_IMAGE: {
         image_t *im = image_find(s);
@@ -11358,13 +11749,27 @@ typedef struct {
     int minutes;                      /* the task: play this long */
     int orbs;                         /* the reward is Orbs, this many */
     int state;                  /* 0 available, 1 accepted, 2 completed */
+    char starts[24], expires[24], enrolled[24]; /* ISO dates, compared as text for sorting */
+    int reward_type;            /* Discord's: 1 code, 2 in game, 3 collectible, 4 Orbs */
+    int watch;                  /* the task is a video to watch, not a game to play */
 } quest_t;
 
 static struct {
     sb_t strings;
     quest_t *v;
     int n, scroll, height, hover;
-} g_quests = {.hover = -1};
+    int tab;     /* 0 All Quests, 1 Claimed Quests */
+    int balance; /* our Orbs, -1 while unknown */
+    int sort;    /* QS_* */
+    int filter;  /* QF_* bits; none: all of them */
+} g_quests = {.hover = -1, .balance = -1};
+
+/* quests_hit()'s answers besides a card's index */
+enum { QH_TAB_ALL = -10, QH_TAB_CLAIMED = -11, QH_EXPLORE = -20, QH_TERMS = -21, QH_SORT = -30, QH_FILTER = -31, QH_CLEAR = -32 };
+/* Discord's sorts and filters of the grid */
+enum { QS_SUGGESTED, QS_MOST_RECENT, QS_EXPIRING, QS_STARTED, QS_COUNT };
+static const char *const k_quest_sorts[QS_COUNT] = {"Suggested", "Most Recent", "Expiring Soon", "Started"};
+enum { QF_ORBS = 1, QF_COLLECTIBLE = 2, QF_IN_GAME = 4, QF_PLAY = 8, QF_WATCH = 16 };
 
 static unsigned quest_str(json_t obj, const char *key)
 {
@@ -11405,12 +11810,25 @@ static void quest_date(const char *iso, char *out, int size)
 }
 
 /* Returns how many quests are still running, -1 if the answer could not be read. */
-static int quests_parse(const sb_t *json)
+static int quests_parse(const sb_t *all)
 {
     json_t root, list, q, config, v, msgs, assets, rewards, rlist, r, st;
     json_iter_t it, rit;
     SYSTEMTIME now;
     char now_iso[32];
+    sb_t whole = *all, *json = &whole;
+    size_t end = 0;
+
+    /* the quests, then (after a NUL) our Orbs balance: {"balance": n} */
+    while (end < all->len && all->data[end])
+        end++;
+    g_quests.balance = -1;
+    if (end < all->len) {
+        long long b;
+        if (json_parse(all->data + end + 1, all->len - end - 1, &root) && json_get(root, "balance", &v) && json_int(v, &b))
+            g_quests.balance = (int)b;
+        whole.len = end;
+    }
 
     sb_free(&g_quests.strings);
     mem_free(g_quests.v);
@@ -11436,6 +11854,9 @@ static int quests_parse(const sb_t *json)
         if (json_get(q, "id", &v))
             json_raw(v, x->id, sizeof x->id);
         quest_date(ends, x->ends, sizeof x->ends);
+        lstrcpynA(x->expires, ends, sizeof x->expires);
+        if (json_get(config, "starts_at", &v))
+            json_raw(v, x->starts, sizeof x->starts);
         if (json_get(config, "messages", &msgs)) {
             x->name = quest_str(msgs, "quest_name");
             x->game = quest_str(msgs, "game_title");
@@ -11462,8 +11883,15 @@ static int quests_parse(const sb_t *json)
             json_t tc, tasks, task;
             json_iter_t tit;
             if (json_get(config, "task_config_v2", &tc) && json_get(tc, "tasks", &tasks)) {
+                json_t key;
+                char kind[32];
+                task.p = NULL;
                 json_iter(tasks, &tit);
-                if (json_next(&tit, NULL, &task) && json_get(task, "target", &v)) {
+                if (json_next(&tit, &key, &task)) {
+                    json_raw(key, kind, sizeof kind);
+                    x->watch = kind[0] == 'W'; /* WATCH_VIDEO, WATCH_VIDEO_ON_MOBILE */
+                }
+                if (task.p && json_get(task, "target", &v)) {
                     long long secs = 0;
                     json_int(v, &secs);
                     x->minutes = (int)((secs + 59) / 60);
@@ -11475,6 +11903,11 @@ static int quests_parse(const sb_t *json)
             if (json_next(&rit, NULL, &r)) {
                 if (json_get(r, "messages", &msgs))
                     x->reward = quest_str(msgs, "name");
+                if (json_get(r, "type", &v)) {
+                    long long t = 0;
+                    json_int(v, &t);
+                    x->reward_type = (int)t;
+                }
                 if (json_get(r, "orb_quantity", &v)) {
                     long long o = 0;
                     json_int(v, &o);
@@ -11493,6 +11926,8 @@ static int quests_parse(const sb_t *json)
                 x->state = 2;
             else if (json_get(st, "enrolled_at", &v) && json_type(v) == JSON_STRING)
                 x->state = 1;
+            if (json_get(st, "enrolled_at", &v) && json_type(v) == JSON_STRING)
+                json_raw(v, x->enrolled, sizeof x->enrolled);
         }
         g_quests.n++;
     }
@@ -11513,6 +11948,61 @@ static int quests_view(void)
 #define QUEST_HERO_H 150
 #define QUEST_HERO_BANNER_H 500 /* the featured quest's banner on top of the page */
 
+/* Whether quest k shows under the chosen tab and filters. */
+static int quest_shown(const quest_t *q)
+{
+    int f = g_quests.filter, reward = f & (QF_ORBS | QF_COLLECTIBLE | QF_IN_GAME), task = f & (QF_PLAY | QF_WATCH);
+
+    if ((q->state == 2) != (g_quests.tab == 1))
+        return 0; /* the tab's own: claimed ones apart */
+    if (reward && !((reward & QF_ORBS && q->reward_type == 4) || (reward & QF_COLLECTIBLE && q->reward_type == 3) ||
+                    (reward & QF_IN_GAME && (q->reward_type == 1 || q->reward_type == 2))))
+        return 0;
+    if (task && !((task & QF_WATCH && q->watch) || (task & QF_PLAY && !q->watch)))
+        return 0;
+    return 1;
+}
+
+/* Does a go before b in the chosen sort (Suggested: as Discord sent them)? */
+static int quest_before(const quest_t *a, const quest_t *b)
+{
+    switch (g_quests.sort) {
+    case QS_MOST_RECENT: return lstrcmpA(a->starts, b->starts) > 0;
+    case QS_EXPIRING: return lstrcmpA(a->expires, b->expires) < 0;
+    case QS_STARTED: return lstrcmpA(a->enrolled, b->enrolled) > 0;
+    }
+    return 0;
+}
+
+/* The quests to show, in order: indexes into g_quests.v. Returns how many. */
+static int quests_order(int *out)
+{
+    int n = 0;
+
+    for (int k = 0; k < g_quests.n; k++) {
+        int i = n;
+        if (!quest_shown(&g_quests.v[k]))
+            continue;
+        while (i > 0 && quest_before(&g_quests.v[k], &g_quests.v[out[i - 1]])) { /* stable insertion */
+            out[i] = out[i - 1];
+            i--;
+        }
+        out[i] = k;
+        n++;
+    }
+    return n;
+}
+
+/* The two buttons right of the grid's title: the sort (its name and a chevron) and Filter. */
+static void quests_controls(int x, int y, int cw, RECT *sort, RECT *filter)
+{
+    int fw = S(12) + text_width(g_ui.f_nav, "Filter") + S(8) + S(18) + S(12);
+    int sw = S(12) + text_width(g_ui.f_nav, k_quest_sorts[g_quests.sort]) + S(8) + S(16) + S(12);
+
+    *filter = rect(x + cw - fw, y, fw, S(34));
+    *sort = rect(filter->left - S(12) - sw, y, sw, S(34));
+}
+
 /* Lays the Quests out: paints them, or returns the card whose button is at (hx, hy) (-1 if none). */
 static int quests_walk(int x0, int w, int draw, int hx, int hy)
 {
@@ -11528,69 +12018,81 @@ static int quests_walk(int x0, int w, int draw, int hx, int hy)
     cardw = (cw - (cols - 1) * S(QUEST_GAP)) / cols;
     {
         /*
-         * Discord's hero banner on top (at least 500 high, 56 above the rest):
-         * the first quest still to take, its picture, its partner's logotype,
-         * what it gives and its button.
+         * Discord's banner on top, as its window shows it: 500 high, black
+         * turning to navy in its lower third, "Introducing Discord Orbs" in
+         * heavy capitals, a line, then its two buttons stacked.
          */
-        int f = -1, hh = S(QUEST_HERO_BANNER_H);
-        for (int k = 0; k < g_quests.n && f < 0; k++)
-            if (g_quests.v[k].state != 2)
-                f = k;
-        if (f >= 0) {
-            const quest_t *q = &g_quests.v[f];
-            RECT b = rect(x + S(40), y + hh - S(40) - S(40), S(180), S(40));
-            if (!draw) {
-                if (hx >= b.left && hx < b.right && hy >= b.top && hy < b.bottom && hy >= S(HEADER_H))
-                    return f;
-            } else if (r_visible(y, hh)) {
-                r_image_t *hero = shop_image(quest_s(q->hero), cw), *logo = shop_image(quest_s(q->logo), S(480));
-                char line[200];
-                int ty;
-                r_round(x, y, cw, hh, S(16), 0xFF0A0A0Cu);
-                if (hero) {
-                    r_clip(x, y, cw, hh);
-                    r_image_cover(hero, x, y, cw, hh, S(16));
-                    r_unclip();
-                }
-                /* the lower half darkens for the words */
-                r_round_gradient(x, y + hh / 3, cw, hh - hh / 3, S(16), 0x00000000u, 0xE6000000u);
-                ty = b.top - S(24) - S(20) - S(30) - S(20);
-                if (logo) {
-                    int iw, ih, lh = S(96), lw;
-                    r_image_size(logo, &iw, &ih);
-                    lw = ih ? iw * lh / ih : lh;
-                    if (lw > S(320)) {
-                        lw = S(320);
-                        lh = iw ? ih * lw / iw : lh;
-                    }
-                    r_image(logo, x + S(40), ty - S(16) - lh, lw, lh, 0);
-                }
-                wsprintfA(line, "Promoted by %.60s \xC2\xB7 Ends %s", quest_s(q->publisher), q->ends);
-                text(g_ui.f_small, C_TEXT, rect(x + S(40), ty, cw - S(80), S(20)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                text(g_ui.f_h1x, C_INK, rect(x + S(40), ty + S(20), cw - S(80), S(30)), quest_s(q->name),
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                if (q->minutes)
-                    wsprintfA(line, "Claim %.80s \xC2\xB7 Play %.60s for %d minutes", quest_s(q->reward), quest_s(q->game), q->minutes);
-                else
-                    wsprintfA(line, "Claim %.120s", quest_s(q->reward));
-                text(g_ui.f_body, C_TEXT, rect(x + S(40), ty + S(50), cw - S(80), S(20)), line,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                {
-                    float t = tween_on(TW_QUEST, 1000, g_quests.hover == f, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
-                    r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(8), lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, t));
-                    text(g_ui.f_small_mid, C_INK, b, q->state == 1 ? "In Progress" : "Accept Quest", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
+        int hh = S(QUEST_HERO_BANNER_H), bx = x + S(32), bw1, bw2;
+        RECT b1, b2;
+        bw1 = text_width(g_ui.f_body, "Explore Orbs Exclusives") + S(32);
+        bw2 = text_width(g_ui.f_body, "Discord Orbs Terms") + S(32);
+        b2 = rect(bx, y + hh - S(34) - S(38), bw2, S(38));
+        b1 = rect(bx, b2.top - S(10) - S(38), bw1, S(38));
+        if (!draw) {
+            if (hy >= S(HEADER_H) && hx >= b1.left && hx < b1.right && hy >= b1.top && hy < b1.bottom)
+                return QH_EXPLORE;
+            if (hy >= S(HEADER_H) && hx >= b2.left && hx < b2.right && hy >= b2.top && hy < b2.bottom)
+                return QH_TERMS;
+        } else if (r_visible(y, hh)) {
+            int ty, th;
+            r_round(x, y, cw, hh, S(16), 0xFF000000u);
+            r_round_gradient(x, y + hh * 2 / 3, cw, hh - hh * 2 / 3, S(16), 0xFF000000u, 0xFF16193Cu);
+            r_fill(x, y + hh * 2 / 3, cw, S(16), 0xFF000000u); /* the gradient's top corners stay square */
+            r_round_outline(x, y, cw, hh, S(16), S(1) > 1 ? S(1) : 1, 0xFF1E1E20u);
+            th = r_text_height(g_ui.f_orbs, L"INTRODUCING DISCORD ORBS", -1, cw * 2 / 3);
+            ty = b1.top - S(26) - S(20) - S(12) - th;
+            r_text(g_ui.f_orbs, 0xFFF2F3F5u, bx, ty, cw * 2 / 3, th, L"INTRODUCING DISCORD ORBS", -1, R_WRAP);
+            text(g_ui.f_body, C_TEXT, rect(bx, ty + th + S(12), cw - S(64), S(20)), "Reward Your Play. Earn through Quests. Spend in the Shop.",
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            {
+                float t1 = tween_on(TW_QUEST, 1001, g_quests.hover == QH_EXPLORE, TW_FAST, b1.left, b1.top, bw1, S(38));
+                float t2 = tween_on(TW_QUEST, 1002, g_quests.hover == QH_TERMS, TW_FAST, b2.left, b2.top, bw2, S(38));
+                r_round(b1.left, b1.top, bw1, S(38), S(8), lerp_argb(0xFFFFFFFFu, 0xFFE3E5E8u, t1));
+                r_text(g_ui.f_body, 0xFF000000u, b1.left, b1.top, bw1, S(38), L"Explore Orbs Exclusives", -1, R_CENTER | R_VCENTER | R_SINGLE);
+                r_round(b2.left, b2.top, bw2, S(38), S(8), lerp_argb(0xFF070814u, 0xFF14162Au, t2));
+                r_round_outline(b2.left, b2.top, bw2, S(38), S(8), S(1) > 1 ? S(1) : 1, 0xFF2A2D40u);
+                text(g_ui.f_body, C_INK, b2, "Discord Orbs Terms", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
-            y += hh + S(56);
+        }
+        y += hh + S(56);
+    }
+    lstrcpyA(title, g_quests.tab ? "Claimed Quests" : "Quests Available");
+    {
+        /* the title, then Discord's sort and Filter at its right */
+        RECT sb, fb;
+        quests_controls(x, y - S(1), cw, &sb, &fb);
+        if (!draw) {
+            if (hy >= S(HEADER_H) && hx >= sb.left && hx < sb.right && hy >= sb.top && hy < sb.bottom)
+                return QH_SORT;
+            if (hy >= S(HEADER_H) && hx >= fb.left && hx < fb.right && hy >= fb.top && hy < fb.bottom)
+                return QH_FILTER;
+        } else {
+            text(g_ui.f_h2, C_INK, rect(x, y, cw, S(32)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            for (int b = 0; b < 2; b++) {
+                RECT r = b ? fb : sb;
+                int hot = g_quests.hover == (b ? QH_FILTER : QH_SORT), on = b && g_quests.filter;
+                r_round(r.left, r.top, r.right - r.left, S(34), S(8), hot ? 0xFF1A1A1Cu : 0xFF0A0A0Cu);
+                r_round_outline(r.left, r.top, r.right - r.left, S(34), S(8), S(1) > 1 ? S(1) : 1, on ? ARGB(C_BRAND) : 0xFF1E1E20u);
+                text(g_ui.f_nav, C_INK, rect(r.left + S(12), r.top, r.right - r.left, S(34)), b ? "Filter" : k_quest_sorts[g_quests.sort],
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                if (b)
+                    r_text(g_ui.f_icon_tb, ARGB(C_INK), r.right - S(12) - S(18), r.top, S(18), S(34), L"\xE9E9", -1,
+                           R_CENTER | R_VCENTER | R_SINGLE); /* sliders */
+                else
+                    sicon(SI_CHEVRON_DOWN, r.right - S(12) - S(16), r.top + S(9), S(16), ARGB(C_INK));
+            }
         }
     }
-    lstrcpyA(title, "All Quests");
-    if (draw)
-        text(g_ui.f_h1x, C_INK, rect(x, y, cw, S(32)), title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    y += S(32) + S(24);
-    for (int k = 0; k < g_quests.n; k++) {
+    y += S(32) + S(24); /* the grid's margin above it */
+    int order[256], shown = quests_order(order);
+    int vi = 0; /* the cards of the chosen tab, sorted and filtered */
+    for (int o = 0; o < shown && o < (int)ARRAYSIZE(order); o++) {
+        int k = order[o];
         const quest_t *q = &g_quests.v[k];
-        int cx = x + (k % cols) * (cardw + S(QUEST_GAP)), cy = y + (k / cols) * (S(QUEST_H) + S(QUEST_GAP));
+        int cx, cy;
+        cx = x + (vi % cols) * (cardw + S(QUEST_GAP));
+        cy = y + (vi / cols) * (S(QUEST_H) + S(QUEST_GAP));
+        vi++;
         RECT b = rect(cx + S(16), cy + S(QUEST_H) - S(16) - S(36), cardw - S(32), S(36));
         if (!draw) {
             if (hx >= b.left && hx < b.right && hy >= b.top && hy < b.bottom && hy >= S(HEADER_H))
@@ -11665,18 +12167,67 @@ static int quests_walk(int x0, int w, int draw, int hx, int hy)
             text(g_ui.f_small_mid, C_INK, b, labels[q->state], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
-    g_quests.height = y + ((g_quests.n + cols - 1) / cols) * (S(QUEST_H) + S(QUEST_GAP)) + g_quests.scroll - S(HEADER_H);
+    if (!shown) {
+        /* nothing to show: Discord's line, and while filters hide them, the way back */
+        RECT cb = rect(x + (cw - S(150)) / 2, y + S(40), S(150), S(38));
+        if (!draw) {
+            if (g_quests.filter && hx >= cb.left && hx < cb.right && hy >= cb.top && hy < cb.bottom && hy >= S(HEADER_H))
+                return QH_CLEAR;
+        } else {
+            text(g_ui.f_body, C_MUTED, rect(x, y, cw, S(24)), "Sorry adventurer, there are no Quests for you right now",
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (g_quests.filter) {
+                r_round(cb.left, cb.top, cb.right - cb.left, S(38), S(8), g_quests.hover == QH_CLEAR ? 0xFF2E2E31u : 0xFF242426u);
+                text(g_ui.f_body, C_INK, cb, "Clear all filters", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        y += S(100);
+    }
+    g_quests.height = y + ((shown + cols - 1) / cols) * (S(QUEST_H) + S(QUEST_GAP)) + g_quests.scroll - S(HEADER_H);
     return -1;
+}
+
+/* The header's tabs, as Discord's: where each one's label sits. */
+static RECT quests_tab(int x0, int k)
+{
+    static const char *const labels[2] = {"All Quests", "Claimed Quests"};
+    int x = x0 + S(16) + S(24) + S(32);
+
+    for (int i = 0; i < k; i++)
+        x += text_width(g_ui.f_nav, labels[i]) + S(32);
+    return rect(x, 0, text_width(g_ui.f_nav, labels[k]), S(HEADER_H));
 }
 
 static void paint_quests(RECT rc, int x0, int w)
 {
+    static const char *const labels[2] = {"All Quests", "Claimed Quests"};
+
     fill(x0, S(HEADER_H) - S(1), w, S(1) > 1 ? S(1) : 1, C_LINE);
-    text_w(g_ui.f_icon_mid, C_MUTED, rect(x0 + S(16), 0, S(24), S(HEADER_H)), L"\xE7C1", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    text(g_ui.f_h, C_INK, rect(x0 + S(48), 0, w - S(64), S(HEADER_H)), "Quests", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text_w(g_ui.f_icon_mid, C_INK, rect(x0 + S(16), 0, S(24), S(HEADER_H)), L"\xE7C1", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    for (int k = 0; k < 2; k++) {
+        /* Discord's tabs: the chosen one underlined */
+        RECT t = quests_tab(x0, k);
+        int on = g_quests.tab == k, hov = g_quests.hover == QH_TAB_ALL - k;
+        text(g_ui.f_nav, on || hov ? C_INK : C_TEXT, t, labels[k], DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (on)
+            r_fill(t.left, S(HEADER_H) - S(2), t.right - t.left, S(2), ARGB(C_INK));
+    }
+    if (g_quests.balance >= 0) {
+        /* our Orbs at the right, an orb then how many */
+        char n[24];
+        int tw, cw, cx;
+        wsprintfA(n, "%d", g_quests.balance);
+        tw = text_width(g_ui.f_nav, n);
+        cw = S(8) + S(18) + S(6) + tw + S(10);
+        cx = x0 + w - S(16) - cw;
+        r_round(cx, (S(HEADER_H) - S(30)) / 2, cw, S(30), S(8), 0xFF121213u);
+        r_circle(cx + S(8), (S(HEADER_H) - S(18)) / 2, S(18), 0xFFFFFFFFu);
+        sicon(SI_ORB, cx + S(8) + S(3), (S(HEADER_H) - S(12)) / 2, S(12), 0xFF000000u);
+        text(g_ui.f_nav, C_INK, rect(cx + S(8) + S(18) + S(6), 0, tw + S(4), S(HEADER_H)), n, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
     if (g_ui.quests_state != 2 || !g_quests.n) {
         text(g_ui.f_body, C_MUTED, rect(x0, rc.bottom / 2 - S(12), w, S(24)),
-             g_ui.quests_state == 3 ? "Quests could not be loaded." : g_ui.quests_state == 2 ? "No Quests right now. Check back soon!"
+             g_ui.quests_state == 3 ? "Quests could not be loaded." : g_ui.quests_state == 2 ? "Sorry adventurer, there are no Quests for you right now"
                                                                                              : "Loading Quests\xE2\x80\xA6",
              DT_CENTER | DT_SINGLELINE);
         return;
@@ -11690,8 +12241,16 @@ static int quests_hit(int x, int y)
 {
     int x0 = S(RAIL_W + SIDE_W);
 
-    if (!quests_view() || g_ui.quests_state != 2 || x < x0 || y < S(HEADER_H))
+    if (!quests_view() || g_ui.quests_state != 2 || x < x0)
         return -1;
+    if (y < S(HEADER_H)) {
+        for (int k = 0; k < 2; k++) {
+            RECT t = quests_tab(x0, k);
+            if (x >= t.left - S(8) && x < t.right + S(8))
+                return QH_TAB_ALL - k;
+        }
+        return -1;
+    }
     return quests_walk(x0, main_right() - x0, 0, x, y);
 }
 
@@ -11904,7 +12463,8 @@ static void friend_button(int bx, int by, const wchar_t *glyph, int row_hovered,
     if (row_hovered)
         r_circle(bx, by, S(36), hot ? 0xFF1E1E20u : 0xFF0A0A0Cu);
     if (glyph) {
-        r_text(g_ui.f_icon_mid, ink, bx, by, S(36), S(36), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
+        if (!dicon(glyph, bx + S(18), by + S(18), S(19), ink))
+            r_text(g_ui.f_icon_mid, ink, bx, by, S(36), S(36), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
     } else {
         int d = S(4) > 3 ? S(4) : 3, cx = bx + (S(36) - d) / 2;
         for (int k = -1; k <= 1; k++)
@@ -12007,7 +12567,11 @@ static void paint_active_now(RECT rc, int x, int w)
                 lstrcpynA(lines[nlines++], pr->state.data, 300);
             if (pr->start && now > pr->start) {
                 long long el = (now - pr->start) / 1000;
-                wsprintfA(lines[nlines++], "%02d:%02d:%02d", (int)(el / 3600), (int)(el / 60 % 60), (int)(el % 60));
+                /* "19:10 elapsed", hours only once there are some: "10:43:04 elapsed" */
+                if (el >= 3600)
+                    wsprintfA(lines[nlines++], "%02d:%02d:%02d elapsed", (int)(el / 3600), (int)(el / 60 % 60), (int)(el % 60));
+                else
+                    wsprintfA(lines[nlines++], "%02d:%02d elapsed", (int)(el / 60), (int)(el % 60));
                 SetTimer(g_ui.wnd, TIMER_ACTIVE, 1000, NULL);
             }
         }
@@ -12073,7 +12637,7 @@ static void paint_friends(RECT rc, int x0, int w)
     int aw = friends_active_w(w), lw = w - aw, x = x0 + S(16), y;
 
     /* Header: the icon, "Friends", a dot, then the tabs; Add Friend is a blurple button. */
-    text_w(g_ui.f_icon_mid, C_MUTED, rect(x, 0, S(24), S(HEADER_H)), L"\xE716", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    dicon(L"\xE716", x + S(12), S(HEADER_H) / 2, S(19), ARGB(C_MUTED));
     text(g_ui.f_h, C_INK, rect(x + S(32), 0, S(80), S(HEADER_H)), "Friends", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     x += S(32) + text_width(g_ui.f_h, "Friends") + S(12);
     r_circle(x, S(HEADER_H) / 2 - S(2), S(4), ARGB(C_FAINT));
@@ -12112,8 +12676,7 @@ static void paint_friends(RECT rc, int x0, int w)
             paint_badge(x + tw - S(8), S(HEADER_H) / 2, pending);
         x += tw + S(8);
     }
-    text_w(g_ui.f_icon_mid, g_ui.friend_hover == -30 ? C_INK : C_MUTED, rect(x0 + w - S(16) - S(32), 0, S(32), S(HEADER_H)),
-           L"\xE8F2", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    dicon(L"\xE8F1", x0 + w - S(16) - S(16), S(HEADER_H) / 2, S(19), g_ui.friend_hover == -30 ? ARGB(C_INK) : ARGB(C_MUTED));
     if (aw)
         paint_active_now(rc, x0 + lw, aw);
 
@@ -14761,6 +15324,10 @@ static void send_composer(void)
 
 static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_ESCAPE && g_check_wnd && IsWindowVisible(g_check_wnd)) {
+        check_close_click();
+        return 0;
+    }
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_ui.ac_kind == AC_NONE && shortcut(wp))
         return 0;
     if (msg == WM_CHAR && wp == 5) /* Ctrl+E's control character */
@@ -14955,6 +15522,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+        if (wp == VK_ESCAPE && g_check_wnd && IsWindowVisible(g_check_wnd)) {
+            check_close_click();
+            return 0;
+        }
         if (g_ui.settings_open) {
             if (g_ui.set_record) {
                 if (wp != VK_ESCAPE)
@@ -14981,6 +15552,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
             return 0;
         }
+        check_place();
         clamp_scroll();
         clamp_msg_scroll();
         if (g_ui.settings_open) {
@@ -14994,6 +15566,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         pop_place();
         dm_profile_sync(); /* back from the tray, or fonts rebuilt: the DM's profile returns */
         redraw();
+        return 0;
+    case WM_MOVE:
+        if (g_check_wnd && IsWindowVisible(g_check_wnd))
+            check_layout();
         return 0;
     case WM_COMMAND:
         if ((HWND)lp == g_ui.composer && HIWORD(wp) == EN_CHANGE)
@@ -15212,6 +15788,49 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                     wchar_t url[96];
                     wsprintfW(url, L"https://discord.com/quests/%S", g_quests.v[k].id);
                     ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+                } else if (k == QH_TAB_ALL || k == QH_TAB_CLAIMED) {
+                    g_quests.tab = QH_TAB_ALL - k;
+                    g_quests.scroll = 0;
+                    redraw();
+                } else if (k == QH_EXPLORE) {
+                    on_click(HIT_NAV, HOME_SHOP); /* the Orbs' exclusives are in the Shop */
+                } else if (k == QH_TERMS) {
+                    open_url("https://support.discord.com/hc/en-us/search?query=Discord%20Orbs%20Terms");
+                } else if (k == QH_CLEAR) {
+                    g_quests.filter = 0;
+                    redraw();
+                } else if (k == QH_SORT || k == QH_FILTER) {
+                    /* Discord's sort or filter menu, under its button */
+                    HMENU menu = CreatePopupMenu();
+                    POINT pt = {GET_X_LPARAM(lp) - S(40), GET_Y_LPARAM(lp) + S(24)};
+                    int cmd;
+                    if (k == QH_SORT) {
+                        for (int i = 0; i < QS_COUNT; i++) {
+                            wchar_t w[32];
+                            MultiByteToWideChar(CP_UTF8, 0, k_quest_sorts[i], -1, w, 32);
+                            AppendMenuW(menu, MF_STRING | (g_quests.sort == i ? MF_CHECKED : 0), (UINT_PTR)(i + 1), w);
+                        }
+                        menu_mark(menu, 0, MENU_RADIO);
+                    } else {
+                        static const wchar_t *const names[5] = {L"Orbs", L"Avatar Decoration", L"In-Game Rewards", L"Play", L"Watch"};
+                        for (int i = 0; i < 5; i++) {
+                            if (i == 3)
+                                AppendMenuW(menu, MF_SEPARATOR, 0, NULL); /* Reward, then Quest Type */
+                            AppendMenuW(menu, MF_STRING | (g_quests.filter & (1 << i) ? MF_CHECKED : 0), (UINT_PTR)(i + 1), names[i]);
+                            menu_mark(menu, (UINT)(i + 1), MENU_CHECK);
+                        }
+                    }
+                    ClientToScreen(g_ui.wnd, &pt);
+                    cmd = menu_track(menu, pt.x, pt.y);
+                    DestroyMenu(menu);
+                    if (cmd > 0) {
+                        if (k == QH_SORT)
+                            g_quests.sort = cmd - 1;
+                        else
+                            g_quests.filter ^= 1 << (cmd - 1);
+                        g_quests.scroll = 0;
+                        redraw();
+                    }
                 }
                 return 0;
             }
@@ -15461,7 +16080,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_APP) {
+        if (msg >= UI_QR && msg <= UI_CAPTCHA) {
             on_worker(msg, wp, lp);
             return 0;
         }
@@ -15562,16 +16181,14 @@ static void paint_titlebar(RECT rc)
     tx = (r - tw - iw) / 2;
     if (icon)
         r_image(icon, tx, cy - S(10), S(20), S(20), S(6));
-    else if (glyph)
+    else if (glyph && !dicon(glyph, tx + S(10), cy, S(18), idle))
         r_text(g_ui.f_icon_tb, idle, tx, 0, S(20), S(TITLE_H), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
     r_text(g_ui.f_tb, ARGB(C_TEXT), tx + iw, 0, tw, S(TITLE_H), wt, -1, R_LEFT | R_VCENTER | R_SINGLE | R_ELLIPSIS);
     mem_free(wt);
 
     /* Inbox and help, then the window's buttons. */
-    r_text(g_ui.f_icon_tb, h == TB_INBOX || (g_ui.pins_open && g_ui.pins_inbox) ? hot : idle, r - S(194), 0, S(32),
-           S(TITLE_H), L"\xE715", -1, R_CENTER | R_VCENTER | R_SINGLE);
-    r_text(g_ui.f_icon_tb, h == TB_HELP ? hot : idle, r - S(158), 0, S(32), S(TITLE_H), L"\xE897", -1,
-           R_CENTER | R_VCENTER | R_SINGLE);
+    dicon(L"\xE715", r - S(194) + S(16), cy, S(18), h == TB_INBOX || (g_ui.pins_open && g_ui.pins_inbox) ? hot : idle);
+    dicon(L"\xE897", r - S(158) + S(16), cy, S(18), h == TB_HELP ? hot : idle);
     fill(r - 3 * S(TB_BTN_W) - S(6), cy - S(10), S(1) > 1 ? S(1) : 1, S(20), C_LINE);
     {
         const wchar_t *g[3] = {L"\xE921", IsZoomed(g_ui.top) ? L"\xE923" : L"\xE922", L"\xE8BB"};
@@ -15721,6 +16338,10 @@ static LRESULT CALLBACK frame_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
         tb_click(tb_part(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
         return 0;
+    case WM_MOVE:
+        if (g_ui.wnd)
+            SendMessageW(g_ui.wnd, WM_MOVE, 0, 0);
+        return 0;
     case WM_SIZE:
         if (!g_ui.wnd)
             return 0;
@@ -15788,6 +16409,7 @@ HWND ui_create(HINSTANCE inst)
 
     /* Single-threaded COM on the UI thread: the file dialog needs it (image decoding works either way). */
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    g_ui_thread = GetCurrentThreadId();
     r_init();
 
     wc.cbSize = sizeof wc;
@@ -15813,6 +16435,10 @@ HWND ui_create(HINSTANCE inst)
     RegisterClassExW(&wc);
     wc.lpfnWndProc = menu_proc;
     wc.lpszClassName = L"SilicordMenu";
+    RegisterClassExW(&wc);
+    wc.lpfnWndProc = check_proc;
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = L"SilicordCheck";
     RegisterClassExW(&wc);
 
     /* The frame, then the app inside it under the title bar. */

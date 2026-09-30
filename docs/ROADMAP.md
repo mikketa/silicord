@@ -16,6 +16,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] Allocation-free JSON reader (values are slices of the source buffer)
 - [x] QR code login through the mobile app (passkeys, 2FA and SMS are handled on the phone)
 - [x] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready
+- [x] Web client headers (user agent, `X-Super-Properties`, build number) and an in-window captcha when Discord asks for one
 - [x] Automatic reconnect with backoff, session resume, fresh identify when the session is gone
 
 ## 2. Text client (console)

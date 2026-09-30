@@ -40,6 +40,7 @@ enum {
     UI_SHOP,            /* text = the shop's collectibles-categories JSON (empty on failure) */
     UI_QUESTS,          /* text = the quests/@me JSON (empty on failure) */
     UI_APP,             /* text = an application id, NUL, then its public JSON (empty on failure) */
+    UI_CAPTCHA,         /* JSON challenge: service, sitekey, rqdata, invisible */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -60,7 +61,12 @@ typedef struct {
 HWND ui_create(HINSTANCE inst);
 void ui_show_login(void);
 void ui_show_loading(const char *text);
-void ui_post(UINT msg, sb_t *payload);
+/* 1 when the message was queued. On failure the payload is freed. */
+int ui_post(UINT msg, sb_t *payload);
+/* 1 when the caller is the thread that created the window. */
+int ui_on_ui_thread(void);
+/* The app window, or NULL before ui_create() has created it. */
+HWND ui_window(void);
 void ui_post_model(model_t *model);
 void ui_post_batch(msg_batch_t *batch);
 void ui_post_activity(activity_t *a);

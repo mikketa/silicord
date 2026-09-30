@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-A native Discord client for Windows, written in C and x64 assembly. No embedded browser, no C runtime: just Win32, WinHTTP, DirectWrite and a few kilobytes.
+A native Discord client for Windows, written in C and x64 assembly. No C runtime: Win32, WinHTTP and DirectWrite. When Discord asks for a captcha, that one check is shown with the Edge WebView2 runtime already installed on Windows. The rest of the client does not open a browser.
 
 > **Status: early.** Silicord logs in with a QR code and covers everyday text chat:
 >
@@ -22,7 +22,7 @@ A native Discord client for Windows, written in C and x64 assembly. No embedded 
 
 The official client ships a full Chromium: several processes, hundreds of MB of RAM and CPU usage even when idle. Silicord aims for the opposite:
 
-- a single `.exe` of a few hundred KB, nothing to install
+- one small executable, plus Microsoft's `WebView2Loader.dll` beside it; nothing else to install
 - ~0% CPU when idle (the process sleeps until the next network event)
 - a few MB of RAM
 - a codebase small enough to read end to end
@@ -39,13 +39,13 @@ Silicord is not affiliated with or endorsed by Discord Inc.
 
 ## Download
 
-Get `silicord.exe` from the [latest release](https://github.com/mikketa/silicord/releases/latest). It is a single portable executable: no installer, no dependencies. Release builds are made by GitHub Actions from the tagged commit; see the [Code Signing Policy](#code-signing-policy).
+Get `silicord.exe` and `WebView2Loader.dll` from the [latest release](https://github.com/mikketa/silicord/releases/latest) and put them in the same folder. There is no installer. The Edge WebView2 runtime is the one Windows already has; it starts only while a captcha is on screen. Release builds are made by GitHub Actions from the tagged commit; see the [Code Signing Policy](#code-signing-policy).
 
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
 ## Usage
 
-Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings › Scan QR Code), then confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works.
+Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings › Scan QR Code), then confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works. If Discord asks for a captcha before an action, it opens in the window for you to solve. Silicord does not send that check anywhere else.
 
 The token Discord sends back is stored in the Windows Credential Manager. The power button next to your name logs out and removes it.
 
@@ -71,7 +71,9 @@ cmake --build build
 ctest --test-dir build
 ```
 
-CI builds every push, runs the tests and publishes `silicord.exe` as an artifact.
+Configuring the build downloads Microsoft.Web.WebView2 and copies `WebView2Loader.dll` next to `silicord.exe`. The Edge WebView2 runtime is not downloaded: it is the system one.
+
+CI builds every push, runs the tests and publishes `silicord.exe` and `WebView2Loader.dll` as artifacts.
 
 The platform-independent code (JSON, inflate, markdown, messages, the model, slash commands, APNG...) also builds on Linux, where the same tests and a fuzzer run under AddressSanitizer and UBSan. CI runs them on every push too:
 
@@ -103,12 +105,13 @@ Silicord has no telemetry, analytics or crash reporting, and no server of its ow
 - `media.tenor.com` and `static.klipy.com`: GIFs shown in messages and in the GIF picker
 - `raw.githubusercontent.com`: the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, when a profile uses a display name font not downloaded yet
 
-Every request carries a `Silicord/<version>` user agent with a link to this repository. Links in messages open in your default browser only when you click them.
+Requests to Discord's API, and the websocket upgrades for the gateway, QR login and voice, send the same client properties as the Discord website in Chrome: user agent, `X-Super-Properties` and the site's current build number. Images, fonts and GIFs still use a `Silicord/<version>` user agent. Links in messages open in your default browser only when you click them.
 
 On your computer, Silicord keeps:
 
 - your token, in the Windows Credential Manager (`silicord/token`)
 - its settings, image cache and fonts, in `%LOCALAPPDATA%\Silicord`
+- a WebView2 profile in `%LOCALAPPDATA%\Silicord\WebView2`, created the first time a captcha is shown
 - pasted pictures waiting to be sent, in `%TEMP%\Silicord-paste`, and with `--debug` the log `%TEMP%\silicord-debug.log`
 
 It writes nothing to the registry, adds no startup entry, file association or shell extension, and installs no service. The tray icon only exists while Silicord runs.
@@ -123,7 +126,7 @@ It writes nothing to the registry, adds no startup entry, file association or sh
 
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
-Only `silicord.exe` is signed, as built by the [release workflow](.github/workflows/release.yml) on GitHub Actions from a tagged commit of this repository. It contains no third-party binaries.
+Only `silicord.exe` is signed, as built by the [release workflow](.github/workflows/release.yml) on GitHub Actions from a tagged commit of this repository. It contains no third-party binaries. `WebView2Loader.dll` is Microsoft's loader, placed next to the executable by the build. It is not inside `silicord.exe` and is not part of the signed file.
 
 Team roles:
 

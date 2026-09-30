@@ -11,6 +11,7 @@
 #include "sc_asm.h"
 #include "sha2.h"
 #include "vp8_rtp.h"
+#include "http.h"
 #include "ws.h"
 
 #define MAX_SPEAKERS 128
@@ -639,6 +640,7 @@ static DWORD WINAPI voice_main(LPVOID arg)
 {
     voice_t *v = arg;
     wchar_t host[256];
+    wchar_t headers[1024];
     char narrow[256];
     int i, binary;
     unsigned port = 0;
@@ -655,7 +657,7 @@ static DWORD WINAPI voice_main(LPVOID arg)
         port = INTERNET_DEFAULT_HTTPS_PORT;
     MultiByteToWideChar(CP_UTF8, 0, narrow, -1, host, 256);
     state(v, VOICE_CONNECTING, "Connecting to voice\xE2\x80\xA6");
-    if (!ws_connect(&v->ws, host, (INTERNET_PORT)port, L"/?v=8", NULL)) {
+    if (!http_ws_headers(headers, 1024) || !ws_connect(&v->ws, host, (INTERNET_PORT)port, L"/?v=8", headers)) {
         state(v, VOICE_FAILED, "Could not reach the voice server");
         return 0;
     }
