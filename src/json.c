@@ -71,6 +71,41 @@ static const char *skip_value(const char *p, const char *e, int depth)
     }
 }
 
+/*
+ * Steps over a value of a document json_parse() already checked: strings
+ * are jumped, brackets counted. Much faster than skip_value() on the
+ * large nested values that lookups walk past.
+ */
+static const char *skip_checked(const char *p, const char *e)
+{
+    int depth = 0;
+
+    if (p >= e)
+        return e;
+    if (*p == '"') {
+        const char *q = skip_str(p, e);
+        return q ? q : e;
+    }
+    if (*p != '{' && *p != '[') {
+        while (p < e && is_scalar_char(*p))
+            p++;
+        return p;
+    }
+    for (; p < e; p++) {
+        char c = *p;
+        if (c == '"') {
+            if (!(p = skip_str(p, e)))
+                return e;
+            p--;
+        } else if (c == '{' || c == '[') {
+            depth++;
+        } else if ((c == '}' || c == ']') && --depth == 0) {
+            return p + 1;
+        }
+    }
+    return e;
+}
+
 int json_parse(const char *s, size_t n, json_t *out)
 {
     const char *e = s + n;
@@ -129,7 +164,7 @@ int json_next(json_iter_t *it, json_t *key, json_t *val)
         p = skip_ws(kend, e);
         p = skip_ws(p + 1, e); /* ':' */
     }
-    vend = skip_value(p, e, 0);
+    vend = skip_checked(p, e);
     if (val) {
         val->p = p;
         val->end = vend;
