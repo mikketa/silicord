@@ -22,6 +22,7 @@ enum {
     TYPE_THREAD_CREATED = 18,
     TYPE_CONTEXT_COMMAND = 23,
     TYPE_POLL_RESULT = 46,
+    TYPE_FRIEND_ACCEPTED = 67, /* a DM's first line once two people are friends */
 };
 
 static int is_digit(char c)
@@ -831,7 +832,32 @@ int msg_parse(json_t obj, msg_t *out)
         }
         sb_free(&whom);
     } else if (type == TYPE_CALL) {
+        /* {call: {participants: [ids], ended_timestamp}}: who joined, and how long it lasted */
+        json_t call, people, who;
+        json_iter_t pit;
         set_system(out, "started a call.");
+        out->call = 1;
+        if (json_get(obj, "call", &call)) {
+            if (json_get(call, "participants", &people)) {
+                sb_add(&out->call_people, " ");
+                json_iter(people, &pit);
+                while (json_next(&pit, NULL, &who)) {
+                    char id[24];
+                    json_raw(who, id, sizeof id);
+                    sb_add(&out->call_people, id);
+                    sb_add(&out->call_people, " ");
+                }
+            }
+            if (json_get(call, "ended_timestamp", &v) && json_type(v) == JSON_STRING) {
+                sb_t iso = {0};
+                long long end;
+                json_str(v, &iso);
+                end = msg_iso_ms(iso.data);
+                sb_free(&iso);
+                out->call = 2;
+                out->call_secs = end > snowflake_ms(out->id) ? (end - snowflake_ms(out->id)) / 1000 : 0;
+            }
+        }
     } else if (type == TYPE_CHANNEL_NAME || type == TYPE_THREAD_CREATED) {
         /* The content is the new name. */
         set_system(out, type == TYPE_CHANNEL_NAME ? "changed the channel name: " : "started a thread: ");
@@ -846,6 +872,8 @@ int msg_parse(json_t obj, msg_t *out)
         set_system(out, "boosted the server.");
     } else if (type == TYPE_PIN) {
         set_system(out, "pinned a message.");
+    } else if (type == TYPE_FRIEND_ACCEPTED) {
+        set_system(out, "accepted your friend request.");
     } else if (type != TYPE_DEFAULT && type != TYPE_REPLY && type != TYPE_SLASH_COMMAND &&
                type != TYPE_CONTEXT_COMMAND && !out->text.len && !out->nfiles && !out->nembeds &&
                !out->sticker_id[0] && !out->poll && !out->ncomponents) {
@@ -907,6 +935,7 @@ void msg_free(msg_t *m)
     sb_free(&m->reply);
     sb_free(&m->content);
     sb_free(&m->member_roles);
+    sb_free(&m->call_people);
     msg_free_extras(m);
 }
 

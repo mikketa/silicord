@@ -55,6 +55,17 @@ static void test_system(void)
     expect_text("{\"id\":\"1\",\"type\":2,\"author\":{\"id\":\"6\"},\"mentions\":[{\"id\":\"6\",\"username\":\"bob\"}]}",
                 "left the group.", "group member left");
     expect_text("{\"id\":\"1\",\"type\":3,\"content\":\"\"}", "started a call.", "call");
+    expect_text("{\"id\":\"1\",\"type\":67,\"content\":\"\"}", "accepted your friend request.", "friend request accepted");
+    {
+        /* an ended call: how long it lasted and who joined it */
+        msg_t m = {0};
+        check(parse("{\"id\":\"1191168914227200000\",\"type\":3,\"content\":\"\",\"call\":{\"participants\":[\"5\",\"7\"],"
+                    "\"ended_timestamp\":\"2024-01-01T00:05:00.000000+00:00\"}}",
+                    &m) &&
+                  m.call == 2 && m.call_secs == 300 && str_eq(&m.call_people, " 5 7 "),
+              "ended call: duration and participants");
+        msg_free(&m);
+    }
     expect_text("{\"id\":\"1\",\"type\":46,\"content\":\"\",\"embeds\":[{\"type\":\"poll_result\",\"fields\":["
                 "{\"name\":\"poll_question_text\",\"value\":\"Best?\"},{\"name\":\"victor_answer_text\",\"value\":\"Cats\"},"
                 "{\"name\":\"victor_answer_votes\",\"value\":\"3\"},{\"name\":\"total_votes\",\"value\":\"4\"}]}]}",

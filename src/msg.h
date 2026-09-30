@@ -90,6 +90,9 @@ typedef struct {
     int reply_name_len;  /* bytes of `reply` before ": " */
     int reply_pings;     /* the reply mentions its author (Discord's "@ ON") */
     int system;      /* join notices and other non-user messages */
+    int call;        /* a call's notice: 1 while it runs, 2 once it ended */
+    long long call_secs; /* how long it lasted, once ended */
+    sb_t call_people;    /* who joined it: " id id " */
     int deleted;
     int edited;
     int pinned;
