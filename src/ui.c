@@ -753,7 +753,8 @@ static int frame_ms(void)
 /* ---- Transitions ---- */
 
 /*
- * Hover and selection ease in and out instead of snapping, as in Discord. A
+ * Buttons, server icons and their pills ease in and out on hover and
+ * selection instead of snapping, as in Discord; rows do not (row_bg). A
  * transition is keyed by what it moves (a hit kind or a TW_ key, and an index)
  * and depends only on the frame's time, so every band of a frame reads the
  * same value. While one runs, the rectangles it covers are repainted at each
@@ -761,9 +762,9 @@ static int frame_ms(void)
  * Popups are not animated: their values jump to the target.
  */
 #define TWEENS 64
-#define TW_FAST 120  /* hover backgrounds */
+#define TW_FAST 120  /* hover on buttons */
 #define TW_SHAPE 200 /* server icons and their pill */
-enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_MESSAGE, TW_MEMBER, TW_FRIEND, TW_ATTACH, TW_EMOJI, TW_MENTION,
+enum { TW_PILL = 1000, TW_FOLDER_PILL, TW_HOME, TW_HOME_PILL, TW_FRIEND, TW_ATTACH, TW_EMOJI, TW_MENTION,
        TW_BAR_CLOSE, TW_SHOP, TW_QUEST, TW_NITRO };
 
 typedef struct {
@@ -867,15 +868,15 @@ static unsigned lerp_argb(unsigned a, unsigned b, float t)
 }
 
 /*
- * A row's background: it eases in on hover, and on to the selection's color.
- * Returns the color under the row (`base` when none), for the status dots cut out of it.
+ * A row's background: the selection's color, else the hover's, at once, as
+ * Discord's lines light up (they do not fade). Returns the color under the
+ * row (`base` when none), for the status dots cut out of it.
  */
-static unsigned row_bg(int kind, int index, int sel, int hov, unsigned base, int x, int y, int w, int h, int radius)
+static unsigned row_bg(int sel, int hov, unsigned base, int x, int y, int w, int h, int radius)
 {
-    float t = tween(kind, index, sel ? 2.f : hov ? 1.f : 0.f, 0.f, TW_FAST, x, y, w, h);
-    unsigned c = t <= 1.f ? lerp_argb(base, ARGB(C_HOVER), t) : lerp_argb(ARGB(C_HOVER), ARGB(C_SELECT), t - 1.f);
+    unsigned c = sel ? ARGB(C_SELECT) : hov ? ARGB(C_HOVER) : base;
 
-    if (t > 0.f)
+    if (sel || hov)
         r_round(x, y, w, h, radius, c);
     return c;
 }
@@ -3534,7 +3535,7 @@ static void paint_channel_row(unsigned i, int y)
     }
     if (is_dm_type(c->type)) {
         r_image_t *img = dm_icon(c);
-        unsigned bg = row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(DM_ROW_H) - S(2), S(8));
+        unsigned bg = row_bg(sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(DM_ROW_H) - S(2), S(8));
         (void)img;
         paint_dm_icon(c, x + S(8), y + S(6), S(32), bg);
         {
@@ -3576,12 +3577,12 @@ static void paint_channel_row(unsigned i, int y)
         int unread = channel_unread(i);
         fill(x + S(18), y - S(6), S(1) > 1 ? S(1) : 1, S(ROW_H) / 2 + S(6), C_LINE);
         fill(x + S(18), y + S(ROW_H) / 2, S(12), S(1) > 1 ? S(1) : 1, C_LINE);
-        row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x + S(34), y + S(1), w - S(34), S(ROW_H) - S(2), S(6));
+        row_bg(sel, hov, ARGB(C_SIDE), x + S(34), y + S(1), w - S(34), S(ROW_H) - S(2), S(6));
         text(unread ? g_ui.f_h : g_ui.f_body, sel || hov || unread ? C_INK : C_MUTED, rect(x + S(42), y, w - S(48), S(ROW_H)),
              name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
-    row_bg(HIT_CHANNEL, (int)i, sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(ROW_H) - S(2), S(6));
+    row_bg(sel, hov, ARGB(C_SIDE), x, y + S(1), w, S(ROW_H) - S(2), S(6));
     {
         int unread = channel_unread(i), muted = channel_muted(i), badge = c->mentions ? S(30) : 0;
         int color = sel || hov || unread ? C_INK : C_CHANNEL;
@@ -3732,7 +3733,7 @@ static void paint_home_links(int x0, int y)
     for (int k = 0; k < NAVS; k++) {
         int ry = y + k * S(NAV_ROW), sel = g_ui.guild < 0 && g_ui.channel < 0 && g_ui.home_page == k;
         int hov = g_ui.hover_kind == HIT_NAV && g_ui.hover_index == k;
-        row_bg(HIT_NAV, k, sel, hov, ARGB(C_SIDE), x0 + S(8), ry + S(1), w, S(NAV_ROW) - S(2), S(8));
+        row_bg(sel, hov, ARGB(C_SIDE), x0 + S(8), ry + S(1), w, S(NAV_ROW) - S(2), S(8));
         dicon(icons[k], x0 + S(28), ry + S(NAV_ROW) / 2, S(19), sel || hov ? ARGB(C_INK) : ARGB(C_MUTED));
         text(g_ui.f_nav, sel || hov ? C_INK : C_MUTED, rect(x0 + S(52), ry, w - S(52), S(NAV_ROW)), labels[k],
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -5603,7 +5604,7 @@ static void paint_message(int i, int x0, int y, int w)
         fill(x0, top, w, h - (top - y), g_ui.hover_msg == i ? C_MENTION_HOVER : C_MENTION);
         r_fill(x0, top, S(2), h - (top - y), 0xFFCE8100u); /* text-feedback-warning */
     } else {
-        row_bg(TW_MESSAGE, i, 0, g_ui.hover_msg == i, ARGB(C_MAIN), x0, y + (m->grouped == 1 ? 0 : S(12)), w,
+        row_bg(0, g_ui.hover_msg == i, ARGB(C_MAIN), x0, y + (m->grouped == 1 ? 0 : S(12)), w,
                h - (m->grouped == 1 ? 0 : S(12)), 0);
     }
 
@@ -10229,7 +10230,7 @@ static void paint_dm_members(RECT rc, int x0)
     for (int i = 0; i < n && y < rc.bottom; i++, y += S(DM_MEMBER_H)) {
         int st = user_status(m[i].id), off = st == ML_OFFLINE || st == ML_UNKNOWN, hov = g_ui.ml_hover == 1000 + i;
         r_image_t *img = user_avatar(m[i].id, m[i].avatar);
-        unsigned bg = row_bg(TW_MEMBER, 1000 + i, 0, hov, ARGB(C_SIDE), x0 + S(8), y + S(1), S(MEMBERS_W) - S(16),
+        unsigned bg = row_bg(0, hov, ARGB(C_SIDE), x0 + S(8), y + S(1), S(MEMBERS_W) - S(16),
                              S(DM_MEMBER_H) - S(2), S(8));
         int ay = y + (S(DM_MEMBER_H) - S(32)) / 2;
         wchar_t *name = utf8_to_wide(m[i].name, lstrlenA(m[i].name));
@@ -10280,7 +10281,7 @@ static void paint_members(RECT rc)
                 unsigned ink = color ? 0xFF000000u | color : ARGB(C_INK);
                 int ay = y + (h - S(32)) / 2, tx = x0 + S(56), tw = S(MEMBERS_W) - S(64);
                 wchar_t *name;
-                unsigned bg = row_bg(TW_MEMBER, i, 0, g_ui.ml_hover == i, ARGB(C_SIDE), x0 + S(8), y + S(1),
+                unsigned bg = row_bg(0, g_ui.ml_hover == i, ARGB(C_SIDE), x0 + S(8), y + S(1),
                                      S(MEMBERS_W) - S(16), h - S(2), S(6));
 
                 if (img)
@@ -13647,7 +13648,7 @@ static void paint_friends(RECT rc, int x0, int w)
         /* A line between rows, hidden next to the hovered one as in Discord. */
         if (!hov && g_ui.friend_hover != k - 1)
             fill(x0 + S(FR_PAD) + S(8), y, lw - S(2 * FR_PAD) - S(16), S(1) > 1 ? S(1) : 1, C_LINE);
-        bg = row_bg(TW_FRIEND, k, 0, hov, ARGB(C_MAIN), x0 + S(FR_PAD) - S(4), y + S(1), lw - S(2 * FR_PAD) + S(8),
+        bg = row_bg(0, hov, ARGB(C_MAIN), x0 + S(FR_PAD) - S(4), y + S(1), lw - S(2 * FR_PAD) + S(8),
                     S(FR_ROW) - S(2), S(8));
         img = user_avatar(r->id, r->avatar);
         if (img)
