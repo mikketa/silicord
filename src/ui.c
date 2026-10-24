@@ -496,17 +496,26 @@ static void rel_remove(const char *id);
 #define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
-static const unsigned char k_word[8][7] = {
-    {0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E}, {0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E},
-    {0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}, {0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E},
-    {0x00, 0x00, 0x0F, 0x10, 0x10, 0x10, 0x0F}, {0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E},
-    {0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10}, {0x01, 0x01, 0x0F, 0x11, 0x11, 0x11, 0x0F},
+/* The S of assets/logo.svg, on its 512-unit tile: stroked 56 wide, a pad at each end. */
+static const r_seg_t k_mark[] = {
+    {364, 144, 196, 144}, {196, 144, 196, 256, 196, 200, -1}, {196, 256, 316, 256},
+    {316, 256, 316, 368, 316, 312, 1}, {316, 368, 148, 368},
 };
+static const float k_mark_pads[2][2] = {{372, 144}, {140, 368}};
 
-static const unsigned short k_mark[16] = {
-    0x0000, 0x0000, 0x1FF8, 0x2004, 0x4002, 0x4C02, 0x4C02, 0x4C02,
-    0x4C02, 0x4002, 0x2004, 0x17F8, 0x1800, 0x1000, 0x0000, 0x0000,
+/* "silicord" as in assets/banner-*.svg (tools/make_banner.py): 796 x 180 units, stroked 24 wide. */
+static const r_seg_t k_word[] = {
+    {84, 72, 36, 72}, {36, 72, 36, 120, 36, 96, -1}, {36, 120, 60, 120}, {60, 120, 60, 168, 60, 144, 1}, {60, 168, 12, 168},
+    {136, 72, 136, 168},
+    {188, 12, 188, 168},
+    {240, 72, 240, 168},
+    {372, 72, 340, 72}, {340, 72, 340, 168, 340, 120, -1}, {340, 168, 372, 168},
+    {472, 72, 472, 168, 472, 120, 1}, {472, 168, 472, 72, 472, 120, 1},
+    {572, 168, 572, 120}, {572, 120, 620, 72, 620, 120, 1}, {620, 72, 636, 72},
+    {736, 72, 736, 168, 736, 120, -1}, {736, 168, 736, 72, 736, 120, -1}, {784, 12, 784, 168},
 };
+static const unsigned char k_word_letters[] = {5, 1, 1, 1, 3, 2, 3, 3}; /* pieces per letter */
+static const float k_word_dots[2] = {136, 240};                       /* the dots of the i, at y = 26 */
 
 static int S(int v)
 {
@@ -660,27 +669,50 @@ static RECT rect(int x, int y, int w, int h)
     return r;
 }
 
+/* Strokes n pieces given in design units, scaled by k and placed at (x, y). */
+static void stroke_at(const r_seg_t *src, int n, float x, float y, float k, float width, unsigned argb)
+{
+    r_seg_t seg[8];
+
+    for (int i = 0; i < n; i++)
+        seg[i] = (r_seg_t){x + src[i].x0 * k, y + src[i].y0 * k, x + src[i].x1 * k, y + src[i].y1 * k,
+                           x + src[i].cx * k, y + src[i].cy * k, src[i].arc};
+    r_stroke(seg, n, width * k, argb);
+}
+
+static void dot_at(float x, float y, float d, unsigned argb)
+{
+    r_seg_t s = {x, y, x, y};
+    r_stroke(&s, 1, d, argb);
+}
+
+/* The wordmark, 7 units high from the top of the l to the baseline. */
 static void draw_wordmark(int x, int y, int unit)
 {
-    for (int g = 0; g < 8; g++)
-        for (int row = 0; row < 7; row++)
-            for (int col = 0; col < 5; col++)
-                if ((k_word[g][row] >> (4 - col)) & 1)
-                    fill(x + (g * 6 + col) * unit, y + row * unit, unit, unit, C_INK);
-    fill(x + 48 * unit, y, 4 * unit, 7 * unit, C_BRAND);
+    float k = 7.f * (float)unit / 180, fx = (float)x, fy = (float)y;
+    const r_seg_t *seg = k_word;
+
+    for (int g = 0; g < (int)ARRAYSIZE(k_word_letters); seg += k_word_letters[g++])
+        stroke_at(seg, k_word_letters[g], fx, fy, k, 24, ARGB(C_INK));
+    for (int i = 0; i < 2; i++)
+        dot_at(fx + k_word_dots[i] * k, fy + 26 * k, 30 * k, ARGB(C_BRAND));
 }
 
 static int wordmark_width(int unit)
 {
-    return 52 * unit;
+    return (int)(796.f * 7 * (float)unit / 180 + 0.5f);
 }
 
-static void draw_mark(int x, int y, int unit, int c)
+/* The S of the logo for a tile `size` wide at (x, y), its pads' holes in `bg`. */
+static void draw_mark(int x, int y, int size, unsigned fg, unsigned bg)
 {
-    for (int row = 0; row < 16; row++)
-        for (int col = 0; col < 16; col++)
-            if ((k_mark[row] >> (15 - col)) & 1)
-                fill(x + col * unit, y + row * unit, unit, unit, c);
+    float k = (float)size / 512, fx = (float)x, fy = (float)y;
+
+    stroke_at(k_mark, (int)ARRAYSIZE(k_mark), fx, fy, k, 56, fg);
+    for (int i = 0; i < 2; i++) {
+        dot_at(fx + k_mark_pads[i][0] * k, fy + k_mark_pads[i][1] * k, 96 * k, fg);
+        dot_at(fx + k_mark_pads[i][0] * k, fy + k_mark_pads[i][1] * k, 36 * k, bg);
+    }
 }
 
 /* ---- Images ---- */
@@ -1341,7 +1373,7 @@ static void paint_login_qr(int x, int y, int w)
         /* Silicord's mark in the middle, as Discord puts its own: level M error correction absorbs it. */
         r_round(tx + tile / 2 - S(17), y + tile / 2 - S(17), S(34), S(34), S(8), 0xFFFFFFFFu);
         r_round(tx + tile / 2 - S(14), y + tile / 2 - S(14), S(28), S(28), S(7), ARGB(C_BRAND));
-        draw_mark(tx + tile / 2 - S(8), y + tile / 2 - S(8), S(1), C_INK);
+        draw_mark(tx + tile / 2 - S(14), y + tile / 2 - S(14), S(28), ARGB(C_INK), ARGB(C_BRAND));
     } else {
         text(g_ui.f_small, C_RAIL, rect(tx, y, tile, tile), "Getting a code\xE2\x80\xA6", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -2894,12 +2926,12 @@ static void paint_rail(RECT rc)
     fill(0, 0, S(RAIL_W), rc.bottom, C_RAIL);
     r_clip(0, 0, S(RAIL_W), panel_top(rc) - S(PANEL_GAP));
 
-    /* Home: the Silicord mark on blurple, where Discord puts its own. */
+    /* Home: the Silicord mark on the accent, where Discord puts its own. */
     {
         float t = tween_on(TW_HOME, 0, sel_home || hov_home, TW_SHAPE, x, home_y, S(ICON), S(ICON));
-        r_round(x, home_y, S(ICON), S(ICON), icon_radius(t), lerp_argb(ARGB(C_ITEM), ARGB(C_BRAND), t));
-        int unit = S(24) / 16 > 0 ? S(24) / 16 : 1;
-        draw_mark(x + (S(ICON) - 16 * unit) / 2, home_y + (S(ICON) - 16 * unit) / 2, unit, t >= .5f ? C_INK : C_MUTED);
+        unsigned bg = lerp_argb(ARGB(C_ITEM), ARGB(C_BRAND), t);
+        r_round(x, home_y, S(ICON), S(ICON), icon_radius(t), bg);
+        draw_mark(x + (S(ICON) - S(40)) / 2, home_y + (S(ICON) - S(40)) / 2, S(40), ARGB(t >= .5f ? C_INK : C_MUTED), bg);
         paint_pill(TW_HOME_PILL, 0, home_y, sel_home ? S(40) : hov_home ? S(20) : 0, 0);
     }
     if (g_ui.model) {
