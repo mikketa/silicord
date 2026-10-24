@@ -16875,7 +16875,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     default:
-        if (msg >= UI_QR && msg <= UI_CAPTCHA) {
+        if (msg >= UI_QR && msg < UI_END) {
             on_worker(msg, wp, lp);
             return 0;
         }

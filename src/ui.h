@@ -43,6 +43,7 @@ enum {
     UI_APP,             /* text = an application id, NUL, then its public JSON (empty on failure) */
     UI_CAPTCHA,         /* JSON challenge: service, sitekey, rqdata, invisible */
     UI_LOGIN_ANSWER,    /* login_answer_t*: Discord's answer to a request of the login page */
+    UI_END              /* not a message: one past the last */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
