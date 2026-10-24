@@ -29,6 +29,7 @@ add_library(silicord_core STATIC
   src/apng.c
   src/auth.c
   src/b64.c
+  src/chime.c
   src/command.c
   src/crypto.c
   src/dave.c
@@ -152,7 +153,7 @@ function(silicord_test name)
   add_test(NAME ${name} COMMAND ${name}_test)
 endfunction()
 
-foreach(name stats str json msg model md profile props auth command aes rtp opus vp8_rtp mixer hpke p256 sha2 search apng inflate
+foreach(name stats str json msg model md profile props auth chime command aes rtp opus vp8_rtp mixer hpke p256 sha2 search apng inflate
              emoji memberlist picture lottie)
   silicord_test(${name})
 endforeach()
