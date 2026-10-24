@@ -1,49 +1,92 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="silicord" width="640">
+    <img src="assets/banner-light.svg" alt="silicord" width="560">
   </picture>
 </p>
 
-A native Discord client for Windows, written in C and x64 assembly. No C runtime: Win32, WinHTTP and DirectWrite. When Discord asks for a captcha, that one check is shown with the Edge WebView2 runtime already installed on Windows. The rest of the client does not open a browser.
+<p align="center">
+  <strong>A native Discord client for Windows, written in C and x64 assembly.</strong><br>
+  One small executable. No Chromium, no C runtime, no installer.
+</p>
 
-> **Status: early.** Silicord logs in as the Discord website does (password and two-factor, QR code or passkey) and covers everyday text chat:
+<p align="center">
+  <a href="https://github.com/mikketa/silicord/actions/workflows/build.yml"><img src="https://github.com/mikketa/silicord/actions/workflows/build.yml/badge.svg" alt="build"></a>
+  <a href="https://github.com/mikketa/silicord/releases/latest"><img src="https://img.shields.io/github/v/release/mikketa/silicord?include_prereleases" alt="latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20x64-4C8DFF" alt="Windows x64">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4C8DFF" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <a href="#download">Download</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#building">Building</a> ·
+  <a href="#privacy">Privacy</a> ·
+  <a href="docs/ROADMAP.md">Roadmap</a>
+</p>
+
+---
+
+Silicord talks to Discord with Win32, WinHTTP and DirectWrite, and draws its own interface. When Discord asks for a captcha, that one check is shown with the Edge WebView2 runtime already installed on Windows; the rest of the client never opens a browser.
+
+> [!NOTE]
+> **Status: early.** Text chat is covered day to day. Voice, video and screen sharing are built but not yet tested against Discord's servers. See the [roadmap](docs/ROADMAP.md).
+
+> [!WARNING]
+> Silicord logs in with a **user account**. Discord's [Terms of Service](https://discord.com/terms) forbid third-party clients, and using one may get your account suspended. Use it at your own risk, try it on a secondary account first, and do not automate your account.
 >
-> - servers (with their folders), channels, threads, forums and direct messages, the friends list
-> - messages with formatting, custom and animated emoji, GIFs, images, files, link previews, stickers, polls, reactions, and bots' buttons and menus
-> - replies, edits and deletes, uploads (plus button, drag and drop, pasting), the emoji, GIF and sticker picker, `@` `#` `:` and slash command suggestions
-> - pins, search, jumping to a message, the quick switcher (Ctrl+K) and Discord's keyboard shortcuts
-> - typing indicators, unread markers, the mentions inbox, notifications with Discord's per-server and per-channel settings, the member list with statuses and role colors, and user profiles with their (animated) banner, badges, roles, avatar decoration and display name style
-> - a settings screen: status and custom status, developer mode, notification preferences
+> Your token grants full access to your account. Silicord stores it in the Windows Credential Manager (encrypted by Windows), never in a plain-text file. Never paste it anywhere else or share it.
 >
-> Voice is being built: joining channels with Discord's end-to-end encryption (DAVE, over MLS) and an Opus codec written from scratch are in, and so are cameras and screen sharing (Go Live) with a VP8 codec of our own, but not yet tested against Discord's servers. See the [roadmap](docs/ROADMAP.md).
+> Silicord is not affiliated with or endorsed by Discord Inc.
 
 ## Why
 
-The official client ships a full Chromium: several processes, hundreds of MB of RAM and CPU usage even when idle. Silicord aims for the opposite:
+The official client ships a full Chromium: several processes, hundreds of MB of RAM and CPU usage even when idle. Silicord aims for the opposite, and a codebase small enough to read end to end.
 
-- one small executable, plus Microsoft's `WebView2Loader.dll` beside it; nothing else to install
-- ~0% CPU when idle (the process sleeps until the next network event)
-- a few MB of RAM
-- a codebase small enough to read end to end
+Measured while connected to an account with 20 servers:
 
-Measured while connected to an account with 20 servers: 480 KB executable (the emoji table and its search names included), 0% CPU over 30 idle seconds, about 8 MB of memory at startup (Task Manager) and 9 MB after browsing eight servers. Silicord's own data, images included, stays around 3 MB.
+| | Silicord |
+|---|---|
+| Executable | 480 KB, the emoji table and its search names included |
+| Other files | Microsoft's `WebView2Loader.dll`, beside it; nothing to install |
+| Memory | about 8 MB at startup (Task Manager), 9 MB after browsing eight servers |
+| CPU when idle | 0% over 30 seconds: the process sleeps until the next network event |
+| Own data on disk | around 3 MB, images included |
 
-## ⚠️ Disclaimer
+## Features
 
-Silicord logs in with a **user account**. Discord's [Terms of Service](https://discord.com/terms) forbid third-party clients, and using one may get your account suspended. Use it at your own risk, try it on a secondary account first, and do not automate your account.
+**Logging in**, as the Discord website does: password and two-factor, QR code, or passkey.
 
-Your token grants full access to your account. Silicord stores it in the Windows Credential Manager (encrypted by Windows), never in a plain-text file. Never paste it anywhere else or share it.
+**Servers and conversations**
+- servers (with their folders), channels, threads, forums and direct messages, the friends list
+- pins, search, jumping to a message, the quick switcher (Ctrl+K) and Discord's keyboard shortcuts
 
-Silicord is not affiliated with or endorsed by Discord Inc.
+**Messages**
+- formatting, custom and animated emoji, GIFs, images, files, link previews, stickers, polls, reactions, and bots' buttons and menus
+- replies, edits and deletes, uploads (plus button, drag and drop, pasting)
+- the emoji, GIF and sticker picker; `@` `#` `:` and slash command suggestions
+
+**People and notifications**
+- typing indicators, unread markers, the mentions inbox
+- notifications with Discord's per-server and per-channel settings
+- the member list with statuses and role colors
+- user profiles with their (animated) banner, badges, roles, avatar decoration and display name style
+
+**Settings**: status and custom status, developer mode, notification preferences.
+
+**Voice, in progress**: joining channels with Discord's end-to-end encryption (DAVE, over MLS) and an Opus codec written from scratch are in, and so are cameras and screen sharing (Go Live) with a VP8 codec of our own, but not yet tested against Discord's servers.
 
 ## Download
 
-Get `silicord.exe` and `WebView2Loader.dll` from the [latest release](https://github.com/mikketa/silicord/releases/latest) and put them in the same folder. There is no installer. The Edge WebView2 runtime is the one Windows already has; it starts only while a captcha is on screen. Release builds are made by GitHub Actions from the tagged commit; see the [Code Signing Policy](#code-signing-policy).
+Get `silicord.exe` and `WebView2Loader.dll` from the [latest release](https://github.com/mikketa/silicord/releases/latest) and put them in the same folder. There is no installer. The Edge WebView2 runtime is the one Windows already has; it starts only while a captcha is on screen.
+
+Release builds are made by GitHub Actions from the tagged commit; see the [Code Signing Policy](#code-signing-policy).
 
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
 ## Usage
+
+### Logging in
 
 Run `silicord.exe`. The login page is the Discord website's, with the same three ways in:
 
@@ -51,13 +94,19 @@ Run `silicord.exe`. The login page is the Discord website's, with the same three
 - the QR code: scan it with the Discord mobile app (Settings › Scan QR Code) and confirm on your phone;
 - **Or sign in with a passkey**: Windows asks for Windows Hello, a security key or a phone nearby, as a browser would. This needs Windows 10 version 1903 or later.
 
-"Forgot your password?" sends Discord's reset e-mail; the reset itself happens in the browser. If Discord asks for a captcha, it opens in the window for you to solve. Silicord does not send that check anywhere else. Your password is sent to Discord once and never stored; Silicord forgets it as soon as Discord has answered. A few rare cases still need the website once: restoring a disabled account, confirming a new login location by SMS, and phone numbers without their country code.
+"Forgot your password?" sends Discord's reset e-mail; the reset itself happens in the browser. If Discord asks for a captcha, it opens in the window for you to solve. Silicord does not send that check anywhere else.
 
-The token Discord sends back is stored in the Windows Credential Manager. The power button next to your name logs out and removes it.
+Your password is sent to Discord once and never stored; Silicord forgets it as soon as Discord has answered. The token Discord sends back is stored in the Windows Credential Manager. The power button next to your name logs out and removes it.
+
+A few rare cases still need the website once: restoring a disabled account, confirming a new login location by SMS, and phone numbers without their country code.
+
+### Images and fonts
 
 Images from Discord's CDN are kept in `%LOCALAPPDATA%\Silicord\images` (at most 64 MB, least recently used first out), so avatars and icons seen before show up in the same frame instead of being downloaded again.
 
 Clicking an avatar or a name opens that user's profile. Display names with a custom font use free fonts (SIL Open Font License) that Silicord downloads once from the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, and keeps in `%LOCALAPPDATA%\Silicord\fonts`.
+
+### Debugging
 
 `silicord --debug` also opens a console with a connection log, mirrored to `%TEMP%\silicord-debug.log`. It includes `[mem]`, `[net]` and `[cpu]` lines each time a channel opens: memory allocated by Silicord itself (and its images) against the whole process, bytes received from the gateway, the API and the CDN (with the hourly rate), and CPU time since start. The About screen in the settings shows the same.
 
@@ -90,16 +139,17 @@ ctest --test-dir build-host --output-on-failure
 build-host/fuzz 100000 json 42   # a longer run: iterations, target (all, json, command, text, inflate, apng), seed
 ```
 
-If Smart App Control is enabled, Windows blocks unsigned executables, including the ones you build yourself and the CI artifacts. Use a signed [release](https://github.com/mikketa/silicord/releases), or test local builds on a machine without Smart App Control.
+> [!TIP]
+> If Smart App Control is enabled, Windows blocks unsigned executables, including the ones you build yourself and the CI artifacts. Use a signed [release](https://github.com/mikketa/silicord/releases), or test local builds on a machine without Smart App Control.
 
-## Layout
+### Layout
 
 ```
 src/     C sources (Win32, no CRT)
 asm/     x64 assembly routines (NASM, Win64 ABI)
 tests/   unit tests (same no-CRT setup); tests/host: Linux build with sanitizers and a fuzzer
 assets/  logo, icon and banners
-tools/   generators: the icon (make_icon.py), Discord's emoji names (make_emoji_aliases.py)
+tools/   generators: the icon (make_icon.py), the banners (make_banner.py), Discord's emoji names (make_emoji_aliases.py)
 docs/    roadmap and architecture
 ```
 
