@@ -1718,6 +1718,140 @@ static void paint_login(RECT rc)
 
 /* ---- Login view: fields and actions ---- */
 
+/*
+ * Edit boxes are the system's, with two changes. Each paint goes through a
+ * bitmap, so typing no longer flashes the box (the control erases it, then
+ * draws the text). And the caret is drawn here, as Chromium draws Discord's:
+ * one pixel wide in the text's color, solid while you type or click,
+ * blinking again only once you pause, hidden over a selection. Windows' own
+ * stays hidden; the control still moves it, which says where to draw.
+ */
+#define EDIT_NEXT L"SilicordEditNext"
+#define EDIT_ON L"SilicordEditOn" /* set while the blinking caret is in its shown half */
+#define TIMER_EDIT_BLINK 0x5C1C
+
+/* Something moved the caret or changed the text: it shows, and blinks again after a pause. */
+static void edit_wake(HWND h)
+{
+    UINT blink = GetCaretBlinkTime();
+
+    SetPropW(h, EDIT_ON, (HANDLE)1);
+    if (blink != INFINITE) /* blinking off in Windows' settings: the caret stays */
+        SetTimer(h, TIMER_EDIT_BLINK, blink, NULL);
+    InvalidateRect(h, NULL, FALSE);
+}
+
+static void edit_draw_caret(HWND h, HDC dc, COLORREF ink)
+{
+    DWORD from, to;
+    POINT at;
+    TEXTMETRICW tm;
+    HFONT old;
+    HBRUSH b;
+    RECT r;
+
+    SendMessageW(h, EM_GETSEL, (WPARAM)&from, (LPARAM)&to);
+    if (GetFocus() != h || !GetPropW(h, EDIT_ON) || from != to || !GetCaretPos(&at))
+        return;
+    old = SelectObject(dc, (HFONT)SendMessageW(h, WM_GETFONT, 0, 0));
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, old);
+    SetRect(&r, at.x, at.y, at.x + (S(1) > 1 ? S(1) : 1), at.y + tm.tmHeight);
+    b = CreateSolidBrush(ink);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+}
+
+static LRESULT CALLBACK edit_polish_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    WNDPROC next = (WNDPROC)GetPropW(h, EDIT_NEXT);
+    LRESULT r;
+
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        RECT rc;
+        HDC dc = BeginPaint(h, &ps), mem = CreateCompatibleDC(dc);
+        HBITMAP bm, old;
+        HBRUSH bg;
+        COLORREF ink;
+
+        GetClientRect(h, &rc);
+        bm = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        old = SelectObject(mem, bm);
+        bg = (HBRUSH)SendMessageW(GetParent(h), WM_CTLCOLOREDIT, (WPARAM)mem, (LPARAM)h);
+        ink = GetTextColor(mem);
+        FillRect(mem, &rc, bg ? bg : (HBRUSH)GetStockObject(BLACK_BRUSH));
+        CallWindowProcW(next, h, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
+        edit_draw_caret(h, mem, ink);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bm);
+        DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp != TIMER_EDIT_BLINK)
+            break;
+        SetPropW(h, EDIT_ON, (HANDLE)(INT_PTR)!GetPropW(h, EDIT_ON));
+        InvalidateRect(h, NULL, FALSE);
+        return 0;
+    case WM_SETFOCUS:
+    case WM_SETFONT:
+        r = CallWindowProcW(next, h, msg, wp, lp);
+        if (GetFocus() == h) { /* the control made its caret again: it stays hidden */
+            HideCaret(h);
+            edit_wake(h);
+        }
+        return r;
+    case WM_KILLFOCUS:
+        KillTimer(h, TIMER_EDIT_BLINK);
+        InvalidateRect(h, NULL, FALSE);
+        break;
+    case WM_KEYDOWN:
+    case WM_CHAR:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_UNDO:
+    case WM_SETTEXT:
+    case WM_IME_COMPOSITION:
+    case EM_SETSEL:
+    case EM_REPLACESEL:
+        r = CallWindowProcW(next, h, msg, wp, lp);
+        if (GetFocus() == h)
+            edit_wake(h);
+        else
+            InvalidateRect(h, NULL, FALSE);
+        return r;
+    case WM_MOUSEMOVE:
+        if (wp & MK_LBUTTON) { /* selecting with the mouse */
+            r = CallWindowProcW(next, h, msg, wp, lp);
+            edit_wake(h);
+            return r;
+        }
+        break;
+    case WM_NCDESTROY:
+        KillTimer(h, TIMER_EDIT_BLINK);
+        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)next);
+        RemovePropW(h, EDIT_NEXT);
+        RemovePropW(h, EDIT_ON);
+        break;
+    }
+    return CallWindowProcW(next, h, msg, wp, lp);
+}
+
+/* After any subclass of its own: this one runs first. */
+static void edit_polish(HWND h)
+{
+    if (h && SetPropW(h, EDIT_NEXT, (HANDLE)GetWindowLongPtrW(h, GWLP_WNDPROC)))
+        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)edit_polish_proc);
+}
+
 static LRESULT CALLBACK login_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 static HWND login_edit(int password, int limit, const wchar_t *cue)
@@ -1726,6 +1860,7 @@ static HWND login_edit(int password, int limit, const wchar_t *cue)
                              0, 0, 0, 0, g_ui.wnd, NULL, NULL, NULL);
 
     g_ui.login_edit_proc = (WNDPROC)SetWindowLongPtrW(e, GWLP_WNDPROC, (LONG_PTR)login_edit_proc);
+    edit_polish(e);
     SendMessageW(e, EM_LIMITTEXT, (WPARAM)limit, 0);
     if (cue)
         SendMessageW(e, EM_SETCUEBANNER, TRUE, (LPARAM)cue);
@@ -9393,6 +9528,7 @@ static void pop_open(const char *user_id, const char *name, const char *avatar, 
         g_ui.pop_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.pop,
                                         NULL, NULL, NULL);
         g_ui.pop_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.pop_edit, GWLP_WNDPROC, (LONG_PTR)pop_edit_proc);
+        edit_polish(g_ui.pop_edit);
         SendMessageW(g_ui.pop_edit, WM_SETFONT, (WPARAM)g_ui.pop_font, FALSE);
         SendMessageW(g_ui.pop_edit, EM_LIMITTEXT, 2000, 0);
     }
@@ -10813,6 +10949,7 @@ static void picker_open(int mode, const char *msg_id, int right, int bottom)
     g_ui.picker_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(22), S(PICK_TABS) + S(6),
                                        w - S(44), S(20), g_ui.picker, NULL, NULL, NULL);
     g_ui.picker_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.picker_edit, GWLP_WNDPROC, (LONG_PTR)picker_edit_proc);
+    edit_polish(g_ui.picker_edit);
     font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
     SendMessageW(g_ui.picker_edit, WM_SETFONT, (WPARAM)font, FALSE);
     SendMessageW(g_ui.picker_edit, EM_SETCUEBANNER, TRUE, (LPARAM)picker_cue());
@@ -13671,6 +13808,7 @@ static void place_friend_input(void)
         g_ui.friend_search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0,
                                              g_ui.wnd, NULL, NULL, NULL);
         SendMessageW(g_ui.friend_search, WM_SETFONT, (WPARAM)font, FALSE);
+        edit_polish(g_ui.friend_search);
         SendMessageW(g_ui.friend_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search");
         SendMessageW(g_ui.friend_search, EM_LIMITTEXT, 32, 0);
     }
@@ -13686,6 +13824,7 @@ static void place_friend_input(void)
         g_ui.friend_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.wnd,
                                            NULL, NULL, NULL);
         SendMessageW(g_ui.friend_edit, WM_SETFONT, (WPARAM)font, FALSE);
+        edit_polish(g_ui.friend_edit);
         SendMessageW(g_ui.friend_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"You can add friends with their Discord username.");
         SendMessageW(g_ui.friend_edit, EM_LIMITTEXT, 32, 0);
     }
@@ -14165,6 +14304,7 @@ static void qs_open(void)
     g_ui.qs_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, S(32), S(53), S(QS_W) - S(64), S(22),
                                    g_ui.qs, NULL, NULL, NULL);
     g_ui.qs_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.qs_edit, GWLP_WNDPROC, (LONG_PTR)qs_edit_proc);
+    edit_polish(g_ui.qs_edit);
     font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
     SendMessageW(g_ui.qs_edit, WM_SETFONT, (WPARAM)font, FALSE);
     SendMessageW(g_ui.qs_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search for servers, channels or DMs");
@@ -14707,6 +14847,7 @@ static void settings_open(void)
     if (!g_ui.settings_edit) {
         g_ui.settings_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.wnd, NULL, NULL, NULL);
         g_ui.settings_edit_proc = (WNDPROC)SetWindowLongPtrW(g_ui.settings_edit, GWLP_WNDPROC, (LONG_PTR)settings_edit_proc);
+        edit_polish(g_ui.settings_edit);
         SendMessageW(g_ui.settings_edit, WM_SETFONT, SendMessageW(g_ui.composer, WM_GETFONT, 0, 0), FALSE);
         SendMessageW(g_ui.settings_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Set a custom status");
         SendMessageW(g_ui.settings_edit, EM_LIMITTEXT, 128, 0);
@@ -15486,6 +15627,7 @@ static void place_search(void)
         g_ui.search_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, g_ui.wnd,
                                            NULL, NULL, NULL);
         g_ui.search_proc = (WNDPROC)SetWindowLongPtrW(g_ui.search_edit, GWLP_WNDPROC, (LONG_PTR)search_edit_proc);
+        edit_polish(g_ui.search_edit);
         SendMessageW(g_ui.search_edit, WM_SETFONT, (WPARAM)font, FALSE);
         SendMessageW(g_ui.search_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search");
     }
@@ -16277,6 +16419,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         g_ui.composer = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL, 0, 0, 0, 0, wnd, NULL,
                                         NULL, NULL);
         g_ui.composer_proc = (WNDPROC)SetWindowLongPtrW(g_ui.composer, GWLP_WNDPROC, (LONG_PTR)composer_proc);
+        edit_polish(g_ui.composer);
         SendMessageW(g_ui.composer, EM_LIMITTEXT, 2000, 0);
         make_fonts();
         g_ui.passkeys = app_passkeys();
