@@ -52,7 +52,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
     {RGBX(0xDC, 0xDC, 0xDF)}, /* names, titles, active: text-strong */
     {RGBX(0x96, 0x97, 0x9E)}, /* secondary text, idle icons: interactive-text-default */
     {RGBX(0x81, 0x82, 0x8A)}, /* hints, timestamps: text-muted */
-    {RGBX(0x58, 0x65, 0xF2)}, /* accent: brand-500 */
+    {RGBX(0x4C, 0x8D, 0xFF)}, /* accent: the logo's blue */
     {RGBX(0x23, 0xA5, 0x5A)}, /* online: status-online */
     {RGBX(0x17, 0x18, 0x1B)}, /* tooltip: background-surface-highest */
     {RGBX(0x13, 0x0D, 0x00)}, /* message that mentions us: message-mentioned-background */
@@ -1343,7 +1343,7 @@ static void login_link(r_font_t *f, int x, int y, int w, const char *s, UINT ali
 
 static void login_button(int x, int y, int w, const char *label, int id, int busy)
 {
-    unsigned c = busy ? 0xFF4752C4u : g_ui.login_hover == id ? 0xFF4752C4u : ARGB(C_BRAND);
+    unsigned c = busy ? 0xFF3D71CCu : g_ui.login_hover == id ? 0xFF3D71CCu : ARGB(C_BRAND);
 
     r_round(x, y, w, S(LOGIN_BUTTON_H), S(8), c);
     if (busy)
@@ -2951,7 +2951,7 @@ static void paint_rail(RECT rc)
         {
             int end = k + 1;
             const folder_t *f = &g_ui.model->folders[g_rail.index[k]];
-            unsigned c = f->has_color ? f->color : 0x5865F2;
+            unsigned c = f->has_color ? f->color : 0x4C8DFF;
             while (end < n && g_rail.kind[end] == RAIL_GUILD &&
                    g_ui.model->guilds[g_rail.index[end]].folder == g_rail.index[k])
                 end++;
@@ -2966,7 +2966,7 @@ static void paint_rail(RECT rc)
         {
             int f = g_rail.index[k], open = folder_is_open(f);
             const folder_t *fd = &g_ui.model->folders[f];
-            unsigned c = fd->has_color ? fd->color : 0x5865F2;
+            unsigned c = fd->has_color ? fd->color : 0x4C8DFF;
             int hov = g_ui.hover_kind == HIT_FOLDER && g_ui.hover_index == f, unread = 0, mentions = 0, sel = 0, j = 0;
             for (unsigned g = 0; g < g_ui.model->nguilds; g++)
                 if (g_ui.model->guilds[g].folder == f) {
@@ -4368,7 +4368,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                     r_round(x + S(16), ay, aw, S(40), S(8), 0xFF242424);
                     if (show && pct)
                         r_round(x + S(16), ay, aw * pct / 100 > S(8) ? aw * pct / 100 : S(8), S(40), S(8),
-                                an->me ? 0x66FFB000u : 0x33FFFFFFu);
+                                an->me ? 0x664C8DFFu : 0x33FFFFFFu);
                     if (an->me)
                         r_round_outline(x + S(16), ay, aw, S(40), S(8), S(2) > 1 ? S(2) : 1, ARGB(C_BRAND));
                     text(g_ui.f_body, C_INK, rect(x + S(28), ay, aw - S(90), S(40)), an->text.data ? an->text.data : "",
@@ -4429,7 +4429,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             if (draw && r_visible(y, S(COMP_H))) {
                 unsigned ink = c->disabled ? C_MUTED : C_INK;
                 if (c->type == COMP_BUTTON) {
-                    static const unsigned colors[] = {0xFF4E5058, 0xFF5865F2, 0xFF4E5058, 0xFF248046, 0xFFDA373C, 0xFF4E5058, 0xFF5865F2};
+                    static const unsigned colors[] = {0xFF4E5058, 0xFF4C8DFF, 0xFF4E5058, 0xFF248046, 0xFFDA373C, 0xFF4E5058, 0xFF4C8DFF};
                     unsigned fillc = colors[c->style >= 1 && c->style <= 6 ? c->style : 0];
                     int ix = cx + S(16);
                     r_round(cx, y, bw, S(COMP_H), S(8), c->disabled ? (fillc & 0x00FFFFFFu) | 0x80000000u : fillc);
@@ -4482,7 +4482,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                 y += S(REACTION_H) + S(4);
             }
             if (draw && r_visible(y, S(REACTION_H))) {
-                r_round(rx, y, pw, S(REACTION_H), S(8), r->me ? 0x33FFB000u : 0xFF17181B);
+                r_round(rx, y, pw, S(REACTION_H), S(8), r->me ? 0x334C8DFFu : 0xFF17181B);
                 if (r->me)
                     r_round_outline(rx, y, pw, S(REACTION_H), S(8), 1, ARGB(C_BRAND));
                 if (r->emoji_id[0]) {
@@ -6669,8 +6669,8 @@ static void make_fonts(void)
     g_ui.rich = (r_rich_style_t){
         .body = g_ui.f_body, .mono = g_ui.f_mono, .h1 = g_ui.f_h1, .h2 = g_ui.f_h2, .h3 = g_ui.f_h3,
         .subtext = g_ui.f_small,
-        .ink = ARGB(C_TEXT), .muted = ARGB(C_MUTED), .link = 0xFF2781E7u, .mention = 0xFF8CA0FDu, /* text-link, mention-foreground */
-        .mention_bg = 0x3D5865F2u, .code_bg = 0xFF0A0A0Cu, .quote_bar = 0xFF424246u, .spoiler = 0xFF17181Bu,
+        .ink = ARGB(C_TEXT), .muted = ARGB(C_MUTED), .link = 0xFF2781E7u, .mention = 0xFF9EC1FFu, /* text-link, mention text in the accent's tint */
+        .mention_bg = 0x3D4C8DFFu, .code_bg = 0xFF0A0A0Cu, .quote_bar = 0xFF424246u, .spoiler = 0xFF17181Bu,
         .quote_indent = S(16), .code_pad = S(8), .block_gap = S(4), .radius = S(6),
         .emoji_px = S(22), .jumbo_px = S(48), .emoji = emoji_image,
     };
@@ -9436,7 +9436,7 @@ static void paint_bar(int x0, int w, int cy)
         int zx = x0 + w - S(128), tw = S(34), th = S(20), tx = zx + S(64) - tw - S(4), ty = y + (S(BAR_H) - th) / 2;
         int hov = g_ui.bar_hover == 1, kd = th - S(6);
         float t = tween_on(TW_MENTION, 0, g_ui.bar_mention, TW_SHAPE, zx, ty, S(64), th);
-        unsigned off = hov ? 0xFF4A4A4Au : 0xFF2E2E31u, on = hov ? 0xFF4752C4u : ARGB(C_BRAND);
+        unsigned off = hov ? 0xFF4A4A4Au : 0xFF2E2E31u, on = hov ? 0xFF3D71CCu : ARGB(C_BRAND);
         r_text(g_ui.f_h, lerp_argb(ARGB(hov ? C_MUTED : C_FAINT), ARGB(C_BRAND), t), zx, y, tx - zx - S(6), S(BAR_H), L"@", -1,
                rflags(DT_RIGHT | DT_VCENTER | DT_SINGLELINE));
         r_round(tx, ty, tw, th, th / 2, lerp_argb(off, on, t));
@@ -9954,7 +9954,7 @@ static void paint_members(RECT rc)
                 if (it->bot) {
                     int bw = r_text_width(g_ui.f_h, name, -1);
                     int bx = tx + (bw < tw - S(34) ? bw : tw - S(34)) + S(4), by = (it->activity.len ? y + S(6) : y + (h - S(16)) / 2);
-                    r_round(bx, by, S(30), S(16), S(4), 0xFF5865F2u);
+                    r_round(bx, by, S(30), S(16), S(4), ARGB(C_BRAND));
                     text(g_ui.f_cat, C_INK, rect(bx, by, S(30), S(16)), "APP", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
                 mem_free(name);
@@ -12720,7 +12720,7 @@ static int quests_walk(int x0, int w, int draw, int hx, int hy)
             static const char *const labels[3] = {"Accept Quest", "In Progress", "Claimed"};
             float t = tween_on(TW_QUEST, k, g_quests.hover == k, TW_FAST, b.left, b.top, b.right - b.left, b.bottom - b.top);
             unsigned bg = q->state == 2 ? 0xFF248045u : q->state == 1 ? lerp_argb(0xFF242426u, 0xFF2E2E31u, t)
-                                                                       : lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, t);
+                                                                       : lerp_argb(ARGB(C_BRAND), 0xFF3D71CCu, t);
             r_round(b.left, b.top, b.right - b.left, b.bottom - b.top, S(8), bg);
             text(g_ui.f_small_mid, C_INK, b, labels[q->state], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
@@ -13194,7 +13194,7 @@ static void paint_friends(RECT rc, int x0, int w)
     static unsigned rows_frame;
     int aw = friends_active_w(w), lw = w - aw, x = x0 + S(16), y;
 
-    /* Header: the icon, "Friends", a dot, then the tabs; Add Friend is a blurple button. */
+    /* Header: the icon, "Friends", a dot, then the tabs; Add Friend is an accent button. */
     dicon(L"\xE716", x + S(12), S(HEADER_H) / 2, S(19), ARGB(C_MUTED));
     text(g_ui.f_h, C_INK, rect(x + S(32), 0, S(80), S(HEADER_H)), "Friends", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     x += S(32) + text_width(g_ui.f_h, "Friends") + S(12);
@@ -13221,8 +13221,8 @@ static void paint_friends(RECT rc, int x0, int w)
         h = tween_on(TW_FRIEND + 100, t, hov, TW_FAST, x, ty, tw, S(32));
         if (t == TAB_ADD) {
             if (!sel)
-                r_round(x, ty, tw, S(32), S(8), lerp_argb(ARGB(C_BRAND), 0xFF4752C4u, h));
-            r_text(g_ui.f_nav, sel ? 0xFF8CA0FDu : 0xFFFFFFFFu, x, ty, tw, S(32), L"Add Friend", -1,
+                r_round(x, ty, tw, S(32), S(8), lerp_argb(ARGB(C_BRAND), 0xFF3D71CCu, h));
+            r_text(g_ui.f_nav, sel ? 0xFF9EC1FFu : 0xFFFFFFFFu, x, ty, tw, S(32), L"Add Friend", -1,
                    R_CENTER | R_VCENTER | R_SINGLE);
         } else {
             if (sel || h > 0.f)
@@ -14169,7 +14169,7 @@ static void place_settings_edit(void)
 static void paint_button(int x, int y, int w, const char *label, int id, int primary)
 {
     int hover = g_ui.settings_hover == id;
-    unsigned fillc = primary ? (hover ? 0xFF4752C4u : ARGB(C_BRAND)) : (hover ? 0xFF2E2E31u : 0xFF242426u);
+    unsigned fillc = primary ? (hover ? 0xFF3D71CCu : ARGB(C_BRAND)) : (hover ? 0xFF2E2E31u : 0xFF242426u);
 
     r_round(x, y, w, S(38), S(6), fillc);
     text(g_ui.f_h, primary ? C_RAIL : C_INK, rect(x, y, w, S(38)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
