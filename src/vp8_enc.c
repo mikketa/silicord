@@ -657,14 +657,21 @@ static void encode_mb(vp8_encoder_t *e, int row, int col)
                 m->mv = cand[k];
             }
         }
-        mv.x = (short)(cand[1].x & ~7);
-        mv.y = (short)(cand[1].y & ~7);
-        mv = search(e, row, col, mv, &cost, side->best, lambda);
-        cost += lambda * 4;
-        if (cost < inter_cost && !vp8i_mv_eq(mv, cand[0]) && !vp8i_mv_eq(mv, cand[1]) && !vp8i_mv_eq(mv, cand[2])) {
-            inter_cost = cost;
-            m->y_mode = NEWMV;
-            m->mv = mv;
+        /*
+         * A new vector costs at least lambda * 6 (its mode, and two bits or more in search()): when a free
+         * one does as well, as still parts of a picture do, the search could not win and is skipped.
+         */
+        if (inter_cost > lambda * 6) {
+            mv.x = (short)(cand[1].x & ~7);
+            mv.y = (short)(cand[1].y & ~7);
+            mv = search(e, row, col, mv, &cost, side->best, lambda);
+            cost += lambda * 4;
+            if (cost < inter_cost && !vp8i_mv_eq(mv, cand[0]) && !vp8i_mv_eq(mv, cand[1]) &&
+                !vp8i_mv_eq(mv, cand[2])) {
+                inter_cost = cost;
+                m->y_mode = NEWMV;
+                m->mv = mv;
+            }
         }
     }
     if (e->key || (intra >> 3) + lambda * 12 < inter_cost) {
