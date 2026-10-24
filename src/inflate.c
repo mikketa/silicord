@@ -16,6 +16,18 @@ typedef struct {
 
 static void refill(bits_t *b)
 {
+    if (b->end - b->p >= 8) {
+        /*
+         * Eight bytes at once, keeping the whole ones that fit: the bits above
+         * `count` are the next input bits, the same ones the next refill adds.
+         */
+        unsigned long long w;
+        memcpy(&w, b->p, 8);
+        b->bits |= w << b->count;
+        b->p += (63 - b->count) >> 3;
+        b->count |= 56;
+        return;
+    }
     while (b->count <= 56 && b->p < b->end) {
         b->bits |= (unsigned long long)*b->p++ << b->count;
         b->count += 8;
@@ -134,7 +146,7 @@ static int codes(inflate_t *z, bits_t *b, const inflate_code_t *lc, const inflat
         size_t made, back;
         if (sym < 0)
             return 0;
-        if (out->len + 259 > out->cap)
+        if (out->len + 258 + 8 > out->cap) /* a match, and the 8-byte copies' overrun */
             sb_reserve(out, 4096);
         if (sym < 256) {
             out->data[out->len++] = (char)sym;
@@ -159,8 +171,17 @@ static int codes(inflate_t *z, bits_t *b, const inflate_code_t *lc, const inflat
         /* The bytes still in earlier messages, then the ones this message made. */
         for (; len && (size_t)dist > made; len--, made++)
             out->data[out->len++] = (char)z->window[(z->total - ((size_t)dist - made)) & (WINDOW - 1)];
-        for (; len; len--, out->len++)
-            out->data[out->len] = out->data[out->len - (size_t)dist];
+        if (dist >= 8) {
+            /* Eight bytes a step: they never overlap the ones being written; up to 7 more are written past the end. */
+            char *d = out->data + out->len;
+            const char *s = d - dist;
+            out->len += (size_t)len;
+            for (; len > 0; len -= 8, d += 8, s += 8)
+                memcpy(d, s, 8);
+        } else {
+            for (; len; len--, out->len++)
+                out->data[out->len] = out->data[out->len - (size_t)dist];
+        }
     }
 }
 
