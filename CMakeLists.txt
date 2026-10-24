@@ -108,6 +108,8 @@ silicord_no_crt(silicord)
 target_compile_definitions(silicord PRIVATE
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0>
   $<$<COMPILE_LANGUAGE:RC>:SILICORD_ICON="${CMAKE_SOURCE_DIR}/assets/silicord.ico">)
+# The icon reaches rc.exe through a macro, which its dependency scan does not see.
+set_source_files_properties(src/silicord.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/assets/silicord.ico)
 target_link_options(silicord PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:WINDOWS)
 target_link_libraries(silicord PRIVATE silicord_core kernel32 user32 gdi32 shell32 comdlg32 ole32 d2d1 dwrite windowscodecs dwmapi advapi32 bcrypt winhttp ws2_32 winmm mf mfplat mfreadwrite mfuuid d3d11 dxgi dxguid)
 
