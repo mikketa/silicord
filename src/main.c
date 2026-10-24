@@ -1540,6 +1540,63 @@ static void on_dispatch(void *ctx, json_t t, json_t d)
         msg_batch_free(b);
 }
 
+/* READY's users by id, for the relationships that point into them. */
+typedef struct {
+    char id[24];
+    json_t user; /* .p is NULL in an empty slot */
+} user_slot_t;
+
+static unsigned id_hash(const char *id)
+{
+    unsigned h = 2166136261u; /* FNV-1a */
+
+    while (*id)
+        h = (h ^ (unsigned char)*id++) * 16777619u;
+    return h;
+}
+
+static int id_same(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
+/* The slot holding `id`, or the empty one where it would go. */
+static unsigned user_slot(const user_slot_t *t, unsigned mask, const char *id)
+{
+    unsigned h = id_hash(id) & mask;
+
+    while (t[h].user.p && !id_same(t[h].id, id))
+        h = (h + 1) & mask;
+    return h;
+}
+
+/* A table of 2^k slots, at least twice as many as the users; returns its mask. A repeated id keeps its first user. */
+static unsigned users_index(json_t users, user_slot_t **out)
+{
+    unsigned size = 16, n = (unsigned)json_count(users);
+    json_iter_t it;
+    json_t u, uid;
+
+    while (size < 2 * n)
+        size *= 2;
+    *out = mem_alloc(size * sizeof **out);
+    json_iter(users, &it);
+    while (json_next(&it, NULL, &u))
+        if (json_get(u, "id", &uid)) {
+            char id[24];
+            unsigned h;
+            json_raw(uid, id, sizeof id);
+            h = user_slot(*out, size - 1, id);
+            if (!(*out)[h].user.p) {
+                lstrcpynA((*out)[h].id, id, sizeof id);
+                (*out)[h].user = u;
+            }
+        }
+    return size - 1;
+}
+
 static void on_ready(void *ctx, json_t d)
 {
     session_t *s = ctx;
@@ -1556,10 +1613,12 @@ static void on_ready(void *ctx, json_t d)
         ui_post_model(model);
         /* Friends and requests: resolved to {id, type, username, global_name, avatar} for the UI. */
         {
-            json_t rels, rel, rv, ruser, users, u;
-            json_iter_t rit, uit;
+            json_t rels, rel, rv, ruser, users;
+            json_iter_t rit;
             sb_t *p = mem_alloc(sizeof *p);
-            int first = 1;
+            user_slot_t *index = NULL; /* made at the first relationship that needs it */
+            unsigned mask = 0;
+            int first = 1, looked = 0;
             sb_add(p, "RELATIONSHIPS");
             sb_addn(p, "", 1);
             sb_add(p, "[");
@@ -1570,19 +1629,14 @@ static void on_ready(void *ctx, json_t d)
                     int found = 0;
                     if (json_get(rel, "user", &ruser) && json_type(ruser) == JSON_OBJECT) {
                         found = 1;
-                    } else if ((json_get(rel, "user_id", &rv) || json_get(rel, "id", &rv)) && json_get(d, "users", &users)) {
+                    } else if (json_get(rel, "user_id", &rv) || json_get(rel, "id", &rv)) {
+                        unsigned h;
+                        if (!looked++ && json_get(d, "users", &users))
+                            mask = users_index(users, &index);
                         json_raw(rv, id, sizeof id);
-                        json_iter(users, &uit);
-                        while (!found && json_next(&uit, NULL, &u)) {
-                            json_t uid;
-                            char got[24];
-                            if (json_get(u, "id", &uid)) {
-                                json_raw(uid, got, sizeof got);
-                                if (lstrcmpA(got, id) == 0) {
-                                    ruser = u;
-                                    found = 1;
-                                }
-                            }
+                        if (index && index[h = user_slot(index, mask, id)].user.p) {
+                            ruser = index[h].user;
+                            found = 1;
                         }
                     }
                     if (!found)
@@ -1600,6 +1654,7 @@ static void on_ready(void *ctx, json_t d)
                     sb_add(p, "}");
                 }
             }
+            mem_free(index);
             sb_add(p, "]");
             ui_post(UI_EVENT, p);
         }
