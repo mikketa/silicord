@@ -32,6 +32,8 @@
 #include "voice.h"
 #include "audio.h"
 #include "vsync.h"
+#include "chime.h"
+#include "opus_math.h"
 
 /*
  * Palette (GDI COLORREF and ARGB): Discord's "Midnight" dark theme, its design
@@ -940,6 +942,212 @@ static void fade_tick(void)
         vsync_request();
 }
 
+/* ---- Splash ---- */
+
+/*
+ * At launch, "silicord" writes itself: a blue snake runs along the
+ * wordmark's strokes, the logo's pad at its head, and leaves the letters
+ * behind it in white; each letter plucks a note of the chime (chime.c) and
+ * a chord rings once the d is done. The splash is a popup over the app's
+ * area, so the view under it (edit boxes included) is drawn as usual, and
+ * it fades out onto it. A click ends it early. With Windows' animation
+ * effects off, there is none.
+ */
+#define SPLASH_DELAY 180  /* ms before the first stroke */
+#define SPLASH_SPEED 1.6f /* wordmark units per ms */
+#define SPLASH_GAP 45     /* ms between two letters */
+#define SPLASH_BODY 90.f  /* the snake's blue part, in wordmark units */
+#define SPLASH_HOLD 420   /* the word stays this long once written */
+#define SPLASH_FADE 380
+#define SPLASH_SKIP 160   /* the fade after a click */
+#define SPLASH_SHINE 520  /* a wave of blue runs across the word once written */
+#define SPLASH_TAIL 2200  /* the chord rings this long, after the splash if need be */
+#define SPLASH_LATENCY 40 /* the sound card's, roughly: notes start this much early */
+
+static struct {
+    HWND wnd;
+    LONGLONG t0, skip; /* ms: the first paint, a click */
+    int t;             /* ms since t0, the same for the whole paint */
+    float len[ARRAYSIZE(k_word)];
+    int start[ARRAYSIZE(k_word_letters)], dur[ARRAYSIZE(k_word_letters)], written;
+    unsigned char *wav;
+} g_splash;
+
+/* An arc's turn in radians, clockwise positive, and its radius. */
+static float arc_turn(const r_seg_t *s, float *radius)
+{
+    float sx = s->x0 - s->cx, sy = s->y0 - s->cy, ex = s->x1 - s->cx, ey = s->y1 - s->cy;
+    float a = om_atan2(sx * ey - sy * ex, sx * ex + sy * ey);
+
+    *radius = om_sqrt(sx * sx + sy * sy);
+    return (float)s->arc * (a < 0 ? -a : a);
+}
+
+static float seg_length(const r_seg_t *s)
+{
+    float dx = s->x1 - s->x0, dy = s->y1 - s->y0, r, a;
+
+    if (!s->arc)
+        return om_sqrt(dx * dx + dy * dy);
+    a = arc_turn(s, &r);
+    return r * (a < 0 ? -a : a);
+}
+
+/* The part of a piece between fractions u0 and u1 of its length. */
+static r_seg_t seg_part(const r_seg_t *s, float u0, float u1)
+{
+    r_seg_t p = *s;
+    float r, a, sx = s->x0 - s->cx, sy = s->y0 - s->cy;
+    double c0, s0, c1, s1;
+
+    if (!s->arc) {
+        p.x0 = s->x0 + (s->x1 - s->x0) * u0, p.y0 = s->y0 + (s->y1 - s->y0) * u0;
+        p.x1 = s->x0 + (s->x1 - s->x0) * u1, p.y1 = s->y0 + (s->y1 - s->y0) * u1;
+        return p;
+    }
+    a = arc_turn(s, &r);
+    c0 = om_cos(a * u0), s0 = om_sin(a * u0), c1 = om_cos(a * u1), s1 = om_sin(a * u1);
+    p.x0 = s->cx + (float)(sx * c0 - sy * s0), p.y0 = s->cy + (float)(sx * s0 + sy * c0);
+    p.x1 = s->cx + (float)(sx * c1 - sy * s1), p.y1 = s->cy + (float)(sx * s1 + sy * c1);
+    return p;
+}
+
+/* Strokes the stretch [from, to] of a letter's pieces, measured along them in wordmark units. */
+static void stroke_stretch(const r_seg_t *seg, const float *len, int n, float from, float to, float x, float y, float k,
+                           unsigned argb)
+{
+    r_seg_t part[8];
+    int np = 0;
+    float at = 0;
+
+    for (int i = 0; i < n; at += len[i++]) {
+        float a = from > at ? from : at, b = to < at + len[i] ? to : at + len[i];
+        if (b > a)
+            part[np++] = seg_part(&seg[i], (a - at) / len[i], (b - at) / len[i]);
+    }
+    if (np)
+        stroke_at(part, np, x, y, k, 24, argb);
+}
+
+/* The point `d` along a letter's pieces. */
+static void stretch_end(const r_seg_t *seg, const float *len, int n, float d, float *px, float *py)
+{
+    int i = 0;
+
+    while (i < n - 1 && d > len[i])
+        d -= len[i++];
+    r_seg_t p = seg_part(&seg[i], 0, d < len[i] ? d / len[i] : 1.f);
+    *px = p.x1, *py = p.y1;
+}
+
+/* Between ease-in-out and linear: the snake starts and stops softly, but never crawls. */
+static float splash_ease(float p)
+{
+    return .5f * p + .5f * p * p * (3 - 2 * p);
+}
+
+/* Overshoots a little, then settles. */
+static float back_out(float p)
+{
+    float q = p - 1;
+    return 1 + 2.70158f * q * q * q + 1.70158f * q * q;
+}
+
+static float clamp1(float v)
+{
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+static void splash_paint(RECT rc)
+{
+    float k = (float)S(560) / 796, fx, fy;
+    int t = g_splash.t;
+    const r_seg_t *seg = k_word;
+    const float *len = g_splash.len;
+    unsigned ink = ARGB(C_INK), blue = ARGB(C_BRAND), bg = ARGB(C_RAIL);
+
+    if (796 * k > .7f * (float)rc.right)
+        k = .7f * (float)rc.right / 796;
+    fx = ((float)rc.right - 796 * k) / 2, fy = ((float)rc.bottom - 180 * k) / 2 - (float)S(12);
+    fill(0, 0, rc.right, rc.bottom, C_RAIL);
+    for (int g = 0; g < (int)ARRAYSIZE(k_word_letters); seg += k_word_letters[g], len += k_word_letters[g], g++) {
+        int n = k_word_letters[g], el = t - g_splash.start[g], after = el - g_splash.dur[g];
+        float total = 0, d, body, head, shine, hx, hy;
+        if (el <= 0)
+            continue;
+        for (int i = 0; i < n; i++)
+            total += len[i];
+        d = total * (after >= 0 ? 1.f : splash_ease((float)el / (float)g_splash.dur[g]));
+        /* The blue body follows the head, then slips out of the letter's end. */
+        body = SPLASH_BODY * (after < 0 ? 1.f : 1.f - ease_out(clamp1((float)after / 220)));
+        shine = (float)(t - g_splash.written) / SPLASH_SHINE * (float)(ARRAYSIZE(k_word_letters) + 2) - (float)g;
+        shine = shine > 0 && shine < 2 ? .55f * (1 - (shine > 1 ? shine - 1 : 1 - shine)) : 0;
+        stroke_stretch(seg, len, n, 0, d - body, fx, fy, k, shine > 0 ? lerp_argb(ink, blue, shine) : ink);
+        if (body > .5f)
+            stroke_stretch(seg, len, n, d - body > 0 ? d - body : 0, d, fx, fy, k, blue);
+        /* The head: the pad of the logo, growing as the letter starts and shrinking once it is written. */
+        head = after < 0 ? ease_out(clamp1((float)el / 90)) : 1 - ease_out(clamp1((float)after / 160));
+        if (head > 0) {
+            stretch_end(seg, len, n, d, &hx, &hy);
+            dot_at(fx + hx * k, fy + hy * k, 40 * k * head, blue);
+            dot_at(fx + hx * k, fy + hy * k, 15 * k * head, bg);
+        }
+    }
+    /* The dots of the i pop as their letter starts. */
+    for (int i = 0; i < 2; i++) {
+        int el = t - g_splash.start[i ? 3 : 1];
+        if (el > 0)
+            dot_at(fx + k_word_dots[i] * k, fy + 26 * k, 30 * k * back_out(clamp1((float)el / 300)), blue);
+    }
+}
+
+static DWORD WINAPI splash_sound(void *wav)
+{
+    PlaySoundW(wav, NULL, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
+    mem_free(wav);
+    return 0;
+}
+
+/* Over the app's area, which the frame moves and sizes. */
+static void splash_place(void)
+{
+    RECT r;
+
+    if (!g_splash.wnd)
+        return;
+    GetWindowRect(g_ui.wnd, &r);
+    SetWindowPos(g_splash.wnd, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void splash_show(void)
+{
+    if (g_splash.wnd && !IsWindowVisible(g_splash.wnd)) {
+        splash_place();
+        ShowWindow(g_splash.wnd, SW_SHOWNA);
+    }
+}
+
+/* A refresh of the display while the splash shows: its next frame, and at the end its fade. */
+static void splash_tick(void)
+{
+    int t, fade_at, fade;
+
+    if (!g_splash.wnd || !g_splash.t0)
+        return;
+    t = (int)(qpc_ms() - g_splash.t0);
+    fade_at = g_splash.skip ? (int)(g_splash.skip - g_splash.t0) : g_splash.written + SPLASH_HOLD;
+    fade = g_splash.skip ? SPLASH_SKIP : SPLASH_FADE;
+    if (t >= fade_at + fade) {
+        DestroyWindow(g_splash.wnd);
+        g_splash.wnd = NULL;
+        return;
+    }
+    if (t > fade_at)
+        SetLayeredWindowAttributes(g_splash.wnd, 0, (BYTE)(255.f * (1 - ease_out((float)(t - fade_at) / (float)fade))),
+                                   LWA_ALPHA);
+    InvalidateRect(g_splash.wnd, NULL, FALSE);
+}
+
 static void tween_frame_start(void)
 {
     if (!g_ui.qpf.QuadPart)
@@ -962,6 +1170,7 @@ static void on_vsync(void)
 {
     if (g_fade.n)
         fade_tick();
+    splash_tick();
     if (!IsRectEmpty(&g_tween.repaint)) {
         InvalidateRect(g_ui.wnd, &g_tween.repaint, FALSE);
         SetRectEmpty(&g_tween.repaint);
@@ -16849,6 +17058,66 @@ static int frame_border(HWND wnd, int x)
     return GetSystemMetricsForDpi(x ? SM_CXFRAME : SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
 }
 
+static LRESULT CALLBACK splash_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        if (!g_splash.t0) { /* the first frame on screen: the sound starts with it */
+            HANDLE t = CreateThread(NULL, 0, splash_sound, g_splash.wav, 0, NULL);
+            if (t)
+                CloseHandle(t);
+            else
+                mem_free(g_splash.wav);
+            g_splash.wav = NULL;
+            g_splash.t0 = qpc_ms();
+        }
+        g_splash.t = (int)(qpc_ms() - g_splash.t0);
+        paint_frame(wnd, splash_paint);
+        vsync_request();
+        return 0;
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+        if (!g_splash.skip && g_splash.t0 && qpc_ms() - g_splash.t0 < g_splash.written + SPLASH_HOLD)
+            g_splash.skip = qpc_ms();
+        return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+/* Lays out the letters in time and makes the chime to match; the popup shows with the window. */
+static void splash_create(void)
+{
+    BOOL effects = TRUE;
+    const r_seg_t *seg = k_word;
+    float *len = g_splash.len;
+    int at = SPLASH_DELAY, onsets[ARRAYSIZE(k_word_letters)];
+
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &effects, 0);
+    if (!effects)
+        return;
+    for (int g = 0; g < (int)ARRAYSIZE(k_word_letters); seg += k_word_letters[g], len += k_word_letters[g], g++) {
+        float total = 0;
+        for (int i = 0; i < k_word_letters[g]; i++)
+            total += len[i] = seg_length(&seg[i]);
+        g_splash.start[g] = at;
+        g_splash.dur[g] = (int)(total / SPLASH_SPEED);
+        onsets[g] = at - SPLASH_LATENCY;
+        at += g_splash.dur[g] + SPLASH_GAP;
+    }
+    g_splash.written = at - SPLASH_GAP;
+    {
+        size_t size;
+        g_splash.wav = chime_wav(onsets, (int)ARRAYSIZE(onsets), g_splash.written, g_splash.written + SPLASH_TAIL, &size);
+    }
+    g_splash.wnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"SilicordSplash", L"", WS_POPUP, 0,
+                                   0, 0, 0, g_ui.top, NULL, NULL, NULL);
+    SetLayeredWindowAttributes(g_splash.wnd, 0, 255, LWA_ALPHA);
+}
+
 static LRESULT CALLBACK frame_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -16927,6 +17196,7 @@ static LRESULT CALLBACK frame_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOVE:
         if (g_ui.wnd)
             SendMessageW(g_ui.wnd, WM_MOVE, 0, 0);
+        splash_place();
         return 0;
     case WM_SIZE:
         if (!g_ui.wnd)
@@ -16936,8 +17206,13 @@ static LRESULT CALLBACK frame_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         MoveWindow(g_ui.wnd, 0, S(TITLE_H), LOWORD(lp), HIWORD(lp) - S(TITLE_H), TRUE);
+        splash_place();
         InvalidateRect(wnd, NULL, FALSE);
         return 0;
+    case WM_SHOWWINDOW:
+        if (wp)
+            splash_show();
+        break;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) {
             g_ui.saved_focus = GetFocus();
@@ -17022,6 +17297,9 @@ HWND ui_create(HINSTANCE inst)
     wc.lpfnWndProc = menu_proc;
     wc.lpszClassName = L"SilicordMenu";
     RegisterClassExW(&wc);
+    wc.lpfnWndProc = splash_proc;
+    wc.lpszClassName = L"SilicordSplash";
+    RegisterClassExW(&wc);
     wc.lpfnWndProc = check_proc;
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = L"SilicordCheck";
@@ -17041,6 +17319,7 @@ HWND ui_create(HINSTANCE inst)
         MoveWindow(g_ui.wnd, 0, S(TITLE_H), rc.right, rc.bottom - S(TITLE_H), FALSE);
     }
     set_icons(GetDpiForWindow(g_ui.top));
+    splash_create();
 
     g_ui.tray.cbSize = sizeof g_ui.tray;
     g_ui.tray.hWnd = g_ui.wnd;
