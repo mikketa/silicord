@@ -49,3 +49,15 @@ DirectWrite does not clip to a rectangle, so the pixels a text layout can touch 
 The unit tests in `tests/` are built like the client (no C runtime, `entry` as the entry point) and run by CTest on Windows. Most of them cover code that does not depend on Windows: the JSON reader, the inflater, markdown, messages, the model, slash commands, APNG, the member list. `tests/host` builds that code on Linux, with a small shim for the handful of Win32 calls it makes (`HeapAlloc`, `MultiByteToWideChar`, `lstrcpynA`...), and runs the same tests under AddressSanitizer and UBSan.
 
 It also builds `fuzz`, a deterministic fuzzer for everything that parses data from Discord. JSON documents are either generated from the keys the code looks up (taken from the sources) or made by replacing values in the JSON of the unit tests, then given to every consumer: messages and batches, READY and the gateway events applied to the model, profiles, member list updates, slash commands. Markdown, search filters and emoji expansion get random text; the inflater's output is compared with zlib's; APNGs are corrupted. A sanitizer report or a broken invariant (a markdown span outside the text, invalid JSON from `cmd_build`) stops it.
+
+## Benchmarks
+
+Principle 4 asks for a measurement before any optimization. Two programs, built with the rest but not run by CTest, give one:
+
+```bat
+python tools/make_bench_data.py bench-data
+build\bench bench-data
+build\render_bench bench-data
+```
+
+`make_bench_data.py` writes a synthetic READY shaped like Discord's (25 servers, about 1.5 MB), a gateway session of 2000 events compressed as `zlib-stream`, and a page of 50 messages. `bench` times the inflater, the JSON reader on the events and on READY, the model, messages and markdown, Opus and VP8; `render_bench` paints a 1920x1080 frame shaped like the client's. Each line is the best of several runs. `bench` also prints hashes of the inflated, Opus and VP8 output: an optimization must leave them as they were. With `BENCH_ONLY` set to the start of a line's name, only that line runs, many more times, to sample it with a profiler.
