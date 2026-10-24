@@ -1480,7 +1480,7 @@ static void pin_dms(model_t *m)
     tmp = mem_alloc(n * sizeof *tmp);
     for (int pass = 0; pass < 2; pass++)
         for (unsigned i = 0; i < n; i++)
-            if (!m->channels[m->dm_first + i].pinned == pass)
+            if ((!m->channels[m->dm_first + i].pinned) == pass)
                 tmp[k++] = m->channels[m->dm_first + i];
     for (unsigned i = 0; i < n; i++)
         m->channels[m->dm_first + i] = tmp[i];
@@ -1720,7 +1720,7 @@ static void copy_dms(model_t *n, unsigned *cap, const model_t *m, const char *id
         }
         for (unsigned i = m->dm_first; i < m->dm_first + m->dm_count; i++) {
             const channel_t *c = &m->channels[i];
-            if (!c->pinned != pass) /* pinned ones in the first pass, the others in the second */
+            if ((!c->pinned) != pass) /* pinned ones in the first pass, the others in the second */
                 continue;
             if (id && str_eq(c->id, id)) {
                 if (front && front->pinned && pass == 0) {
