@@ -82,6 +82,7 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ICON 40
 #define RAIL_STEP 48
 #define RAIL_FIRST 56 /* the first server, under home and its separator */
+#define FOLDER_GRAY 0x2B2D31 /* a folder without a color of its own: Discord's neutral gray */
 #define PANEL_GAP 8   /* around the floating user panel */
 #define SEARCH_W 244  /* the chat header search box */
 #define SIDE_W 240
@@ -200,7 +201,7 @@ typedef struct {
     /* Back and forward in the title bar: channel ids, "" for the friends page. */
     char hist[32][24];
     int hist_n, hist_pos, hist_nav;
-    r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small;
+    r_font_t *f_title, *f_h, *f_body, *f_small, *f_cat, *f_icon, *f_icon_big, *f_initial, *f_initial_small, *f_initial_mini;
     r_font_t *f_mono, *f_h1, *f_h2, *f_h3, *f_name, *f_emoji, *f_icon_mid, *f_caption, *f_tb, *f_icon_tb;
     r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan, *f_welcome, *f_orbs;
     r_rich_style_t rich;
@@ -3297,7 +3298,7 @@ static void paint_rail(RECT rc)
         {
             int end = k + 1;
             const folder_t *f = &g_ui.model->folders[g_rail.index[k]];
-            unsigned c = f->has_color ? f->color : 0x4C8DFF;
+            unsigned c = f->has_color ? f->color : FOLDER_GRAY;
             while (end < n && g_rail.kind[end] == RAIL_GUILD &&
                    g_ui.model->guilds[g_rail.index[end]].folder == g_rail.index[k])
                 end++;
@@ -3312,7 +3313,7 @@ static void paint_rail(RECT rc)
         {
             int f = g_rail.index[k], open = folder_is_open(f);
             const folder_t *fd = &g_ui.model->folders[f];
-            unsigned c = fd->has_color ? fd->color : 0x4C8DFF;
+            unsigned c = fd->has_color ? fd->color : FOLDER_GRAY;
             int hov = g_ui.hover_kind == HIT_FOLDER && g_ui.hover_index == f, unread = 0, mentions = 0, sel = 0, j = 0;
             for (unsigned g = 0; g < g_ui.model->nguilds; g++)
                 if (g_ui.model->guilds[g].folder == f) {
@@ -3324,22 +3325,27 @@ static void paint_rail(RECT rc)
                 }
             if (open) {
                 text_w(g_ui.f_icon_mid, C_INK, rect(x, y, S(ICON), S(ICON)), L"\xE8B7", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                /* folder glyph tinted with its color */
-                r_round(x + S(14), y + S(30), S(20), S(3), S(1), 0xFF000000u | c);
+                /* folder glyph tinted with its color, the accent's without one */
+                r_round(x + S(14), y + S(30), S(20), S(3), S(1), fd->has_color ? 0xFF000000u | c : ARGB(C_BRAND));
             } else {
                 /* Closed: up to four of its icons in a grid, like Discord. */
                 float t = tween_on(HIT_FOLDER, f, hov, TW_FAST, x, y, S(ICON), S(ICON));
-                r_round(x, y, S(ICON), S(ICON), S(16), lerp_argb(0x40000000u | c, 0x66000000u | c, t));
+                r_round(x, y, S(ICON), S(ICON), S(16), lerp_argb(0x66000000u | c, 0x8C000000u | c, t));
                 for (unsigned g = 0; g < g_ui.model->nguilds && j < 4; g++) {
                     if (g_ui.model->guilds[g].folder != f)
                         continue;
                     {
                         int gx = x + S(6) + (j % 2) * S(19), gy = y + S(6) + (j / 2) * S(19);
                         r_image_t *img = guild_icon(&g_ui.model->guilds[g]);
-                        if (img)
+                        if (img) {
                             r_image(img, gx, gy, S(17), S(17), S(9));
-                        else
+                        } else { /* its initials, as on its own icon */
+                            wchar_t ini[8];
+                            initials(model_str(g_ui.model, g_ui.model->guilds[g].name), ini, 8);
                             r_circle(gx, gy, S(17), ARGB(C_ITEM));
+                            text_w(g_ui.f_initial_mini, C_INK, rect(gx, gy, S(17), S(17)), ini, -1,
+                                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                        }
                     }
                     j++;
                 }
@@ -7009,7 +7015,7 @@ static const wchar_t *icon_family(void)
 static void make_fonts(void)
 {
     r_font_t **f[] = {&g_ui.f_title, &g_ui.f_h, &g_ui.f_body, &g_ui.f_small, &g_ui.f_cat, &g_ui.f_icon,
-                      &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small, &g_ui.f_mono, &g_ui.f_h1,
+                      &g_ui.f_icon_big, &g_ui.f_initial, &g_ui.f_initial_small, &g_ui.f_initial_mini, &g_ui.f_mono, &g_ui.f_h1,
                       &g_ui.f_h2, &g_ui.f_h3, &g_ui.f_name, &g_ui.f_emoji, &g_ui.f_icon_mid};
 
     invalidate_views(); /* message layouts point at the old fonts */
@@ -7027,6 +7033,7 @@ static void make_fonts(void)
     g_ui.f_icon_big = r_font(icon_family(), S(32), FW_NORMAL, 0);
     g_ui.f_initial = r_font(L"Segoe UI", S(17), FW_SEMIBOLD, 0);
     g_ui.f_initial_small = r_font(L"Segoe UI", S(13), FW_SEMIBOLD, 0);
+    g_ui.f_initial_mini = r_font(L"Segoe UI", S(7), FW_SEMIBOLD, 0);
     g_ui.f_mono = r_font(L"Consolas", S(14), FW_NORMAL, 0);
     g_ui.f_h1 = r_font(L"Segoe UI", S(24), FW_BOLD, 0);
     g_ui.f_h2 = r_font(L"Segoe UI", S(20), FW_BOLD, 0);
