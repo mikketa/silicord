@@ -137,7 +137,8 @@ static void test_parts(void)
                 "\"width\":498,\"height\":280}},"
                 "{\"type\":\"link\",\"url\":\"https://empty\"},"
                 "{\"type\":\"video\",\"title\":\"Clip\",\"thumbnail\":{\"proxy_url\":\"https://media.discordapp.net/v\","
-                "\"width\":1280,\"height\":720}}]}", &m) && m.nembeds == 3,
+                "\"width\":1280,\"height\":720},\"video\":{\"url\":\"https://youtube/e\",\"width\":720,\"height\":1280}}]}",
+                &m) && m.nembeds == 3,
           "embeds without content are dropped");
     check(m.nembeds == 3 && m.embeds[0].has_color && m.embeds[0].color == 0xFF0000 && str_eq(&m.embeds[0].title, "T") &&
               str_eq(&m.embeds[0].provider, "P") && str_eq(&m.embeds[0].author, "A") && str_eq(&m.embeds[0].footer, "F") &&
@@ -152,6 +153,9 @@ static void test_parts(void)
     check(m.nembeds == 3 && !m.embeds[2].media_only && str_eq(&m.embeds[2].image, "https://media.discordapp.net/v") &&
               !m.embeds[2].thumbnail.len && m.embeds[2].image_h == 720,
           "video embeds show their thumbnail large");
+    check(m.nembeds == 3 && m.embeds[2].video && m.embeds[2].video_w == 720 && m.embeds[2].video_h == 1280 &&
+              !m.embeds[0].video,
+          "a video's player keeps its own size, a Short's upright");
     msg_free(&m);
 
     check(parse("{\"id\":\"3\",\"content\":\"\",\"sticker_items\":[{\"id\":\"77\",\"name\":\"wave\",\"format_type\":1}],"

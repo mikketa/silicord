@@ -386,8 +386,11 @@ static void parse_embeds(json_t list, msg_t *out)
         if (starts_with(&type, "image") || starts_with(&type, "gifv")) {
             e->media_only = 1;
         } else if (starts_with(&type, "video") && !e->image.len && e->thumbnail.len) {
-            /* Videos (YouTube...) show their thumbnail large. */
-            sb_t t = e->image;
+            /* Videos (YouTube...) show their thumbnail large, in the player's frame. */
+            sb_t t = e->image, player = {0};
+            parse_media(item, "video", &player, &e->video_w, &e->video_h);
+            sb_free(&player);
+            e->video = 1;
             e->image = e->thumbnail;
             e->thumbnail = t;
             e->image_w = e->thumb_w;

@@ -4548,6 +4548,27 @@ static void draw_media(r_image_t *img, int x, int y, int w, int h, int spoiler)
 }
 
 /*
+ * A video embed's player before it plays, as in Discord: the thumbnail
+ * cropped to the frame, and over it a pill to play and to open it.
+ */
+static void draw_video(const msg_t *m, int index, const msg_embed_t *e, int x, int y, int w, int h)
+{
+    int tw = e->image_w > 0 ? e->image_w : w, th = e->image_h > 0 ? e->image_h : h;
+    float k = (float)w / (float)tw > (float)h / (float)th ? (float)w / (float)tw : (float)h / (float)th;
+    r_image_t *img = part_image(m, 'i', index, &e->image, (int)((float)tw * k + .5f), (int)((float)th * k + .5f));
+    int pw = S(76), ph = S(36), px = x + (w - pw) / 2, py = y + (h - ph) / 2;
+
+    if (img)
+        r_image_cover(img, x, y, w, h, S(8));
+    else
+        r_round(x, y, w, h, S(8), 0xFF17181B);
+    r_round(px, py, pw, ph, S(10), 0x99000000u);
+    text_w(g_ui.f_icon_mid, C_INK, rect(px + S(6), py, S(30), ph), L"\xE768", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    text_w(g_ui.f_icon_mid, C_INK, rect(px + pw - S(36), py, S(30), ph), L"\xE8A7", -1,
+           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+/*
  * Walks what follows the text of message m, laid out at (x, y) in width w:
  * files, embeds, the sticker and reactions. Paints when `draw`, and reports
  * the part under (hx, hy) in `hit_part` when it is not NULL. Returns the height.
@@ -4602,9 +4623,22 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
             continue;
         }
         {
-            int ew = w < S(EMBED_MAX_W) ? w : S(EMBED_MAX_W), top = y, pad = S(12), ix = x + S(4) + pad;
-            int thumb = e->thumbnail.len ? S(80) : 0, iw = ew - S(4) - 2 * pad, tw = iw - (thumb ? thumb + S(16) : 0);
-            int ey = y + pad, slot = i * 32;
+            int ew = w < S(EMBED_MAX_W) ? w : S(EMBED_MAX_W), top = y, pad = S(12), ix = x + S(4) + pad, vw = 0, vh = 0;
+            int thumb, iw, tw, ey = y + pad, slot = i * 32;
+
+            /*
+             * A video's card is as wide as its player: its size in CSS pixels, at most 400 x 450,
+             * as in Discord. The title wraps to it.
+             */
+            if (e->video) {
+                int room = ew - S(4) - 2 * pad;
+                fit(S(e->video_w > 0 ? e->video_w : e->image_w), S(e->video_h > 0 ? e->video_h : e->image_h),
+                    room < S(400) ? room : S(400), S(450), &vw, &vh);
+                ew = vw + S(4) + 2 * pad;
+            }
+            thumb = e->thumbnail.len ? S(80) : 0;
+            iw = ew - S(4) - 2 * pad;
+            tw = iw - (thumb ? thumb + S(16) : 0);
 
             /* When painting, a first pass measures so the card can be drawn under the content. */
             for (int pass = draw ? 0 : 1; pass < 2; pass++) {
@@ -4629,7 +4663,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                     mem_free(wt);
                     ey += th + S(6);
                 }
-                if (e->description.len) {
+                if (e->description.len && !e->video) { /* Discord leaves a video's out */
                     emb_text_t *d = emb_text(m, slot, &e->description, tw);
                     if (pass && draw)
                         r_rich_draw(d->rich, ix, ey, 1);
@@ -4660,10 +4694,15 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                 if (thumb && ey < y + pad + thumb + S(6))
                     ey = y + pad + thumb + S(6);
                 if (e->image.len) {
-                    int mw, mh;
-                    fit(e->image_w, e->image_h, iw, S(300), &mw, &mh);
-                    if (pass && draw && r_visible(ey, mh))
-                        draw_media(part_image(m, 'i', i, &e->image, mw, mh), ix, ey, mw, mh, 0);
+                    int mw = vw, mh = vh;
+                    if (!e->video)
+                        fit(e->image_w, e->image_h, iw, S(300), &mw, &mh);
+                    if (pass && draw && r_visible(ey, mh)) {
+                        if (e->video)
+                            draw_video(m, i, e, ix, ey, mw, mh);
+                        else
+                            draw_media(part_image(m, 'i', i, &e->image, mw, mh), ix, ey, mw, mh, 0);
+                    }
                     if (pass && hit_part && hit(hx, hy, ix, ey, mw, mh))
                         *hit_part = (part_t){PART_EMBED_TITLE, i};
                     ey += mh + S(8);

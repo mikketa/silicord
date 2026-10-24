@@ -28,6 +28,8 @@ typedef struct {
     int image_w, image_h;
     sb_t thumbnail;
     int thumb_w, thumb_h;
+    int video;            /* a video (YouTube...): `image` is its thumbnail, shown in the player's frame */
+    int video_w, video_h; /* the player's size, 0 when Discord gives none */
     msg_field_t *fields;
     int nfields;
 } msg_embed_t;
