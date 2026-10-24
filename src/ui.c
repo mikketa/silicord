@@ -205,6 +205,7 @@ typedef struct {
     r_font_t *f_nav, *f_section, *f_small_mid, *f_gif, *f_nitro, *f_nitro_h, *f_nitro_card, *f_h1x, *f_menu, *f_chan, *f_welcome, *f_orbs;
     r_rich_style_t rich;
     int hover_link;
+    int under_msg, under_link; /* the link under the mouse, underlined as in Discord: message, link; -1 if none */
     HICON icon_big, icon_small;
     int dpi, view, disconnected;
 
@@ -470,7 +471,7 @@ typedef struct member {
 } member_t;
 
 static ui_t g_ui = {.guild = -1, .channel = -1, .hover_msg = -1, .notified_channel = -1, .hover_tool = -1,
-                    .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE, .upload_hover = -1,
+                    .under_msg = -1, .show_members = 1, .ml_hover = -1, .my_status = ML_ONLINE, .upload_hover = -1,
                     .friend_hover = -1};
 static DWORD g_ui_thread;
 
@@ -5730,6 +5731,7 @@ static void paint_message(int i, int x0, int y, int w)
     }
     if (m->text.len || m->edited) {
         r_rich_t *r = msg_rich(m, tw);
+        r_rich_hover(r, i == g_ui.under_msg ? g_ui.under_link : -1);
         r_rich_draw(r, tx, y, m->revealed);
         y += r_rich_height(r);
     }
@@ -7280,6 +7282,7 @@ static void open_channel(int index)
     g_ui.msgs_status = 0;
     g_ui.msgs_older_loading = 0;
     g_ui.hover_msg = -1;
+    g_ui.under_msg = -1;
     sb_clear(&g_ui.send_error);
     g_ui.msgs_channel[0] = 0;
     g_ui.detached = 0;
@@ -16296,9 +16299,15 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 static void update_hover(int x, int y)
 {
-    int kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, NULL, NULL), i = -1, ax, ay;
+    int um = -1, ul = -1, kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, &um, &ul), i = -1, ax, ay;
     int tool = toolbar_hit(x, y, NULL);
     part_t part = {PART_NONE, -1};
+
+    if (um != g_ui.under_msg || ul != g_ui.under_link) {
+        g_ui.under_msg = um;
+        g_ui.under_link = ul;
+        redraw();
+    }
 
     {
         int mh = ml_hit(x, y, NULL);
@@ -16601,6 +16610,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ui.hover_kind != HIT_NONE) {
             g_ui.hover_kind = HIT_NONE;
             g_ui.hover_index = -1;
+            redraw();
+        }
+        if (g_ui.under_msg >= 0) {
+            g_ui.under_msg = -1;
             redraw();
         }
         return 0;

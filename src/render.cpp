@@ -1626,6 +1626,7 @@ struct r_rich {
     rich_block *blocks;
     int nblocks;
     int height;
+    int hover; /* the link underlined under the mouse, -1 for none */
     ColorEffect *link, *mention, *muted;
 };
 
@@ -1694,6 +1695,7 @@ extern "C" r_rich_t *r_rich_build(const md_doc_t *d, const r_rich_style_t *st, i
     r->doc = d;
     r->st = st;
     r->width = width;
+    r->hover = -1;
     r->link = new_effect(st->link);
     r->mention = new_effect(st->mention);
     r->muted = new_effect(st->muted);
@@ -1831,6 +1833,33 @@ extern "C" int r_rich_hit(r_rich_t *r, int x, int y, unsigned *flags, int *link)
         return 0;
     }
     return 0;
+}
+
+/* Turns the underline of every span of `link` on, or back to what its markdown says. */
+static void underline_link(r_rich_t *r, int link, BOOL on)
+{
+    for (int i = 0; i < r->nblocks; i++) {
+        rich_block *b = &r->blocks[i];
+        for (int s = 0; s < r->doc->nspans && b->layout; s++) {
+            const md_span_t *sp = &r->doc->spans[s];
+            int a = sp->start > b->start ? sp->start : b->start;
+            int e = sp->start + sp->len < b->start + b->len ? sp->start + sp->len : b->start + b->len;
+            DWRITE_TEXT_RANGE range = {(UINT32)(a - b->start), (UINT32)(e - a)};
+            if ((sp->flags & MD_LINK) && sp->link == link && e > a)
+                b->layout->SetUnderline(on || (sp->flags & MD_UNDERLINE), range);
+        }
+    }
+}
+
+extern "C" void r_rich_hover(r_rich_t *r, int link)
+{
+    if (!r || r->hover == link)
+        return;
+    if (r->hover >= 0)
+        underline_link(r, r->hover, FALSE);
+    if (link >= 0)
+        underline_link(r, link, TRUE);
+    r->hover = link;
 }
 
 extern "C" void r_rich_free(r_rich_t *r)

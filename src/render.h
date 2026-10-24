@@ -112,6 +112,8 @@ int r_rich_height(r_rich_t *r);
 void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers);
 /* Styled span under (x, y), relative to the origin used to draw. Returns 0 over plain text. */
 int r_rich_hit(r_rich_t *r, int x, int y, unsigned *flags, int *link);
+/* Underlines link `link` (as r_rich_hit reports it), the one under the mouse; -1 for none. */
+void r_rich_hover(r_rich_t *r, int link);
 void r_rich_free(r_rich_t *r);
 
 /*
