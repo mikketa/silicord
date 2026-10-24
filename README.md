@@ -7,7 +7,7 @@
 
 A native Discord client for Windows, written in C and x64 assembly. No C runtime: Win32, WinHTTP and DirectWrite. When Discord asks for a captcha, that one check is shown with the Edge WebView2 runtime already installed on Windows. The rest of the client does not open a browser.
 
-> **Status: early.** Silicord logs in with a QR code and covers everyday text chat:
+> **Status: early.** Silicord logs in as the Discord website does (password and two-factor, QR code or passkey) and covers everyday text chat:
 >
 > - servers (with their folders), channels, threads, forums and direct messages, the friends list
 > - messages with formatting, custom and animated emoji, GIFs, images, files, link previews, stickers, polls, reactions, and bots' buttons and menus
@@ -45,7 +45,13 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 ## Usage
 
-Run `silicord.exe` and scan the QR code with the Discord mobile app (Settings › Scan QR Code), then confirm on your phone. Passkeys, two-factor codes and SMS checks all happen on the phone, so every account type works. If Discord asks for a captcha before an action, it opens in the window for you to solve. Silicord does not send that check anywhere else.
+Run `silicord.exe`. The login page is the Discord website's, with the same three ways in:
+
+- your e-mail or phone number (with its country code, `+33...`) and password, then, if your account has two-factor authentication, a code from your authenticator app, a backup code, a code sent by SMS, or your security key or passkey;
+- the QR code: scan it with the Discord mobile app (Settings › Scan QR Code) and confirm on your phone;
+- **Or sign in with a passkey**: Windows asks for Windows Hello, a security key or a phone nearby, as a browser would. This needs Windows 10 version 1903 or later.
+
+"Forgot your password?" sends Discord's reset e-mail; the reset itself happens in the browser. If Discord asks for a captcha, it opens in the window for you to solve. Silicord does not send that check anywhere else. Your password is sent to Discord once and never stored; Silicord forgets it as soon as Discord has answered. A few rare cases still need the website once: restoring a disabled account, confirming a new login location by SMS, and phone numbers without their country code.
 
 The token Discord sends back is stored in the Windows Credential Manager. The power button next to your name logs out and removes it.
 
@@ -105,11 +111,11 @@ Silicord has no telemetry, analytics or crash reporting, and no server of its ow
 - `media.tenor.com` and `static.klipy.com`: GIFs shown in messages and in the GIF picker
 - `raw.githubusercontent.com`: the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, when a profile uses a display name font not downloaded yet
 
-Requests to Discord's API, and the websocket upgrades for the gateway, QR login and voice, send the same client properties as the Discord website in Chrome: user agent, `X-Super-Properties` and the site's current build number. Image, font and GIF downloads use that same user agent, without Discord cookies or API headers. Links in messages open in your default browser only when you click them.
+Requests to Discord's API, and the websocket upgrades for the gateway, QR login and voice, send the same client properties as the Discord website in Chrome: user agent, `X-Super-Properties` and the site's current build number. Image, font and GIF downloads use that same user agent, without Discord cookies or API headers. Logging in goes through the same endpoints as the website's login page. Passkeys and security keys are handled by Windows (`webauthn.dll`), which signs Discord's challenge for `discord.com` on your device; nothing else is involved. Links in messages open in your default browser only when you click them.
 
 On your computer, Silicord keeps:
 
-- your token, in the Windows Credential Manager (`silicord/token`)
+- your token, in the Windows Credential Manager (`silicord/token`); never your password or your e-mail address
 - its settings, image cache and fonts, in `%LOCALAPPDATA%\Silicord`
 - a WebView2 profile in `%LOCALAPPDATA%\Silicord\WebView2`, created the first time a captcha is shown
 - pasted pictures waiting to be sent, in `%TEMP%\Silicord-paste`, and with `--debug` the log `%TEMP%\silicord-debug.log`

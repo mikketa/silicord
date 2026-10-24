@@ -15,6 +15,8 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 - [x] HTTPS REST requests with WinHTTP (`GET /users/@me`)
 - [x] Allocation-free JSON reader (values are slices of the source buffer)
 - [x] QR code login through the mobile app (passkeys, 2FA and SMS are handled on the phone)
+- [x] The website's login page: e-mail or phone and password, two-factor (authenticator app, backup code, SMS, security key), passkeys through Windows Hello, password reset e-mail
+- [ ] Login: restoring a disabled account, confirming a new location by SMS, a country code picker
 - [x] WebSocket gateway (`WinHttpWebSocket*`): Hello, Identify, Heartbeat, Ready
 - [x] Web client headers (user agent, `X-Super-Properties`, build number) and an in-window captcha when Discord asks for one
 - [x] Automatic reconnect with backoff, session resume, fresh identify when the session is gone
@@ -39,7 +41,7 @@ Every milestone ships a working `.exe`. Binary size, RAM and idle CPU are measur
 ## 4. Win32 UI 🚧
 
 - [x] Native, custom-drawn window with dark title bar and per-monitor DPI
-- [x] Login screen with the QR code
+- [x] Login screen as the website's: the form, the QR code and the passkey
 - [x] Server rail with round icons, channel list with collapsible categories, user panel
 - [x] Message view (grouping, dates, replies, mentions) and composer
 - [x] Software renderer on DirectWrite (no Direct2D, no GPU), color emoji everywhere, drawn in bands
