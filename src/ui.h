@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include "model.h"
+#include "auth.h"
 #include "msg.h"
 #include "profile.h"
 #include "sb.h"
@@ -41,6 +42,7 @@ enum {
     UI_QUESTS,          /* text = the quests/@me JSON (empty on failure) */
     UI_APP,             /* text = an application id, NUL, then its public JSON (empty on failure) */
     UI_CAPTCHA,         /* JSON challenge: service, sitekey, rqdata, invisible */
+    UI_LOGIN_ANSWER,    /* login_answer_t*: Discord's answer to a request of the login page */
 };
 
 enum { ACTIVITY_MESSAGE, ACTIVITY_ACK };
@@ -74,8 +76,32 @@ void ui_post_profile(profile_t *p);
 void ui_post_font(int id, sb_t *data);
 sb_t *ui_text(const char *text);
 
+/* The login page's requests, and the answer each gets (a token logs in by itself). */
+enum { LOGIN_PASSWORD = 1, LOGIN_MFA, LOGIN_SMS, LOGIN_PASSKEY, LOGIN_FORGOT };
+typedef struct {
+    int request;        /* LOGIN_* */
+    unsigned method;    /* LOGIN_MFA: the MFA_* method it answers */
+    auth_result_t r;
+} login_answer_t;
+void ui_post_login(login_answer_t *a);
+
 /* Implemented by the application, called on the UI thread. */
 void app_login_token(const char *token);
+/*
+ * The login page, as the website does it: e-mail or phone and password, then a second factor
+ * (a code, an SMS or a security key) when the account has one, a passkey instead of
+ * both, and the password reset e-mail. Each answers with UI_LOGIN_ANSWER.
+ */
+void app_login_password(const char *login, size_t ln, const char *password, size_t pn);
+/* The code typed for MFA_TOTP, MFA_BACKUP or MFA_SMS; MFA_WEBAUTHN asks Windows for the key (code unused). */
+void app_login_mfa(unsigned method, const char *code, size_t n);
+void app_login_sms(void);
+void app_login_passkey(void);
+void app_login_forgot(const char *login, size_t ln);
+/* Drops the request in progress: its answer will not come, a Windows passkey dialog closes. */
+void app_login_cancel(void);
+/* Windows can use passkeys (webauthn.dll). */
+int app_passkeys(void);
 void app_logout(void);
 void app_reconnect(void);
 void app_quit(void);

@@ -209,6 +209,12 @@ typedef struct {
     /* Login. */
     qr_t *qr;
     sb_t status, scanned;
+    int login_step, login_busy, login_hover; /* LSTEP_*, the LOGIN_* request waiting for its answer, LH_* */
+    int passkeys;                            /* Windows can use passkeys */
+    unsigned mfa_methods, mfa_method;
+    sb_t login_error, password_error, code_error, mfa_phone, forgot_to;
+    HWND email_edit, password_edit, code_edit;
+    WNDPROC login_edit_proc;
 
     /* Session. */
     model_t *model;
@@ -563,6 +569,14 @@ void ui_post_profile(profile_t *p)
     if (!PostMessageW(g_ui.wnd, UI_PROFILE, 0, (LPARAM)p)) {
         profile_free(p);
         mem_free(p);
+    }
+}
+
+void ui_post_login(login_answer_t *a)
+{
+    if (!PostMessageW(g_ui.wnd, UI_LOGIN_ANSWER, 0, (LPARAM)a)) {
+        auth_result_free(&a->r);
+        mem_free(a);
     }
 }
 
@@ -1176,65 +1190,566 @@ static void paint_dm_icon(const channel_t *c, int x, int y, int d, unsigned bg)
 
 /* ---- Login view ---- */
 
+/*
+ * Discord's login page: the form on the left (e-mail or phone, password),
+ * the QR code and the passkey on the right, then the second factor or the
+ * password reset in a smaller card. The fields are EDIT controls placed over
+ * the boxes drawn here; Discord's answers come back as UI_LOGIN_ANSWER.
+ */
+enum { LSTEP_FORM, LSTEP_MFA, LSTEP_PICK, LSTEP_SENT };
+enum { LH_EMAIL = 1, LH_PASSWORD, LH_CODE, LH_LOGIN, LH_FORGOT, LH_PASSKEY, LH_CONFIRM, LH_OTHER, LH_BACK, LH_RESEND,
+       LH_OKAY, LH_PICK }; /* LH_PICK + an MFA_* method */
+
+#define LOGIN_W 784
+#define LOGIN_SMALL_W 480
+#define LOGIN_PAD 32
+#define LOGIN_FORM_W 414
+#define LOGIN_FIELD_H 40
+#define LOGIN_BUTTON_H 44
+#define LOGIN_QR 176
+#define LOGIN_CARD 0xFF1A1A1Eu   /* the auth card on the page's black */
+#define LOGIN_INPUT 0xFF121214u  /* input-background */
+#define LOGIN_LINK 0xFF2781E7u   /* text-link */
+
+static void set_hit(int x, int y, int w, int h, int id);
+static int settings_hit(int x, int y);
+static void redraw(void);
+
+/* The methods in the order the website offers them. */
+static const unsigned k_mfa_order[4] = {MFA_WEBAUTHN, MFA_TOTP, MFA_BACKUP, MFA_SMS};
+
+static const char *mfa_label(unsigned m)
+{
+    switch (m) {
+    case MFA_WEBAUTHN: return "Use a passkey or security key";
+    case MFA_TOTP:     return "Use your authenticator app";
+    case MFA_BACKUP:   return "Use a backup code";
+    default:           return "Use a code sent to your phone";
+    }
+}
+
+static int login_small(void)
+{
+    return g_ui.login_step != LSTEP_FORM;
+}
+
 static RECT login_card(void)
 {
     RECT rc;
-    int w = S(760), h = S(380);
+    int w = S(login_small() ? LOGIN_SMALL_W : LOGIN_W), h = S(378);
 
+    if (g_ui.login_step == LSTEP_PICK) {
+        int rows = 0;
+        for (int i = 0; i < 4; i++)
+            rows += (g_ui.mfa_methods & k_mfa_order[i]) != 0;
+        h = S(180) + S(52) * rows;
+    } else if (g_ui.login_step == LSTEP_MFA) {
+        h = S(340);
+    } else if (g_ui.login_step == LSTEP_SENT) {
+        h = S(250);
+    }
     GetClientRect(g_ui.wnd, &rc);
-    return rect((rc.right - w) / 2, (rc.bottom - h) / 2 + S(30), w, h);
+    return rect((rc.right - w) / 2, (rc.bottom - h) / 2 + S(24), w, h);
 }
 
-static void paint_step(int x, int y, const char *n, const char *label)
+/* The boxes the EDIT controls sit in, for the current step (empty when not shown). */
+static void login_boxes(RECT *email, RECT *password, RECT *code)
 {
-    r_circle(x, y, S(24), ARGB(C_BRAND));
-    text(g_ui.f_small, C_RAIL, rect(x, y, S(24), S(24)), n, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    text(g_ui.f_body, C_INK, rect(x + S(38), y, S(360), S(24)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    RECT card = login_card(), none = {0};
+    int x = card.left + S(LOGIN_PAD), w = card.right - card.left - 2 * S(LOGIN_PAD);
+
+    *email = *password = *code = none;
+    if (g_ui.login_step == LSTEP_FORM) {
+        *email = rect(x, card.top + S(134), S(LOGIN_FORM_W), S(LOGIN_FIELD_H));
+        *password = rect(x, card.top + S(218), S(LOGIN_FORM_W), S(LOGIN_FIELD_H));
+    } else if (g_ui.login_step == LSTEP_MFA && g_ui.mfa_method != MFA_WEBAUTHN) {
+        *code = rect(x, card.top + S(150), w, S(LOGIN_FIELD_H));
+    }
+}
+
+static void login_text(r_font_t *f, unsigned argb, RECT r, const char *s, UINT flags)
+{
+    wchar_t *w = utf8_to_wide(s, lstrlenA(s));
+
+    r_text(f, argb, r.left, r.top, r.right - r.left, r.bottom - r.top, w, -1, rflags(flags));
+    mem_free(w);
+}
+
+/* "EMAIL OR PHONE NUMBER *", or in red with the error after it, as the website marks a field. */
+static void login_label(int x, int y, int w, const char *label, const sb_t *error, int required)
+{
+    int lw = text_width(g_ui.f_cat, label);
+
+    login_text(g_ui.f_cat, error->len ? ARGB(C_RED) : ARGB(C_MUTED), rect(x, y, w, S(16)), label,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (error->len) {
+        sb_t line = {0};
+        sb_add(&line, " - ");
+        sb_addn(&line, error->data, error->len);
+        login_text(g_ui.f_small, ARGB(C_RED), rect(x + lw, y, w - lw, S(16)), line.data,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        sb_free(&line);
+    } else if (required) {
+        login_text(g_ui.f_cat, ARGB(C_RED), rect(x + lw + S(4), y, S(12), S(16)), "*", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+static void login_box(RECT r, int id)
+{
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), LOGIN_INPUT);
+    set_hit(r.left, r.top, r.right - r.left, r.bottom - r.top, id);
+}
+
+static void login_link(r_font_t *f, int x, int y, int w, const char *s, UINT align, int id)
+{
+    int tw = text_width(f, s), lx = align & DT_CENTER ? x + (w - tw) / 2 : align & DT_RIGHT ? x + w - tw : x;
+
+    login_text(f, g_ui.login_hover == id ? 0xFF5EA2F0u : LOGIN_LINK, rect(lx, y, tw + S(2), S(20)), s,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    set_hit(lx, y, tw, S(20), id);
+}
+
+static void login_button(int x, int y, int w, const char *label, int id, int busy)
+{
+    unsigned c = busy ? 0xFF4752C4u : g_ui.login_hover == id ? 0xFF4752C4u : ARGB(C_BRAND);
+
+    r_round(x, y, w, S(LOGIN_BUTTON_H), S(8), c);
+    if (busy)
+        text_w(g_ui.f_nav, C_INK, rect(x, y, w, S(LOGIN_BUTTON_H)), L"\x2022 \x2022 \x2022", -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    else
+        login_text(g_ui.f_nav, 0xFFFFFFFFu, rect(x, y, w, S(LOGIN_BUTTON_H)), label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (!busy)
+        set_hit(x, y, w, S(LOGIN_BUTTON_H), id);
+}
+
+static void paint_login_qr(int x, int y, int w)
+{
+    int tile = S(LOGIN_QR), tx = x + (w - tile) / 2;
+
+    r_round(tx, y, tile, tile, S(8), g_ui.scanned.len ? LOGIN_INPUT : 0xFFFFFFFFu);
+    if (g_ui.scanned.len) {
+        text_w(g_ui.f_icon_big, C_BRAND, rect(tx, y + S(44), tile, S(48)), ICON_CHECK, -1, DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_h, C_INK, rect(tx + S(8), y + S(104), tile - S(16), S(24)), g_ui.scanned.data,
+             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else if (g_ui.qr) {
+        int m = (tile - S(16)) / g_ui.qr->size, off = (tile - m * g_ui.qr->size) / 2;
+        for (int qy = 0; qy < g_ui.qr->size; qy++)
+            for (int qx = 0; qx < g_ui.qr->size; qx++)
+                if (qr_dark(g_ui.qr, qx, qy))
+                    fill(tx + off + qx * m, y + off + qy * m, m, m, C_RAIL);
+        /* Silicord's mark in the middle, as Discord puts its own: level M error correction absorbs it. */
+        r_round(tx + tile / 2 - S(17), y + tile / 2 - S(17), S(34), S(34), S(8), 0xFFFFFFFFu);
+        r_round(tx + tile / 2 - S(14), y + tile / 2 - S(14), S(28), S(28), S(7), ARGB(C_BRAND));
+        draw_mark(tx + tile / 2 - S(8), y + tile / 2 - S(8), S(1), C_INK);
+    } else {
+        text(g_ui.f_small, C_RAIL, rect(tx, y, tile, tile), "Getting a code\xE2\x80\xA6", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    if (g_ui.scanned.len) {
+        text(g_ui.f_title, C_INK, rect(x, y + tile + S(32), w, S(30)), "Check your phone!", DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_body, C_MUTED, rect(x, y + tile + S(70), w, S(44)), "Confirm the login on the Discord mobile app.",
+             DT_CENTER | DT_WORDBREAK);
+    } else {
+        text(g_ui.f_title, C_INK, rect(x, y + tile + S(32), w, S(30)), "Log in with QR Code", DT_CENTER | DT_SINGLELINE);
+        text(g_ui.f_body, C_MUTED, rect(x, y + tile + S(70), w, S(44)),
+             "Scan this with the Discord mobile app to log in instantly.", DT_CENTER | DT_WORDBREAK);
+    }
+    if (g_ui.passkeys)
+        login_link(g_ui.f_section, x, y + tile + S(124), w, "Or sign in with a passkey", DT_CENTER, LH_PASSKEY);
+}
+
+static void paint_login_form(RECT card)
+{
+    RECT email, password, code;
+    int x = card.left + S(LOGIN_PAD), y = card.top + S(LOGIN_PAD), fw = S(LOGIN_FORM_W);
+    int qx = x + fw + S(64), qw = card.right - S(LOGIN_PAD) - qx;
+
+    login_boxes(&email, &password, &code);
+    text(g_ui.f_title, C_INK, rect(x, y, fw, S(30)), "Welcome back!", DT_CENTER | DT_SINGLELINE);
+    text(g_ui.f_body, C_MUTED, rect(x, y + S(38), fw, S(22)), "We're so excited to see you again!", DT_CENTER | DT_SINGLELINE);
+    login_label(x, email.top - S(24), fw, "EMAIL OR PHONE NUMBER", &g_ui.login_error, 1);
+    login_box(email, LH_EMAIL);
+    login_label(x, password.top - S(24), fw, "PASSWORD", &g_ui.password_error, 1);
+    login_box(password, LH_PASSWORD);
+    login_link(g_ui.f_section, x, password.bottom + S(4), fw, "Forgot your password?", DT_LEFT, LH_FORGOT);
+    login_button(x, password.bottom + S(40), fw, "Log In", LH_LOGIN, g_ui.login_busy == LOGIN_PASSWORD || g_ui.login_busy == LOGIN_FORGOT);
+    paint_login_qr(qx, y, qw);
+}
+
+static void paint_login_mfa(RECT card)
+{
+    RECT email, password, code;
+    int x = card.left + S(LOGIN_PAD), y = card.top + S(LOGIN_PAD), w = card.right - card.left - 2 * S(LOGIN_PAD);
+    int others = 0;
+    const char *label = g_ui.mfa_method == MFA_BACKUP ? "ENTER DISCORD BACKUP CODE"
+                        : g_ui.mfa_method == MFA_SMS  ? "ENTER SMS CODE"
+                                                      : "ENTER DISCORD AUTH CODE";
+
+    for (int i = 0; i < 4; i++)
+        others += (g_ui.mfa_methods & k_mfa_order[i]) && k_mfa_order[i] != g_ui.mfa_method;
+    login_boxes(&email, &password, &code);
+    text(g_ui.f_title, C_INK, rect(x, y, w, S(30)), "Multi-Factor Authentication", DT_CENTER | DT_SINGLELINE);
+    if (g_ui.mfa_method == MFA_SMS && g_ui.mfa_phone.len) {
+        sb_t line = {0};
+        sb_add(&line, "We've sent a message to ");
+        sb_addn(&line, g_ui.mfa_phone.data, g_ui.mfa_phone.len);
+        sb_add(&line, ". Please enter the code you received.");
+        text(g_ui.f_body, C_MUTED, rect(x, y + S(38), w, S(44)), line.data, DT_CENTER | DT_WORDBREAK);
+        sb_free(&line);
+    } else {
+        text(g_ui.f_body, C_MUTED, rect(x, y + S(38), w, S(22)), "This extra step shows it's really you.",
+             DT_CENTER | DT_SINGLELINE);
+    }
+    if (g_ui.mfa_method == MFA_WEBAUTHN) {
+        text(g_ui.f_body, C_TEXT, rect(x, y + S(96), w, S(44)),
+             "Use your passkey or security key in the window Windows opens.", DT_CENTER | DT_WORDBREAK);
+        if (g_ui.code_error.len)
+            login_text(g_ui.f_small, ARGB(C_RED), rect(x, y + S(144), w, S(20)), g_ui.code_error.data,
+                       DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        login_button(x, y + S(174), w, "Use a passkey", LH_CONFIRM, g_ui.login_busy == LOGIN_MFA);
+    } else {
+        login_label(x, code.top - S(24), w, label, &g_ui.code_error, 0);
+        login_box(code, LH_CODE);
+        login_button(x, code.bottom + S(20), w, "Confirm", LH_CONFIRM, g_ui.login_busy == LOGIN_MFA);
+        if (g_ui.mfa_method == MFA_SMS)
+            login_link(g_ui.f_small, x, code.top - S(26), w, "Resend SMS?", DT_RIGHT, LH_RESEND);
+    }
+    if (others)
+        login_link(g_ui.f_section, x, card.bottom - S(LOGIN_PAD) - S(48), w, "Verify with something else", DT_CENTER, LH_OTHER);
+    login_link(g_ui.f_section, x, card.bottom - S(LOGIN_PAD) - S(20), w, "Back to Log In", DT_CENTER, LH_BACK);
+}
+
+static void paint_login_pick(RECT card)
+{
+    int x = card.left + S(LOGIN_PAD), y = card.top + S(LOGIN_PAD), w = card.right - card.left - 2 * S(LOGIN_PAD);
+    int row = y + S(76);
+
+    text(g_ui.f_title, C_INK, rect(x, y, w, S(30)), "Verify with something else", DT_CENTER | DT_SINGLELINE);
+    text(g_ui.f_body, C_MUTED, rect(x, y + S(38), w, S(22)), "Choose how to show it's really you.", DT_CENTER | DT_SINGLELINE);
+    for (int i = 0; i < 4; i++) {
+        unsigned m = k_mfa_order[i];
+        int id = LH_PICK + (int)m;
+        if (!(g_ui.mfa_methods & m))
+            continue;
+        r_round(x, row, w, S(44), S(8), g_ui.login_hover == id ? 0xFF2A2A2Eu : LOGIN_INPUT);
+        text(g_ui.f_body, C_INK, rect(x + S(16), row, w - S(48), S(44)), mfa_label(m), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        text_w(g_ui.f_icon, C_MUTED, rect(x + w - S(32), row, S(16), S(44)), ICON_CHEVRON_RIGHT, -1,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        set_hit(x, row, w, S(44), id);
+        row += S(52);
+    }
+    login_link(g_ui.f_section, x, card.bottom - S(LOGIN_PAD) - S(20), w, "Back", DT_CENTER, LH_OTHER);
+}
+
+static void paint_login_sent(RECT card)
+{
+    int x = card.left + S(LOGIN_PAD), y = card.top + S(LOGIN_PAD), w = card.right - card.left - 2 * S(LOGIN_PAD);
+    sb_t line = {0};
+
+    text(g_ui.f_title, C_INK, rect(x, y, w, S(30)), "Instructions sent", DT_CENTER | DT_SINGLELINE);
+    sb_add(&line, "We sent instructions to change your password to ");
+    sb_addn(&line, g_ui.forgot_to.data ? g_ui.forgot_to.data : "", g_ui.forgot_to.len);
+    sb_add(&line, ", please check both your inbox and spam folder.");
+    text(g_ui.f_body, C_MUTED, rect(x, y + S(46), w, S(66)), line.data, DT_CENTER | DT_WORDBREAK);
+    sb_free(&line);
+    login_button(x, card.bottom - S(LOGIN_PAD) - S(LOGIN_BUTTON_H), w, "Okay", LH_OKAY, 0);
 }
 
 static void paint_login(RECT rc)
 {
     RECT card = login_card();
-    int x = card.left + S(44), y = card.top + S(44);
-    int tile = S(232), tx = card.right - S(44) - tile, ty = card.top + (card.bottom - card.top - tile) / 2;
 
+    g_ui.nset_hits = 0;
     fill(0, 0, rc.right, rc.bottom, C_RAIL);
-    draw_wordmark((rc.right - wordmark_width(S(3))) / 2, card.top - S(72), S(3));
-    r_round(card.left, card.top, card.right - card.left, card.bottom - card.top, S(16), ARGB(C_MAIN));
-
-    text(g_ui.f_title, C_INK, rect(x, y, S(400), S(32)), "Log in with your phone", DT_LEFT | DT_SINGLELINE);
-    text(g_ui.f_body, C_MUTED, rect(x, y + S(40), S(400), S(24)),
-         "Scan the code with the Discord mobile app.", DT_LEFT | DT_SINGLELINE);
-    paint_step(x, y + S(92), "1", "Open Discord on your phone");
-    paint_step(x, y + S(132), "2", "Go to Settings \xE2\x80\xBA Scan QR Code");
-    paint_step(x, y + S(172), "3", "Scan this code and confirm");
-    text(g_ui.f_small, C_FAINT, rect(x, y + S(230), S(400), S(40)),
-         "Passkeys, two-factor codes and SMS checks happen on your phone.", DT_LEFT | DT_WORDBREAK);
-
-    r_round(tx, ty, tile, tile, S(12), g_ui.scanned.len ? ARGB(C_PANEL) : ARGB(C_INK));
-    if (g_ui.scanned.len) {
-        text_w(g_ui.f_icon_big, C_BRAND, rect(tx, ty + S(52), tile, S(48)), ICON_CHECK, -1, DT_CENTER | DT_SINGLELINE);
-        text(g_ui.f_h, C_INK, rect(tx + S(8), ty + S(116), tile - S(16), S(24)), g_ui.scanned.data,
-             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        text(g_ui.f_small, C_MUTED, rect(tx, ty + S(144), tile, S(20)), "Confirm the login on your phone",
-             DT_CENTER | DT_SINGLELINE);
-    } else if (g_ui.qr) {
-        int m = (tile - S(40)) / g_ui.qr->size; /* leaves a ~4 module quiet zone */
-        int off = (tile - m * g_ui.qr->size) / 2;
-        for (int qy = 0; qy < g_ui.qr->size; qy++)
-            for (int qx = 0; qx < g_ui.qr->size; qx++)
-                if (qr_dark(g_ui.qr, qx, qy))
-                    fill(tx + off + qx * m, ty + off + qy * m, m, m, C_RAIL);
-        /* Silicord mark in the middle: level M error correction absorbs it. */
-        r_round(tx + tile / 2 - S(15), ty + tile / 2 - S(15), S(30), S(30), S(8), ARGB(C_INK));
-        r_round(tx + tile / 2 - S(12), ty + tile / 2 - S(12), S(24), S(24), S(6), ARGB(C_RAIL));
-        draw_mark(tx + tile / 2 - S(8), ty + tile / 2 - S(8), S(1), C_BRAND);
-    } else {
-        text(g_ui.f_body, C_RAIL, rect(tx, ty, tile, tile), "Getting a code\xE2\x80\xA6",
-             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    text(g_ui.f_body, C_BRAND, rect(0, card.bottom + S(24), rc.right, S(24)), str_or_empty(&g_ui.status),
+    draw_wordmark((rc.right - wordmark_width(S(3))) / 2, card.top - S(64), S(3));
+    r_round(card.left, card.top, card.right - card.left, card.bottom - card.top, S(8), LOGIN_CARD);
+    if (g_ui.login_step == LSTEP_MFA)
+        paint_login_mfa(card);
+    else if (g_ui.login_step == LSTEP_PICK)
+        paint_login_pick(card);
+    else if (g_ui.login_step == LSTEP_SENT)
+        paint_login_sent(card);
+    else
+        paint_login_form(card);
+    text(g_ui.f_body, C_MUTED, rect(0, card.bottom + S(24), rc.right, S(24)), str_or_empty(&g_ui.status),
          DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+/* ---- Login view: fields and actions ---- */
+
+static LRESULT CALLBACK login_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+
+static HWND login_edit(int password, int limit, const wchar_t *cue)
+{
+    HWND e = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | (password ? ES_PASSWORD : 0),
+                             0, 0, 0, 0, g_ui.wnd, NULL, NULL, NULL);
+
+    g_ui.login_edit_proc = (WNDPROC)SetWindowLongPtrW(e, GWLP_WNDPROC, (LONG_PTR)login_edit_proc);
+    SendMessageW(e, EM_LIMITTEXT, (WPARAM)limit, 0);
+    if (cue)
+        SendMessageW(e, EM_SETCUEBANNER, TRUE, (LPARAM)cue);
+    return e;
+}
+
+static void place_login_edit(HWND e, RECT box)
+{
+    int show = g_ui.view == VIEW_LOGIN && box.right > box.left, eh = S(24);
+    HFONT font = (HFONT)SendMessageW(g_ui.composer, WM_GETFONT, 0, 0);
+
+    if (!e)
+        return;
+    if ((HFONT)SendMessageW(e, WM_GETFONT, 0, 0) != font)
+        SendMessageW(e, WM_SETFONT, (WPARAM)font, FALSE); /* the fonts are made again when the DPI changes */
+    if (show)
+        MoveWindow(e, box.left + S(10), box.top + (box.bottom - box.top - eh) / 2, box.right - box.left - S(20), eh, TRUE);
+    ShowWindow(e, show ? SW_SHOWNA : SW_HIDE);
+}
+
+static void place_login(void)
+{
+    RECT email, password, code;
+
+    if (g_ui.view == VIEW_LOGIN && !g_ui.email_edit) {
+        g_ui.email_edit = login_edit(0, 320, NULL);
+        g_ui.password_edit = login_edit(1, 72, NULL);
+        g_ui.code_edit = login_edit(0, 16, NULL);
+    }
+    login_boxes(&email, &password, &code);
+    place_login_edit(g_ui.email_edit, email);
+    place_login_edit(g_ui.password_edit, password);
+    place_login_edit(g_ui.code_edit, code);
+}
+
+/* The text of an EDIT control as UTF-8, its wide copy wiped (it may be a password). */
+static void login_read(HWND e, sb_t *out)
+{
+    wchar_t w[400];
+    int n = e ? GetWindowTextW(e, w, ARRAYSIZE(w)) : 0;
+
+    wide_to_utf8(w, (size_t)n, out);
+    SecureZeroMemory(w, sizeof w);
+}
+
+static void login_clear_errors(void)
+{
+    sb_clear(&g_ui.login_error);
+    sb_clear(&g_ui.password_error);
+    sb_clear(&g_ui.code_error);
+}
+
+static void login_step(int step)
+{
+    g_ui.login_step = step;
+    g_ui.login_hover = 0;
+    place_login();
+    if (step == LSTEP_FORM && g_ui.email_edit)
+        SetFocus(GetWindowTextLengthW(g_ui.email_edit) ? g_ui.password_edit : g_ui.email_edit);
+    else if (step == LSTEP_MFA && g_ui.mfa_method != MFA_WEBAUTHN && g_ui.code_edit)
+        SetFocus(g_ui.code_edit);
+    redraw();
+}
+
+static void login_submit(void)
+{
+    sb_t login = {0}, password = {0};
+
+    if (g_ui.login_busy)
+        return;
+    login_clear_errors();
+    login_read(g_ui.email_edit, &login);
+    login_read(g_ui.password_edit, &password);
+    /* The website lets the browser refuse empty fields; the same words here. */
+    if (!login.len)
+        set_text(&g_ui.login_error, "This field is required");
+    if (!password.len)
+        set_text(&g_ui.password_error, "This field is required");
+    if (login.len && password.len) {
+        g_ui.login_busy = LOGIN_PASSWORD;
+        app_login_password(login.data, login.len, password.data, password.len);
+    }
+    sb_free(&login);
+    sb_free(&password);
+    redraw();
+}
+
+static void mfa_choose(unsigned method)
+{
+    g_ui.mfa_method = method;
+    login_clear_errors();
+    if (g_ui.code_edit)
+        SetWindowTextW(g_ui.code_edit, L"");
+    login_step(LSTEP_MFA);
+    /* As on the website: an SMS goes out and the security key is asked for as soon as they are chosen. */
+    if (method == MFA_SMS && !g_ui.mfa_phone.len) {
+        g_ui.login_busy = LOGIN_SMS;
+        app_login_sms();
+    } else if (method == MFA_WEBAUTHN) {
+        g_ui.login_busy = LOGIN_MFA;
+        app_login_mfa(MFA_WEBAUTHN, NULL, 0);
+    }
+}
+
+static void mfa_submit(void)
+{
+    sb_t code = {0};
+
+    if (g_ui.login_busy)
+        return;
+    login_clear_errors();
+    if (g_ui.mfa_method == MFA_WEBAUTHN) {
+        g_ui.login_busy = LOGIN_MFA;
+        app_login_mfa(MFA_WEBAUTHN, NULL, 0);
+    } else {
+        login_read(g_ui.code_edit, &code);
+        if (!code.len) {
+            set_text(&g_ui.code_error, "This field is required");
+        } else {
+            g_ui.login_busy = LOGIN_MFA;
+            app_login_mfa(g_ui.mfa_method, code.data, code.len);
+        }
+        sb_free(&code);
+    }
+    redraw();
+}
+
+static void login_forgot(void)
+{
+    sb_t login = {0};
+
+    if (g_ui.login_busy)
+        return;
+    login_clear_errors();
+    login_read(g_ui.email_edit, &login);
+    if (!login.len) {
+        set_text(&g_ui.login_error, "This field is required");
+    } else {
+        sb_clear(&g_ui.forgot_to);
+        sb_addn(&g_ui.forgot_to, login.data, login.len);
+        g_ui.login_busy = LOGIN_FORGOT;
+        app_login_forgot(login.data, login.len);
+    }
+    sb_free(&login);
+    redraw();
+}
+
+/* Back to the form, forgetting the second factor. */
+static void login_back(void)
+{
+    app_login_cancel();
+    g_ui.login_busy = 0;
+    g_ui.mfa_methods = 0;
+    sb_clear(&g_ui.mfa_phone);
+    login_clear_errors();
+    login_step(LSTEP_FORM);
+}
+
+static void login_click(int x, int y)
+{
+    int id = settings_hit(x, y);
+
+    if (id == LH_EMAIL || id == LH_PASSWORD || id == LH_CODE)
+        SetFocus(id == LH_EMAIL ? g_ui.email_edit : id == LH_PASSWORD ? g_ui.password_edit : g_ui.code_edit);
+    else if (id == LH_LOGIN)
+        login_submit();
+    else if (id == LH_FORGOT)
+        login_forgot();
+    else if (id == LH_PASSKEY && !g_ui.login_busy) {
+        login_clear_errors();
+        g_ui.login_busy = LOGIN_PASSKEY;
+        app_login_passkey();
+        redraw();
+    } else if (id == LH_CONFIRM)
+        mfa_submit();
+    else if (id == LH_OTHER)
+        login_step(g_ui.login_step == LSTEP_PICK ? LSTEP_MFA : LSTEP_PICK);
+    else if (id == LH_BACK || id == LH_OKAY)
+        login_back();
+    else if (id == LH_RESEND && !g_ui.login_busy) {
+        g_ui.login_busy = LOGIN_SMS;
+        app_login_sms();
+    } else if (id > LH_PICK) {
+        if (g_ui.login_busy == LOGIN_MFA)
+            app_login_cancel(); /* a security key prompt still open */
+        g_ui.login_busy = 0;
+        mfa_choose((unsigned)(id - LH_PICK));
+    }
+}
+
+static LRESULT CALLBACK login_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        if (g_ui.login_step == LSTEP_FORM && h == g_ui.email_edit && !GetWindowTextLengthW(g_ui.password_edit))
+            SetFocus(g_ui.password_edit);
+        else if (g_ui.login_step == LSTEP_FORM)
+            login_submit();
+        else
+            mfa_submit();
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_TAB && g_ui.login_step == LSTEP_FORM) {
+        SetFocus(h == g_ui.email_edit ? g_ui.password_edit : g_ui.email_edit);
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE && g_ui.login_step != LSTEP_FORM) {
+        login_back();
+        return 0;
+    }
+    if (msg == WM_CHAR && (wp == '\r' || wp == '\t' || wp == 27))
+        return 0; /* no beep */
+    return CallWindowProcW(g_ui.login_edit_proc, h, msg, wp, lp);
+}
+
+static void login_answer(int request, auth_result_t *r)
+{
+    g_ui.login_busy = 0;
+    login_clear_errors();
+    switch (r->kind) {
+    case AUTH_TOKEN:
+        if (g_ui.password_edit)
+            SetWindowTextW(g_ui.password_edit, L"");
+        app_login_token(r->token.data);
+        return;
+    case AUTH_MFA:
+        g_ui.mfa_methods = r->methods ? r->methods : MFA_TOTP;
+        sb_clear(&g_ui.mfa_phone);
+        for (int i = 0; i < 4; i++)
+            if (g_ui.mfa_methods & k_mfa_order[i]) {
+                mfa_choose(k_mfa_order[i]);
+                break;
+            }
+        return;
+    case AUTH_OK:
+        if (request == LOGIN_SMS) {
+            sb_clear(&g_ui.mfa_phone);
+            sb_add(&g_ui.mfa_phone, r->phone.len ? r->phone.data : "your phone");
+        } else if (request == LOGIN_FORGOT) {
+            login_step(LSTEP_SENT);
+        }
+        break;
+    case AUTH_FIELDS:
+        sb_addn(&g_ui.login_error, r->login_error.data ? r->login_error.data : "", r->login_error.len);
+        sb_addn(&g_ui.password_error, r->password_error.data ? r->password_error.data : "", r->password_error.len);
+        sb_addn(&g_ui.code_error, r->code_error.data ? r->code_error.data : "", r->code_error.len);
+        break;
+    case AUTH_EXPIRED:
+        login_back();
+        set_text(&g_ui.login_error, r->message.data);
+        break;
+    default:
+        /* What fits no field goes under the first one of the step, as on the website. A cancelled passkey says nothing. */
+        if (r->message.len)
+            set_text(g_ui.login_step == LSTEP_FORM ? &g_ui.login_error : &g_ui.code_error, r->message.data);
+        break;
+    }
+    redraw();
+}
+
+static void on_login_answer(login_answer_t *a)
+{
+    if (g_ui.view == VIEW_LOGIN) /* else logged in another way meanwhile */
+        login_answer(a->request, &a->r);
+    auth_result_free(&a->r);
+    mem_free(a);
 }
 
 static void paint_loading(RECT rc)
@@ -6343,6 +6858,7 @@ static void place_composer(void)
                    main_right() - x0 - 2 * S(COMPOSER_GAP) - S(56) - (CB_COUNT - 1) * S(40) - S(16), eh, TRUE);
     }
     ShowWindow(g_ui.composer, show ? SW_SHOWNA : SW_HIDE);
+    place_login();
 }
 
 static void hist_push(const char *id)
@@ -7155,6 +7671,10 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         redraw();
         return;
     }
+    if (msg == UI_LOGIN_ANSWER) {
+        on_login_answer((login_answer_t *)lp);
+        return;
+    }
     if (msg == UI_VIDEO) {
         invalidate_video();
         return;
@@ -7361,8 +7881,14 @@ void ui_show_login(void)
     set_text(&g_ui.status, "");
     g_ui.disconnected = 0;
     g_ui.view = VIEW_LOGIN;
+    g_ui.login_busy = 0;
+    g_ui.mfa_methods = 0;
+    sb_clear(&g_ui.mfa_phone);
+    login_clear_errors();
+    if (g_ui.password_edit)
+        SetWindowTextW(g_ui.password_edit, L"");
     place_composer();
-    redraw();
+    login_step(LSTEP_FORM);
 }
 
 void ui_show_loading(const char *s)
@@ -15512,6 +16038,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         g_ui.composer_proc = (WNDPROC)SetWindowLongPtrW(g_ui.composer, GWLP_WNDPROC, (LONG_PTR)composer_proc);
         SendMessageW(g_ui.composer, EM_LIMITTEXT, 2000, 0);
         make_fonts();
+        g_ui.passkeys = app_passkeys();
         img_init(wnd, UI_IMAGE);
         paste_cleanup();
         prefs_load();
@@ -15580,6 +16107,14 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_CTLCOLOREDIT:
+        if ((HWND)lp == g_ui.email_edit || (HWND)lp == g_ui.password_edit || (HWND)lp == g_ui.code_edit) {
+            static HBRUSH input;
+            if (!input)
+                input = CreateSolidBrush(RGB(0x12, 0x12, 0x14)); /* LOGIN_INPUT */
+            SetTextColor((HDC)wp, GDI(C_TEXT));
+            SetBkColor((HDC)wp, RGB(0x12, 0x12, 0x14));
+            return (LRESULT)input;
+        }
         if ((HWND)lp == g_ui.friend_search) { /* in a box on the page's black */
             SetTextColor((HDC)wp, GDI(C_TEXT));
             SetBkColor((HDC)wp, GDI(C_MAIN));
@@ -15615,6 +16150,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         paint(wnd);
         return 0;
     case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && g_ui.view == VIEW_LOGIN) {
+            int box = g_ui.login_hover == LH_EMAIL || g_ui.login_hover == LH_PASSWORD || g_ui.login_hover == LH_CODE;
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(box ? IDC_IBEAM : g_ui.login_hover > 0 ? IDC_HAND : IDC_ARROW)));
+            return TRUE;
+        }
         if (LOWORD(lp) == HTCLIENT && g_ui.settings_open) {
             SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.settings_hover >= 0 ? IDC_HAND : IDC_ARROW)));
             return TRUE;
@@ -15651,7 +16191,13 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             slider_drag(g_ui.set_drag, GET_X_LPARAM(lp));
             return 0;
         }
-        if (g_ui.view == VIEW_APP && g_ui.settings_open) {
+        if (g_ui.view == VIEW_LOGIN) {
+            int h = settings_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (h != g_ui.login_hover) {
+                g_ui.login_hover = h;
+                redraw();
+            }
+        } else if (g_ui.view == VIEW_APP && g_ui.settings_open) {
             int h = settings_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             if (h != g_ui.settings_hover) {
                 g_ui.settings_hover = h;
@@ -15663,6 +16209,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_MOUSELEAVE:
+        if (g_ui.login_hover > 0) {
+            g_ui.login_hover = 0;
+            redraw();
+        }
         if (g_ui.hover_kind != HIT_NONE) {
             g_ui.hover_kind = HIT_NONE;
             g_ui.hover_index = -1;
@@ -15675,6 +16225,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             ReleaseCapture();
             prefs_save();
             redraw();
+            return 0;
+        }
+        if (g_ui.view == VIEW_LOGIN) {
+            login_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         }
         if (g_ui.view == VIEW_APP && g_ui.settings_open) {

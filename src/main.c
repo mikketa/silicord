@@ -1,5 +1,6 @@
 /* Silicord - native Discord client for Windows. No C runtime: entry point is `entry`. */
 #include <windows.h>
+#include "auth.h"
 #include "console.h"
 #include "cred.h"
 #include "gw.h"
@@ -19,6 +20,7 @@
 #include "mixer.h"
 #include "opus.h"
 #include "opus_math.h"
+#include "passkey.h"
 #include "picture.h"
 #include "vp8.h"
 #include "vp8_enc.h"
@@ -106,8 +108,182 @@ static DWORD WINAPI login_main(LPVOID arg)
     return 0;
 }
 
+/* ---- Password, two-factor, passkey ---- */
+
+/*
+ * Each request of the login page runs on a thread of its own and posts its
+ * answer, unless the page moved on meanwhile (a token from the QR code, a
+ * logout, a new request): the generation tells. What the next step needs
+ * (the MFA ticket and its options) stays here, never in the window.
+ */
+static volatile LONG g_auth_gen;
+static CRITICAL_SECTION g_auth_lock;
+static sb_t g_auth_ticket, g_auth_instance, g_auth_options;
+
+typedef struct {
+    int request;
+    unsigned method;
+    LONG gen;
+    sb_t a, b; /* login and password, a code, or the address to reset */
+} auth_job_t;
+
+static const char *const k_auth_kind[] = {"failed", "token", "mfa", "challenge", "ok", "form errors",
+                                          "expired", "disabled", "new location", "suspended", "rate limited"};
+
+/* POSTs `body` (wiped after) to a login endpoint and reads the answer. */
+static void auth_send(const char *path, sb_t *body, auth_result_t *r)
+{
+    http_resp_t resp = {0};
+    int ok = http_login_request(path, body->data ? body->data : "{}", body->data ? body->len : 2, &resp);
+
+    sb_free(body);
+    auth_read(resp.body.data, resp.body.len, ok ? resp.status : 0, r);
+    log_line("login: answer ", k_auth_kind[r->kind]);
+    http_resp_free(&resp);
+}
+
+/* Signs Discord's challenge with a passkey or security key; 0 with r->message set (empty if cancelled). */
+static int auth_sign(const char *options, size_t n, sb_t *credential, auth_result_t *r)
+{
+    auth_webauthn_t w = {0};
+    int ok;
+
+    auth_result_free(r);
+    if (!auth_webauthn_read(options, n, &w)) {
+        sb_add(&r->message, "Discord sent a passkey request Silicord cannot read.");
+        return 0;
+    }
+    ok = passkey_get(ui_window(), &w, credential, &r->message);
+    log_line("login: passkey ", ok ? "signed" : r->message.len ? "failed" : "cancelled");
+    auth_webauthn_free(&w);
+    return ok;
+}
+
+static DWORD WINAPI auth_main(LPVOID arg)
+{
+    auth_job_t *j = arg;
+    login_answer_t *ans = mem_alloc(sizeof *ans);
+    auth_result_t *r = &ans->r;
+    sb_t body = {0}, ticket = {0}, instance = {0}, options = {0}, cred = {0};
+    int current;
+
+    ans->request = j->request;
+    ans->method = j->method;
+    EnterCriticalSection(&g_auth_lock);
+    sb_addn(&ticket, g_auth_ticket.data ? g_auth_ticket.data : "", g_auth_ticket.len);
+    sb_addn(&instance, g_auth_instance.data ? g_auth_instance.data : "", g_auth_instance.len);
+    sb_addn(&options, g_auth_options.data ? g_auth_options.data : "", g_auth_options.len);
+    LeaveCriticalSection(&g_auth_lock);
+
+    switch (j->request) {
+    case LOGIN_PASSWORD:
+        log_line("login: ", "password");
+        auth_login_body(&body, j->a.data, j->a.len, j->b.data, j->b.len);
+        auth_send("/auth/login", &body, r);
+        break;
+    case LOGIN_MFA:
+        log_line("login: two-factor ", auth_mfa_path(j->method));
+        if (j->method == MFA_WEBAUTHN) {
+            if (!auth_sign(options.data, options.len, &cred, r))
+                break;
+            auth_mfa_body(&body, cred.data, cred.len, ticket.data, instance.data);
+        } else {
+            auth_mfa_body(&body, j->a.data ? j->a.data : "", j->a.len, ticket.data, instance.data);
+        }
+        auth_send(auth_mfa_path(j->method), &body, r);
+        break;
+    case LOGIN_SMS:
+        log_line("login: ", "sending the SMS code");
+        auth_ticket_body(&body, ticket.data);
+        auth_send("/auth/mfa/sms/send", &body, r);
+        break;
+    case LOGIN_PASSKEY:
+        log_line("login: ", "passkey");
+        sb_add(&body, "{}");
+        auth_send("/auth/passwordless/start", &body, r);
+        if (r->kind != AUTH_CHALLENGE)
+            break;
+        sb_clear(&ticket);
+        sb_addn(&ticket, r->ticket.data, r->ticket.len);
+        sb_clear(&options);
+        sb_addn(&options, r->webauthn.data, r->webauthn.len);
+        if (!auth_sign(options.data, options.len, &cred, r))
+            break;
+        auth_finish_body(&body, cred.data, cred.len, ticket.data);
+        auth_send("/auth/conditional/finish", &body, r);
+        break;
+    case LOGIN_FORGOT:
+        log_line("login: ", "password reset");
+        auth_forgot_body(&body, j->a.data, j->a.len);
+        auth_send("/auth/forgot", &body, r);
+        break;
+    default:
+        break;
+    }
+
+    EnterCriticalSection(&g_auth_lock);
+    if (j->gen == g_auth_gen && r->kind == AUTH_MFA) {
+        sb_clear(&g_auth_ticket);
+        sb_addn(&g_auth_ticket, r->ticket.data, r->ticket.len);
+        sb_clear(&g_auth_instance);
+        sb_addn(&g_auth_instance, r->instance.data, r->instance.len);
+        sb_clear(&g_auth_options);
+        sb_addn(&g_auth_options, r->webauthn.data, r->webauthn.len);
+    }
+    current = j->gen == g_auth_gen;
+    LeaveCriticalSection(&g_auth_lock);
+    if (current) {
+        ui_post_login(ans);
+    } else {
+        auth_result_free(r);
+        mem_free(ans);
+    }
+    sb_free(&cred);
+    sb_free(&options);
+    sb_free(&ticket);
+    sb_free(&instance);
+    sb_free(&j->a);
+    sb_free(&j->b);
+    mem_free(j);
+    return 0;
+}
+
+static void auth_start(int request, unsigned method, const char *a, size_t an, const char *b, size_t bn)
+{
+    auth_job_t *j = mem_alloc(sizeof *j);
+    HANDLE t;
+
+    j->request = request;
+    j->method = method;
+    j->gen = InterlockedIncrement(&g_auth_gen);
+    if (a)
+        sb_addn(&j->a, a, an);
+    if (b)
+        sb_addn(&j->b, b, bn);
+    if ((t = CreateThread(NULL, 0, auth_main, j, 0, NULL)) != NULL) {
+        CloseHandle(t);
+        return;
+    }
+    sb_free(&j->a);
+    sb_free(&j->b);
+    mem_free(j);
+}
+
+/* Forgets the MFA ticket and drops what is in flight. */
+static void auth_reset(void)
+{
+    InterlockedIncrement(&g_auth_gen);
+    passkey_cancel();
+    EnterCriticalSection(&g_auth_lock);
+    sb_free(&g_auth_ticket);
+    sb_free(&g_auth_instance);
+    sb_free(&g_auth_options);
+    LeaveCriticalSection(&g_auth_lock);
+}
+
 static void stop_login(void)
 {
+    auth_reset();
     if (!g_login_thread)
         return;
     InterlockedExchange(&g_login_stop, 1);
@@ -2136,6 +2312,41 @@ void app_login_token(const char *token)
     start_session();
 }
 
+void app_login_password(const char *login, size_t ln, const char *password, size_t pn)
+{
+    auth_start(LOGIN_PASSWORD, 0, login, ln, password, pn);
+}
+
+void app_login_mfa(unsigned method, const char *code, size_t n)
+{
+    auth_start(LOGIN_MFA, method, code, n, NULL, 0);
+}
+
+void app_login_sms(void)
+{
+    auth_start(LOGIN_SMS, MFA_SMS, NULL, 0, NULL, 0);
+}
+
+void app_login_passkey(void)
+{
+    auth_start(LOGIN_PASSKEY, 0, NULL, 0, NULL, 0);
+}
+
+void app_login_forgot(const char *login, size_t ln)
+{
+    auth_start(LOGIN_FORGOT, 0, login, ln, NULL, 0);
+}
+
+void app_login_cancel(void)
+{
+    auth_reset();
+}
+
+int app_passkeys(void)
+{
+    return passkey_available();
+}
+
 void app_logout(void)
 {
     app_voice_leave();
@@ -3344,6 +3555,7 @@ void entry(void)
         ExitProcess(1);
     }
     g_login_wake = CreateEventW(NULL, TRUE, FALSE, NULL);
+    InitializeCriticalSection(&g_auth_lock);
     InitializeCriticalSection(&g_open_lock);
     InitializeCriticalSection(&g_session_lock);
     InitializeCriticalSection(&g_voice_lock);
