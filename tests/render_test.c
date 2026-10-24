@@ -94,6 +94,11 @@ void entry(void)
         r_unclip();
         /* A green circle, an emoji and translucent white across the band edge. */
         r_circle(300, 120, 40, 0xFF00FF00);
+        /* A red line into a half turn clockwise, 9 wide: edges between pixels. */
+        {
+            static const r_seg_t hook[] = {{230, 180, 300, 180}, {300, 180, 300, 220, 300, 200, 1}};
+            r_stroke(hook, 2, 9, 0xFFFF0000);
+        }
         r_text(mid, 0xFFFFFFFF, 10, 130, 200, 50, L"\xD83C\xDF38", -1, R_SINGLE);
         r_fill(0, 240, W, 40, 0x80FFFFFF);
         r_end(dc);
@@ -109,6 +114,11 @@ void entry(void)
     check(px(320, 140) == 0x00FF00, "circle center is solid");
     check(px(301, 121) == 0x101010, "circle leaves the corner of its box");
     check(ch(px(320, 120), 8) > 0x10 && ch(px(320, 120), 8) < 0xFF, "circle edge is anti-aliased");
+    check(px(260, 180) == 0xFF0000 && px(320, 200) == 0xFF0000, "stroke is solid along its line and its arc");
+    check(px(227, 180) == 0xFF0000, "stroke has a round cap");
+    check(px(260, 170) == 0x101010 && px(310, 200) == 0x101010, "stroke keeps to its width");
+    check(px(280, 200) == 0x101010, "arc turns only one way");
+    check(ch(px(260, 175), 16) > 0x10 && ch(px(260, 175), 16) < 0xFF, "stroke edge is anti-aliased");
     check(any(10, 130, 60, 180, colorful), "emoji drawn in color");
     check(ch(px(5, 250), 16) > 0x80 && ch(px(5, 250), 16) < 0xA0 && ch(px(5, 270), 16) == ch(px(5, 250), 16),
           "translucent fill blends the same in both bands");

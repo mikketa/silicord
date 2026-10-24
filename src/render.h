@@ -30,6 +30,14 @@ int r_visible(int y, int h);
 void r_fill(int x, int y, int w, int h, unsigned argb);
 void r_round(int x, int y, int w, int h, int radius, unsigned argb);
 void r_circle(int x, int y, int d, unsigned argb);
+/* One piece of a stroked path: a line, or an arc of at most half a turn around (cx, cy). */
+typedef struct {
+    float x0, y0, x1, y1;
+    float cx, cy;
+    int arc; /* 0: a line; 1: an arc turning clockwise on screen; -1: counterclockwise */
+} r_seg_t;
+/* The pieces stroked `width` wide as one shape, round caps and joins, at sub-pixel positions. */
+void r_stroke(const r_seg_t *seg, int n, float width, unsigned argb);
 /* Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle). */
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
 /*

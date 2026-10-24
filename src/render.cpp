@@ -410,6 +410,67 @@ extern "C" void r_round_outline(int x, int y, int w, int h, int radius, int widt
     shape(x, y, w, h, radius, width, argb, argb);
 }
 
+/* Distance from (px, py) to the center line of one piece of a path. */
+static float seg_distance(const r_seg_t *s, float px, float py)
+{
+    float ax = px - s->x0, ay = py - s->y0, bx = px - s->x1, by = py - s->y1;
+    float to_ends = fsqrt(ax * ax + ay * ay < bx * bx + by * by ? ax * ax + ay * ay : bx * bx + by * by);
+
+    if (s->arc) {
+        float sx = s->x0 - s->cx, sy = s->y0 - s->cy, ex = s->x1 - s->cx, ey = s->y1 - s->cy;
+        float dx = px - s->cx, dy = py - s->cy;
+        /* Inside the sweep: between the radii to both ends, on the side the arc turns to. */
+        if ((sx * dy - sy * dx) * (float)s->arc >= 0 && (dx * ey - dy * ex) * (float)s->arc >= 0) {
+            float d = fsqrt(dx * dx + dy * dy) - fsqrt(sx * sx + sy * sy);
+            return d < 0 ? -d : d;
+        }
+        return to_ends;
+    }
+    float lx = s->x1 - s->x0, ly = s->y1 - s->y0, len2 = lx * lx + ly * ly;
+    if (len2 <= 0)
+        return to_ends;
+    float t = clamp01((ax * lx + ay * ly) / len2), qx = ax - t * lx, qy = ay - t * ly;
+    return fsqrt(qx * qx + qy * qy);
+}
+
+extern "C" void r_stroke(const r_seg_t *seg, int n, float width, unsigned argb)
+{
+    RECT r = clip_rect();
+    float hw = width / 2, x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    unsigned a = argb >> 24;
+
+    if (n <= 0 || !a)
+        return;
+    /* Bounds: the ends of each line, the whole circle of each arc. */
+    for (int i = 0; i < n; i++) {
+        const r_seg_t *s = &seg[i];
+        float l = s->x0 < s->x1 ? s->x0 : s->x1, t = s->y0 < s->y1 ? s->y0 : s->y1;
+        float rr = s->x0 < s->x1 ? s->x1 : s->x0, b = s->y0 < s->y1 ? s->y1 : s->y0;
+        if (s->arc) {
+            float dx = s->x0 - s->cx, dy = s->y0 - s->cy, rad = fsqrt(dx * dx + dy * dy);
+            l = s->cx - rad, t = s->cy - rad, rr = s->cx + rad, b = s->cy + rad;
+        }
+        x0 = l < x0 ? l : x0, y0 = t < y0 ? t : y0, x1 = rr > x1 ? rr : x1, y1 = b > y1 ? b : y1;
+    }
+    int bx = (int)(x0 - hw) - 1, by = (int)(y0 - hw) - 1;
+    if (!intersect(&r, bx, by, (int)(x1 + hw) + 2 - bx, (int)(y1 + hw) + 2 - by))
+        return;
+    for (int yy = r.top; yy < r.bottom; yy++) {
+        UINT32 *line = row(yy);
+        float py = (float)yy + 0.5f;
+        for (int xx = r.left; xx < r.right; xx++) {
+            float px = (float)xx + 0.5f, d = 1e9f;
+            for (int i = 0; i < n; i++) {
+                float di = seg_distance(&seg[i], px, py);
+                d = di < d ? di : d;
+            }
+            float cov = clamp01(hw - d + 0.5f);
+            if (cov > 0)
+                blend(line + xx, argb, (unsigned)(cov * (float)a + 0.5f));
+        }
+    }
+}
+
 /* ---- Images ---- */
 
 /* A pixel's four bytes as 32-bit lanes. */
