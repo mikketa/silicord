@@ -676,13 +676,15 @@ int http_ws_headers(wchar_t *dst, size_t cap)
     return 1;
 }
 
-int http_request_hdr(const char *method, const char *path, const char *token, const char *content_type,
-                     const char *headers, const char *body, size_t body_len, http_resp_t *resp)
+/* An API request from the page `referer`, answering the captchas Discord asks for on the way. */
+static int api_request(const char *base, const wchar_t *referer, const char *method, const char *path, const char *token,
+                       const char *content_type, const char *headers, const char *body, size_t body_len,
+                       http_resp_t *resp)
 {
     sb_t url = {0}, captcha = {0}, extra = {0};
     int ok = 0;
 
-    sb_add(&url, API_BASE);
+    sb_add(&url, base);
     sb_add(&url, path);
     http_prepare_client();
     for (int attempt = 0; attempt < CAPTCHA_TRIES; attempt++) {
@@ -691,8 +693,8 @@ int http_request_hdr(const char *method, const char *path, const char *token, co
             sb_add(&extra, headers);
         if (captcha.len)
             sb_addn(&extra, captcha.data, captcha.len);
-        ok = do_request(g_api, 1, L"https://discord.com/channels/@me", method, url.data, token, body, body_len,
-                        content_type, extra.len ? extra.data : NULL, resp);
+        ok = do_request(g_api, 1, referer, method, url.data, token, body, body_len, content_type,
+                        extra.len ? extra.data : NULL, resp);
         sb_free(&captcha);
         if (!ok || !captcha_continue(resp, &captcha))
             break;
@@ -701,6 +703,19 @@ int http_request_hdr(const char *method, const char *path, const char *token, co
     sb_free(&extra);
     sb_free(&url);
     return ok;
+}
+
+int http_request_hdr(const char *method, const char *path, const char *token, const char *content_type,
+                     const char *headers, const char *body, size_t body_len, http_resp_t *resp)
+{
+    return api_request(API_BASE, L"https://discord.com/channels/@me", method, path, token, content_type, headers, body,
+                       body_len, resp);
+}
+
+int http_login_request(const char *path, const char *body, size_t body_len, http_resp_t *resp)
+{
+    return api_request(LOGIN_API_BASE, L"https://discord.com/login", "POST", path, NULL, NULL, NULL, body, body_len,
+                       resp);
 }
 
 int http_request_type(const char *method, const char *path, const char *token, const char *content_type,

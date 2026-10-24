@@ -5,6 +5,7 @@
 
 #define API_HOST L"discord.com"
 #define API_BASE "/api/v10"
+#define LOGIN_API_BASE "/api/v9" /* the website's login page still uses v9 */
 #define CDN_HOST L"cdn.discordapp.com"
 
 typedef struct {
@@ -34,6 +35,11 @@ int http_request_type(const char *method, const char *path, const char *token, c
 /* Same, with more headers: "Name: value\r\n" lines (a solved captcha's key, for one). */
 int http_request_hdr(const char *method, const char *path, const char *token, const char *content_type,
                      const char *headers, const char *body, size_t body_len, http_resp_t *resp);
+/*
+ * POST to the logged-out login endpoints (`path` relative to LOGIN_API_BASE), as the
+ * login page sends it: no token, captchas answered as for any request.
+ */
+int http_login_request(const char *path, const char *body, size_t body_len, http_resp_t *resp);
 /* GET on the media CDN, path starting with '/'. */
 int http_cdn_get(const char *path, http_resp_t *resp);
 /* GET on another HTTPS host, without credentials. */
