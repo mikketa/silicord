@@ -42,7 +42,8 @@ fix(http): retry once on connection reset
 
 ## Generated files
 
-Two files are generated; commit them with their source:
+These files are generated; commit them with their source:
 
 - `assets/silicord.ico`, from `assets/logo.svg`: `python tools/make_icon.py`
+- `assets/banner-dark.svg` and `assets/banner-light.svg`, from `assets/logo.svg`: `python tools/make_banner.py`
 - `src/emoji_alias.c`, Discord's emoji names that `src/emoji_data.c` lacks: `python tools/make_emoji_aliases.py` (downloads a pinned, checksummed package)
