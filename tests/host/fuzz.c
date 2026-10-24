@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <zlib.h>
 #include "apng.h"
+#include "auth.h"
 #include "b64.h"
 #include "command.h"
 #include "emoji.h"
@@ -289,6 +290,18 @@ static void fuzz_json(void)
         profile_t p = {0};
         profile_parse(v, rn(2) ? "5" : NULL, &p);
         profile_free(&p);
+    }
+    {
+        static const unsigned statuses[] = {0, 200, 204, 400, 401, 403, 429, 500};
+        auth_result_t r = {0};
+        auth_webauthn_t w = {0};
+        auth_read(doc.data, doc.len, statuses[rn(COUNT(statuses))], &r);
+        auth_webauthn_read(r.webauthn.data, r.webauthn.len, &w);
+        auth_webauthn_read(doc.data, doc.len, &w);
+        if (w.ncreds > AUTH_MAX_CREDS)
+            fail("more credentials than the list holds", doc.data);
+        auth_webauthn_free(&w);
+        auth_result_free(&r);
     }
     {
         ml_t l = {0};
