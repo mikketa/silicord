@@ -84,6 +84,7 @@ silicord_no_crt(silicord_core)
 add_executable(silicord
   src/main.c
   src/console.c
+  src/passkey.c
   src/cred.c
   src/gw.c
   src/http.c
