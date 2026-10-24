@@ -1,7 +1,28 @@
+#include <emmintrin.h>
 #include "json.h"
 #include "sc_asm.h"
 
 #define MAX_DEPTH 64
+
+#ifdef _MSC_VER
+#include <intrin.h>
+static __inline unsigned first_bit(unsigned m)
+{
+    unsigned long i;
+    _BitScanForward(&i, m);
+    return (unsigned)i;
+}
+#else
+#define first_bit(m) ((unsigned)__builtin_ctz(m))
+#endif
+
+/* Mask of the bytes among the 16 at p that are `a` or `b`. */
+static __inline unsigned match2(const char *p, char a, char b)
+{
+    __m128i v = _mm_loadu_si128((const __m128i *)p);
+    return (unsigned)_mm_movemask_epi8(
+        _mm_or_si128(_mm_cmpeq_epi8(v, _mm_set1_epi8(a)), _mm_cmpeq_epi8(v, _mm_set1_epi8(b))));
+}
 
 static const char *skip_ws(const char *p, const char *e)
 {
@@ -10,16 +31,25 @@ static const char *skip_ws(const char *p, const char *e)
     return p;
 }
 
-/* p points at the opening quote; returns the position after the closing one. */
+/* p points at the opening quote; returns the position after the closing one. 16 bytes a step. */
 static const char *skip_str(const char *p, const char *e)
 {
-    for (p++; p < e; p++) {
-        if (*p == '\\')
-            p++;
-        else if (*p == '"')
+    for (p++;;) {
+        unsigned m = 0;
+        while (e - p >= 16 && !(m = match2(p, '"', '\\')))
+            p += 16;
+        if (m) {
+            p += first_bit(m);
+        } else {
+            while (p < e && *p != '"' && *p != '\\')
+                p++;
+            if (p >= e)
+                return NULL;
+        }
+        if (*p == '"')
             return p + 1;
+        p += 2; /* the escaped character */
     }
-    return NULL;
 }
 
 static int is_scalar_char(char c)
@@ -71,6 +101,9 @@ static const char *skip_value(const char *p, const char *e, int depth)
     }
 }
 
+/* The bytes skip_checked() stops at: '"', '{' for an opening bracket, '}' for a closing one. */
+static const unsigned char k_struct[256] = {['"'] = '"', ['{'] = '{', ['['] = '{', ['}'] = '}', [']'] = '}'};
+
 /*
  * Steps over a value of a document json_parse() already checked: strings
  * are jumped, brackets counted. Much faster than skip_value() on the
@@ -91,17 +124,23 @@ static const char *skip_checked(const char *p, const char *e)
             p++;
         return p;
     }
-    for (; p < e; p++) {
-        char c = *p;
-        if (c == '"') {
+    while (p < e) {
+        switch (k_struct[(unsigned char)*p]) {
+        case 0:
+            p++;
+            continue;
+        case '"':
             if (!(p = skip_str(p, e)))
                 return e;
-            p--;
-        } else if (c == '{' || c == '[') {
+            continue;
+        case '{':
             depth++;
-        } else if ((c == '}' || c == ']') && --depth == 0) {
-            return p + 1;
+            break;
+        default:
+            if (--depth == 0)
+                return p + 1;
         }
+        p++;
     }
     return e;
 }
@@ -117,21 +156,6 @@ int json_parse(const char *s, size_t n, json_t *out)
     out->p = p;
     out->end = end;
     return 1;
-}
-
-int json_type(json_t v)
-{
-    if (v.p >= v.end)
-        return JSON_INVALID;
-    switch (*v.p) {
-    case '{': return JSON_OBJECT;
-    case '[': return JSON_ARRAY;
-    case '"': return JSON_STRING;
-    case 't': return JSON_TRUE;
-    case 'f': return JSON_FALSE;
-    case 'n': return JSON_NULL;
-    default:  return (*v.p == '-' || (*v.p >= '0' && *v.p <= '9')) ? JSON_NUMBER : JSON_INVALID;
-    }
 }
 
 void json_iter(json_t v, json_iter_t *it)
@@ -206,27 +230,34 @@ void json_raw(json_t v, char *dst, size_t size)
 
 int json_str_eq(json_t v, const char *s)
 {
-    size_t n = sc_strlen(s);
-    const char *p = v.p + 1;
+    const char *p = v.p + 1, *e = v.end - 1;
 
-    if (json_type(v) != JSON_STRING || (size_t)(v.end - v.p) != n + 2)
+    /* Byte by byte, no strlen first: most comparisons (keys against a wanted one) end at the first byte. */
+    if (json_type(v) != JSON_STRING || e < p)
         return 0;
-    for (size_t i = 0; i < n; i++)
-        if (p[i] != s[i])
+    for (; p < e; p++, s++)
+        if (!*s || *p != *s)
             return 0;
-    return 1;
+    return !*s;
 }
 
 int json_get(json_t obj, const char *key, json_t *out)
 {
     json_iter_t it;
     json_t k, v;
+    size_t n = sc_strlen(key);
 
     if (json_type(obj) != JSON_OBJECT)
         return 0;
     json_iter(obj, &it);
     while (json_next(&it, &k, &v)) {
-        if (json_str_eq(k, key)) {
+        /* Keys are strings json_parse() checked: compare the length, then the bytes. */
+        size_t i = 0;
+        if ((size_t)(k.end - k.p) != n + 2)
+            continue;
+        while (i < n && k.p[1 + i] == key[i])
+            i++;
+        if (i == n) {
             *out = v;
             return 1;
         }

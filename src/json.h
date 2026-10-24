@@ -30,7 +30,22 @@ enum {
 
 /* Parses a whole document. Returns 0 if it is not a single valid value. */
 int json_parse(const char *s, size_t n, json_t *out);
-int json_type(json_t v);
+
+/* Inline: callers test the type of nearly every value they read. */
+static __inline int json_type(json_t v)
+{
+    if (v.p >= v.end)
+        return JSON_INVALID;
+    switch (*v.p) {
+    case '{': return JSON_OBJECT;
+    case '[': return JSON_ARRAY;
+    case '"': return JSON_STRING;
+    case 't': return JSON_TRUE;
+    case 'f': return JSON_FALSE;
+    case 'n': return JSON_NULL;
+    default:  return (*v.p == '-' || (*v.p >= '0' && *v.p <= '9')) ? JSON_NUMBER : JSON_INVALID;
+    }
+}
 
 /* Looks up `key` in an object. Keys are compared raw (no escape decoding). */
 int json_get(json_t obj, const char *key, json_t *out);
