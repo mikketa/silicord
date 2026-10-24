@@ -10,6 +10,7 @@
 #include "msg.h"
 #include "props.h"
 #include "ra.h"
+#include "rng.h"
 #include "sb.h"
 #include "ui.h"
 #include "utf.h"
@@ -1885,8 +1886,6 @@ static DWORD WINAPI fetch_main(LPVOID arg)
     return 0;
 }
 
-#define BOUNDARY "----SilicordFormBoundary7MA4YWxk"
-
 /* The file name at the end of a path. */
 static const char *file_name(const char *path)
 {
@@ -1898,14 +1897,39 @@ static const char *file_name(const char *path)
     return name;
 }
 
+/*
+ * Chrome's FormData boundary: "----WebKitFormBoundary" and 16 characters
+ * taken from the same 64-letter map Blink uses.
+ */
+static int form_boundary(char *out, size_t cap)
+{
+    static const char prefix[] = "----WebKitFormBoundary";
+    static const char map[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789AB";
+    unsigned char rnd[16];
+    size_t n = 0;
+
+    if (cap < sizeof prefix + 16)
+        return 0;
+    if (!rng_bytes(rnd, sizeof rnd))
+        return 0;
+    for (size_t i = 0; prefix[i]; i++)
+        out[n++] = prefix[i];
+    for (size_t i = 0; i < sizeof rnd; i++)
+        out[n++] = map[rnd[i] & 63];
+    out[n] = 0;
+    return 1;
+}
+
 /* Wraps the JSON payload and the files of job j into a multipart body, replacing *body. */
-static int multipart(rest_job_t *j, sb_t *body)
+static int multipart(rest_job_t *j, sb_t *body, const char *boundary)
 {
     sb_t out = {0};
     const char *p = j->files.data;
     int ok = 1;
 
-    sb_add(&out, "--" BOUNDARY "\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+    sb_add(&out, "--");
+    sb_add(&out, boundary);
+    sb_add(&out, "\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
                  "Content-Type: application/json\r\n\r\n");
     sb_addn(&out, body->data, body->len);
     sb_add(&out, "\r\n");
@@ -1921,7 +1945,9 @@ static int multipart(rest_job_t *j, sb_t *body)
             break;
         }
         size = GetFileSize(f, NULL);
-        sb_add(&out, "--" BOUNDARY "\r\nContent-Disposition: form-data; name=\"files[");
+        sb_add(&out, "--");
+        sb_add(&out, boundary);
+        sb_add(&out, "\r\nContent-Disposition: form-data; name=\"files[");
         sb_i64(&out, i);
         sb_add(&out, "]\"; filename=");
         sb_json_str(&out, name, (size_t)lstrlenA(name)); /* a quoted, escaped string */
@@ -1939,7 +1965,9 @@ static int multipart(rest_job_t *j, sb_t *body)
         CloseHandle(f);
         sb_add(&out, "\r\n");
     }
-    sb_add(&out, "--" BOUNDARY "--\r\n");
+    sb_add(&out, "--");
+    sb_add(&out, boundary);
+    sb_add(&out, "--\r\n");
     sb_free(body);
     *body = out;
     return ok;
@@ -1998,15 +2026,26 @@ static DWORD WINAPI send_main(LPVOID arg)
         sb_add(&body, "]");
     }
     sb_add(&body, "}");
-    if (j->nfiles && !multipart(j, &body)) {
-        ui_post(UI_SEND_FAILED, ui_text("Could not read a file to upload"));
-        sb_free(&body);
-        free_job(j);
-        return 0;
+    char boundary[40];
+    char ctype[80] = "";
+
+    if (j->nfiles) {
+        if (!form_boundary(boundary, sizeof boundary)) {
+            ui_post(UI_SEND_FAILED, ui_text("Could not prepare the upload"));
+            sb_free(&body);
+            free_job(j);
+            return 0;
+        }
+        if (!multipart(j, &body, boundary)) {
+            ui_post(UI_SEND_FAILED, ui_text("Could not read a file to upload"));
+            sb_free(&body);
+            free_job(j);
+            return 0;
+        }
+        wsprintfA(ctype, "multipart/form-data; boundary=%s", boundary);
     }
 
-    if (!http_request_type("POST", path, j->token.data,
-                           j->nfiles ? "multipart/form-data; boundary=" BOUNDARY : NULL, body.data, body.len, &resp)) {
+    if (!http_request_type("POST", path, j->token.data, j->nfiles ? ctype : NULL, body.data, body.len, &resp)) {
         ui_post(UI_SEND_FAILED, ui_text("Could not reach discord.com"));
     } else if (resp.status == 200 && json_parse(resp.body.data, resp.body.len, &root)) {
         msg_batch_t *b = msg_batch_one(root, BATCH_NEW);
