@@ -10,7 +10,7 @@
 
 #define WIDEN2(x) L##x
 #define WIDEN(x) WIDEN2(x)
-/* Session default. Discord's API and the gateway replace it with the web client's. */
+/* Session default until the website user agent is known. API, gateway and downloads then replace it. */
 #define USER_AGENT L"Silicord/" WIDEN(SILICORD_VERSION) L" (+https://github.com/mikketa/silicord)"
 
 /* Stable web build from discord.com/login on 2026-09-30, used only when that page cannot be read. */
@@ -715,19 +715,42 @@ int http_request(const char *method, const char *path, const char *token, const 
     return http_request_type(method, path, token, NULL, body, body_len, resp);
 }
 
+/* File downloads use the website user agent. Cookies and API headers stay off. */
+static void download_ua(sb_t *hdr)
+{
+    sb_t ua = {0};
+
+    http_prepare_client();
+    EnterCriticalSection(&g_lock);
+    if (g_ua.data)
+        sb_addn(&ua, g_ua.data, g_ua.len);
+    LeaveCriticalSection(&g_lock);
+    add_line(hdr, "User-Agent", ua.data);
+    sb_free(&ua);
+}
+
 int http_cdn_get(const char *path, http_resp_t *resp)
 {
-    return do_request(g_cdn, 0, NULL, "GET", path, NULL, NULL, 0, NULL, NULL, resp);
+    sb_t hdr = {0};
+    int ok;
+
+    download_ua(&hdr);
+    ok = do_request(g_cdn, 0, L"https://discord.com/", "GET", path, NULL, NULL, 0, NULL, hdr.data, resp);
+    sb_free(&hdr);
+    return ok;
 }
 
 int http_get(const wchar_t *host, const char *path, http_resp_t *resp)
 {
     HINTERNET conn = WinHttpConnect(g_session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    sb_t hdr = {0};
     int ok;
 
     if (!conn)
         return 0;
-    ok = do_request(conn, 0, NULL, "GET", path, NULL, NULL, 0, NULL, NULL, resp);
+    download_ua(&hdr);
+    ok = do_request(conn, 0, NULL, "GET", path, NULL, NULL, 0, NULL, hdr.data, resp);
+    sb_free(&hdr);
     WinHttpCloseHandle(conn);
     return ok;
 }

@@ -105,7 +105,7 @@ Silicord has no telemetry, analytics or crash reporting, and no server of its ow
 - `media.tenor.com` and `static.klipy.com`: GIFs shown in messages and in the GIF picker
 - `raw.githubusercontent.com`: the [Google Fonts repository](https://github.com/google/fonts), at a pinned commit, when a profile uses a display name font not downloaded yet
 
-Requests to Discord's API, and the websocket upgrades for the gateway, QR login and voice, send the same client properties as the Discord website in Chrome: user agent, `X-Super-Properties` and the site's current build number. Images, fonts and GIFs still use a `Silicord/<version>` user agent. Links in messages open in your default browser only when you click them.
+Requests to Discord's API, and the websocket upgrades for the gateway, QR login and voice, send the same client properties as the Discord website in Chrome: user agent, `X-Super-Properties` and the site's current build number. Image, font and GIF downloads use that same user agent, without Discord cookies or API headers. Links in messages open in your default browser only when you click them.
 
 On your computer, Silicord keeps:
 
