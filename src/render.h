@@ -40,6 +40,8 @@ typedef struct {
 void r_stroke(const r_seg_t *seg, int n, float width, unsigned argb);
 /* Draws `img` scaled into a w x h rounded rectangle (radius = w/2 for a circle). */
 void r_image(r_image_t *img, int x, int y, int w, int h, int radius);
+/* The same, `alpha` (0 to 1) as opaque: for images fading in or out. */
+void r_image_fade(r_image_t *img, int x, int y, int w, int h, int radius, float alpha);
 /*
  * Animated GIFs keep their compressed data and one composed frame; the first
  * frame shows until r_image_advance() moves on. It returns how many ms until

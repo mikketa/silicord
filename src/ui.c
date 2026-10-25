@@ -83,7 +83,10 @@ static const struct { COLORREF gdi; unsigned argb; } k_color[C_COUNT] = {
 #define ICON 40
 #define RAIL_STEP 48
 #define RAIL_FIRST 56 /* the first server, under home and its separator */
-#define FOLDER_GRAY 0x2B2D31 /* a folder without a color of its own: Discord's neutral gray */
+#define FOLDER 48             /* a folder's tile: a little larger than a server icon, as in Discord */
+#define FOLDER_MS 150         /* its opening and closing */
+#define FOLDER_SUBTLE 0x1F97979Fu /* a folder without a color of its own: Discord's --background-mod-subtle */
+#define FOLDER_BORDER 0x2997979Fu /* the outline of an open folder: --border-muted */
 #define PANEL_GAP 8   /* around the floating user panel */
 #define SEARCH_W 244  /* the chat header search box */
 #define SIDE_W 240
@@ -236,6 +239,8 @@ typedef struct {
     int quests_state; /* the same, for the Quests page */
     int nitro_hover;  /* NB_*: what the pointer is over on the Nitro page */
     unsigned char folder_open[64];
+    int folder_anim;         /* the folder opening or closing, plus one (0: none) */
+    unsigned folder_anim_t0; /* when it started, on g_tween's clock */
     int hover_kind, hover_index;
     image_t *images;
     int nimages, cap_images;
@@ -2155,6 +2160,8 @@ enum { RAIL_GUILD, RAIL_FOLDER };
 
 static struct {
     int kind[RAIL_MAX], index[RAIL_MAX], y[RAIL_MAX];
+    int list[RAIL_MAX]; /* RAIL_FOLDER: how much of its list of servers shows, in px */
+    int end;            /* where the rows end, unscrolled */
 } g_rail;
 
 static int folder_is_open(int f)
@@ -2162,28 +2169,78 @@ static int folder_is_open(int f)
     return f < (int)sizeof g_ui.folder_open && g_ui.folder_open[f];
 }
 
+/* 0 to 1 through folder f's last opening or closing; 1 once it is over. */
+static float folder_anim_at(int f)
+{
+    float t;
+
+    if (g_ui.folder_anim != f + 1)
+        return 1.f;
+    t = (float)(int)(g_tween.now - g_ui.folder_anim_t0) / (float)FOLDER_MS;
+    return t <= 0.f ? 0.f : t >= 1.f ? 1.f : t;
+}
+
+/* How much of its list shows: 0 closed, 1 open, easing out in between (softer than Discord's steady pace). */
+static float folder_reveal(int f)
+{
+    float t = ease_out(folder_anim_at(f));
+    return folder_is_open(f) ? t : 1.f - t;
+}
+
+/* Where its tile is between the grid (0) and the folder icon (1), easing out either way as Discord's CSS does. */
+static float folder_slide(int f)
+{
+    float t = ease_out(folder_anim_at(f));
+    return folder_is_open(f) ? t : 1.f - t;
+}
+
+static int folder_animating(void)
+{
+    return g_ui.folder_anim && (int)(g_tween.now - g_ui.folder_anim_t0) < FOLDER_MS;
+}
+
+/*
+ * A folder's row is its FOLDER tile, a gap wider than a server's; its y is the
+ * ICON slot centered in that tile. Its servers keep their places under it and
+ * the list's bottom edge moves as it opens and closes, pushing the rows below;
+ * only the servers in the part of the list that shows are rows.
+ */
 static int rail_rows(void)
 {
     const model_t *m = g_ui.model;
-    int n = 0, y = S(RAIL_FIRST) - g_ui.rail_scroll;
+    int n = 0, y = S(RAIL_FIRST) - g_ui.rail_scroll, fy = 0, j = 0, list = 0;
 
     for (unsigned i = 0; m && i < m->nguilds && n < RAIL_MAX; i++) {
         int f = m->guilds[i].folder;
         if (f >= 0 && (i == 0 || m->guilds[i - 1].folder != f)) {
+            int count = 0;
+            for (unsigned g = i; g < m->nguilds && m->guilds[g].folder == f; g++)
+                count++;
+            list = (int)((float)(count * S(RAIL_STEP)) * folder_reveal(f) + .5f);
+            fy = y + (S(FOLDER) - S(ICON)) / 2;
             g_rail.kind[n] = RAIL_FOLDER;
             g_rail.index[n] = f;
-            g_rail.y[n++] = y;
-            y += S(RAIL_STEP);
+            g_rail.list[n] = list;
+            g_rail.y[n++] = fy;
+            y += S(FOLDER) + S(RAIL_STEP) - S(ICON) + list;
+            j = 0;
         }
-        if (f >= 0 && !folder_is_open(f))
-            continue; /* closed folder */
-        if (n < RAIL_MAX) {
+        if (f >= 0) {
+            /* the j-th server of the list, if the list shows down to it */
+            if (j * S(RAIL_STEP) + (S(FOLDER) - S(ICON)) / 2 >= list || n == RAIL_MAX)
+                continue;
+            j++;
+            g_rail.kind[n] = RAIL_GUILD;
+            g_rail.index[n] = (int)i;
+            g_rail.y[n++] = fy + j * S(RAIL_STEP);
+        } else if (n < RAIL_MAX) {
             g_rail.kind[n] = RAIL_GUILD;
             g_rail.index[n] = (int)i;
             g_rail.y[n++] = y;
             y += S(RAIL_STEP);
         }
     }
+    g_rail.end = y + g_ui.rail_scroll;
     return n;
 }
 
@@ -2215,7 +2272,8 @@ static int rail_folder_y(int f)
 
 static int rail_content(void)
 {
-    return S(12) + (rail_rows() + 1) * S(RAIL_STEP) + S(12) + S(12);
+    rail_rows();
+    return g_rail.end - S(RAIL_FIRST) + S(12) + S(RAIL_STEP) + S(12) + S(12);
 }
 
 static const channel_t *chan(int i)
@@ -3100,12 +3158,14 @@ static void hit_test(int x, int y, int *kind, int *index)
             *kind = HIT_HOME;
             return;
         }
-        for (int k = 0, n = rail_rows(); k < n; k++)
-            if (y >= g_rail.y[k] && y < g_rail.y[k] + S(ICON)) {
+        for (int k = 0, n = rail_rows(); k < n; k++) {
+            int pad = g_rail.kind[k] == RAIL_FOLDER ? (S(FOLDER) - S(ICON)) / 2 : 0; /* a folder's whole tile */
+            if (y >= g_rail.y[k] - pad && y < g_rail.y[k] + S(ICON) + pad) {
                 *kind = g_rail.kind[k] == RAIL_GUILD ? HIT_GUILD : HIT_FOLDER;
                 *index = g_rail.index[k];
                 return;
             }
+        }
     } else if (x < S(RAIL_W + SIDE_W)) {
         unsigned first, count;
         if (y >= panel_top(rc))
@@ -3272,6 +3332,81 @@ static int icon_radius(float t)
     return S(12);
 }
 
+/* Whether (u, v) on a 24-unit grid is inside Discord's FolderIcon path: a tab on the left, then the body. */
+static int in_folder_glyph(float u, float v)
+{
+    float dx, dy;
+
+    if (u < 2.f || u > 22.f || v < 2.f || v > 22.f)
+        return 0;
+    if (v < 5.f) { /* the tab, rounded top left, its right side slanting down to the body */
+        if (u > 8.93f + (v - 2.f) * (12.f - 8.93f) / 3.f)
+            return 0;
+        dx = u - 5.f;
+        dy = v - 5.f;
+        return u >= 5.f || dx * dx + dy * dy <= 9.f;
+    }
+    /* the body, its other three corners rounded by 3 */
+    dx = u < 5.f ? u - 5.f : u > 19.f ? u - 19.f : 0.f;
+    dy = v > 19.f ? v - 19.f : v < 8.f && u > 19.f ? v - 8.f : 0.f;
+    if (u < 5.f && v < 19.f)
+        return 1;
+    return dx * dx + dy * dy <= 9.f;
+}
+
+/* That icon as a mask d px square, sampled 4 x 4 per pixel, made again only when the size changes. */
+static r_image_t *folder_glyph(int d)
+{
+    static r_image_t *img;
+    static int size;
+    unsigned *px;
+
+    if (img && size == d)
+        return img;
+    if (img)
+        r_image_free(img);
+    img = r_image_blank(d, d);
+    size = d;
+    px = r_image_bits(img);
+    for (int y = 0; y < d; y++)
+        for (int x = 0; x < d; x++) {
+            unsigned a = 0;
+            for (int s = 0; s < 16; s++)
+                a += (unsigned)in_folder_glyph(((float)x + ((float)(s & 3) + .5f) / 4.f) * 24.f / (float)d,
+                                               ((float)y + ((float)(s >> 2) + .5f) / 4.f) * 24.f / (float)d);
+            a = a * 255 / 16;
+            px[y * d + x] = a << 24 | a << 16 | a << 8 | a;
+        }
+    return img;
+}
+
+/*
+ * A server in a closed folder's grid, d px square at `pos` 0 to 3 (left to
+ * right, top to bottom): its corner on the folder's own corner is rounded to
+ * follow it (13 px), the other three barely (4 px), as Discord does. One
+ * radius per draw, so each quarter is drawn clipped with its own.
+ */
+static void paint_mini_icon(const guild_t *gd, int x, int y, int d, int pos)
+{
+    r_image_t *img = guild_icon(gd);
+
+    for (int q = 0; q < 4; q++) {
+        int h = d / 2, qx = q & 1 ? h : 0, qy = q & 2 ? h : 0;
+        int rad = q == pos ? S(13) : S(4);
+        r_clip(x + qx, y + qy, q & 1 ? d - h : h, q & 2 ? d - h : h);
+        if (img)
+            r_image(img, x, y, d, d, rad);
+        else
+            r_round(x, y, d, d, rad, ARGB(C_ITEM));
+        r_unclip();
+    }
+    if (!img) { /* its initials, as on its own icon */
+        wchar_t ini[8];
+        initials(model_str(g_ui.model, gd->name), ini, 8);
+        text_w(g_ui.f_initial_mini, C_INK, rect(x, y, d, d), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
 static void paint_rail(RECT rc)
 {
     int x = (S(RAIL_W) - S(ICON)) / 2, n = rail_rows();
@@ -3279,6 +3414,10 @@ static void paint_rail(RECT rc)
 
     fill(0, 0, S(RAIL_W), rc.bottom, C_RAIL);
     r_clip(0, 0, S(RAIL_W), panel_top(rc) - S(PANEL_GAP));
+    if (folder_animating() && g_ui.paint_wnd == g_ui.wnd) { /* everything under the folder moves */
+        RECT r = {0, 0, S(RAIL_W), rc.bottom};
+        UnionRect(&g_tween.dirty, &g_tween.dirty, &r);
+    }
 
     /* Home: the Silicord mark on the accent, where Discord puts its own. */
     {
@@ -3298,29 +3437,20 @@ static void paint_rail(RECT rc)
     }
     fill((S(RAIL_W) - S(32)) / 2, home_y + S(ICON) + S(8), S(32), S(1) > 1 ? S(1) : 1, C_LINE);
 
-    /* Open folders: a tinted column behind the folder and its servers. */
+    /*
+     * Folders, after Discord's guild folder CSS: a FOLDER tile, the grid of its
+     * first four servers when closed and its icon when open, sliding one into
+     * the other; open, a tinted column as wide as the tile behind it and its
+     * list, fading in.
+     */
     for (int k = 0; k < n; k++) {
-        if (g_rail.kind[k] != RAIL_FOLDER || !folder_is_open(g_rail.index[k]))
+        int y = g_rail.y[k], tx = x - (S(FOLDER) - S(ICON)) / 2, ty = y - (S(FOLDER) - S(ICON)) / 2;
+        if (g_rail.kind[k] != RAIL_FOLDER || ty + S(FOLDER) + g_rail.list[k] < 0 || ty > rc.bottom)
             continue;
         {
-            int end = k + 1;
-            const folder_t *f = &g_ui.model->folders[g_rail.index[k]];
-            unsigned c = f->has_color ? f->color : FOLDER_GRAY;
-            while (end < n && g_rail.kind[end] == RAIL_GUILD &&
-                   g_ui.model->guilds[g_rail.index[end]].folder == g_rail.index[k])
-                end++;
-            r_round(x - S(4), g_rail.y[k] - S(4), S(ICON) + S(8), g_rail.y[end - 1] + S(ICON) + S(4) - (g_rail.y[k] - S(4)),
-                    S(16), 0x33000000u | (c & 0xFFFFFF));
-        }
-    }
-    for (int k = 0; k < n; k++) {
-        int y = g_rail.y[k];
-        if (g_rail.kind[k] != RAIL_FOLDER || y + S(ICON) < 0 || y > rc.bottom)
-            continue;
-        {
-            int f = g_rail.index[k], open = folder_is_open(f);
+            int f = g_rail.index[k], open = folder_is_open(f), oy = (int)((float)S(FOLDER) * folder_slide(f) + .5f);
             const folder_t *fd = &g_ui.model->folders[f];
-            unsigned c = fd->has_color ? fd->color : FOLDER_GRAY;
+            unsigned c = fd->color & 0xFFFFFF;
             int hov = g_ui.hover_kind == HIT_FOLDER && g_ui.hover_index == f, unread = 0, mentions = 0, sel = 0, j = 0;
             for (unsigned g = 0; g < g_ui.model->nguilds; g++)
                 if (g_ui.model->guilds[g].folder == f) {
@@ -3330,65 +3460,93 @@ static void paint_rail(RECT rc)
                     mentions += mm;
                     sel |= g_ui.guild == (int)g;
                 }
-            if (open) {
-                text_w(g_ui.f_icon_mid, C_INK, rect(x, y, S(ICON), S(ICON)), L"\xE8B7", -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                /* folder glyph tinted with its color, the accent's without one */
-                r_round(x + S(14), y + S(30), S(20), S(3), S(1), fd->has_color ? 0xFF000000u | c : ARGB(C_BRAND));
-            } else {
-                /* Closed: up to four of its icons in a grid, like Discord. */
-                float t = tween_on(HIT_FOLDER, f, hov, TW_FAST, x, y, S(ICON), S(ICON));
-                r_round(x, y, S(ICON), S(ICON), S(16), lerp_argb(0x66000000u | c, 0x8C000000u | c, t));
+            if (folder_reveal(f) > 0.f) {
+                /*
+                 * The column: its color at 15%, faint without one, under a faint
+                 * outline; fading in as it opens, and out as it closes with the
+                 * list instead of leaving its servers on the bare rail.
+                 */
+                float a = folder_reveal(f);
+                unsigned bg = fd->has_color ? 0x26000000u | c : FOLDER_SUBTLE;
+                int h = S(FOLDER) + g_rail.list[k];
+                r_round(tx, ty, S(FOLDER), h, S(16), (unsigned)((float)(bg >> 24) * a + .5f) << 24 | (bg & 0xFFFFFF));
+                r_round_outline(tx, ty, S(FOLDER), h, S(16), S(1) > 1 ? S(1) : 1,
+                                (unsigned)((float)(FOLDER_BORDER >> 24) * a + .5f) << 24 | (FOLDER_BORDER & 0xFFFFFF));
+            }
+            r_clip(tx, ty, S(FOLDER), S(FOLDER));
+            if (oy > 0) { /* its icon, coming down from above as it opens: Discord's FolderIcon, 18 px */
+                unsigned fc = fd->has_color ? 0xFF000000u | c : ARGB(C_BRAND);
+                int u = S(18), iy = y - S(FOLDER) + oy;
+                float t = tween_on(HIT_FOLDER, f, hov && open, FOLDER_MS, x, y, S(ICON), S(ICON));
+                if (t > 0.f) /* hovered: a faint square behind it, as .folderIcon:hover */
+                    r_round(x, iy, S(ICON), S(ICON), S(12),
+                            (unsigned)((float)(FOLDER_SUBTLE >> 24) * t + .5f) << 24 | (FOLDER_SUBTLE & 0xFFFFFF));
+                r_image_tint(folder_glyph(u), x + (S(ICON) - u) / 2, iy + (S(ICON) - u) / 2, fc);
+            }
+            if (oy < S(FOLDER)) { /* the grid, going down out of sight as it opens */
+                int gy0 = ty + oy, pad = S(4), gap = S(2), cell = (S(FOLDER) - 2 * pad - gap) / 2;
+                r_round(tx, gy0, S(FOLDER), S(FOLDER), S(16), fd->has_color ? 0x66000000u | c : FOLDER_SUBTLE);
                 for (unsigned g = 0; g < g_ui.model->nguilds && j < 4; g++) {
                     if (g_ui.model->guilds[g].folder != f)
                         continue;
-                    {
-                        int gx = x + S(6) + (j % 2) * S(19), gy = y + S(6) + (j / 2) * S(19);
-                        r_image_t *img = guild_icon(&g_ui.model->guilds[g]);
-                        if (img) {
-                            r_image(img, gx, gy, S(17), S(17), S(9));
-                        } else { /* its initials, as on its own icon */
-                            wchar_t ini[8];
-                            initials(model_str(g_ui.model, g_ui.model->guilds[g].name), ini, 8);
-                            r_circle(gx, gy, S(17), ARGB(C_ITEM));
-                            text_w(g_ui.f_initial_mini, C_INK, rect(gx, gy, S(17), S(17)), ini, -1,
-                                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                        }
-                    }
+                    paint_mini_icon(&g_ui.model->guilds[g], tx + pad + (j % 2) * (cell + gap),
+                                    gy0 + pad + (j / 2) * (cell + gap), cell, j);
                     j++;
                 }
+            }
+            r_unclip();
+            if (!open) { /* the pill and the badge go with the grid, as in Discord */
                 paint_pill(TW_FOLDER_PILL, f, y, sel ? S(40) : hov ? S(20) : unread || mentions ? S(8) : 0,
                            unread || mentions ? S(8) : 0);
                 if (mentions) {
-                    r_circle(x + S(ICON) - S(20), y + S(ICON) - S(20), S(24), ARGB(C_RAIL));
-                    paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
+                    r_circle(tx + S(FOLDER) - S(20), ty + S(FOLDER) - S(20), S(24), ARGB(C_RAIL));
+                    paint_badge(tx + S(FOLDER) + S(2), ty + S(FOLDER) - S(8), mentions);
                 }
             }
         }
     }
 
-    for (int k = 0; k < n; k++) {
+    for (int k = 0, fy = 0, list = 0; k < n; k++) {
         int i = g_rail.index[k], y = g_rail.y[k];
-        int sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i, radius;
-        float t;
+        int sel = g_ui.guild == i, hov = g_ui.hover_kind == HIT_GUILD && g_ui.hover_index == i, radius, sliding;
+        float t, fade = 1.f;
         const guild_t *gd;
         r_image_t *img;
 
+        if (g_rail.kind[k] == RAIL_FOLDER) {
+            fy = y;
+            list = g_rail.list[k];
+        }
         if (g_rail.kind[k] != RAIL_GUILD || y + S(ICON) < 0 || y > rc.bottom)
             continue;
+        /*
+         * While its folder opens or closes, a server shows only in the part of
+         * the list that does, fading in as it is uncovered (out as it is
+         * covered) rather than cut by the list's edge.
+         */
+        sliding = g_ui.model->guilds[i].folder >= 0 && folder_reveal(g_ui.model->guilds[i].folder) < 1.f;
+        if (sliding) {
+            int top = fy + (S(FOLDER) + S(ICON)) / 2; /* the list's, under the folder's tile */
+            fade = (float)(list - (y - top)) / (float)S(ICON);
+            fade = fade < 0.f ? 0.f : fade > 1.f ? 1.f : fade;
+            r_clip(0, top, S(RAIL_W), list);
+        }
         t = tween_on(HIT_GUILD, i, sel || hov, TW_SHAPE, x, y, S(ICON), S(ICON));
         radius = icon_radius(t);
         gd = &g_ui.model->guilds[i];
         img = guild_icon(gd);
         if (img) {
-            r_image(img, x, y, S(ICON), S(ICON), radius);
+            r_image_fade(img, x, y, S(ICON), S(ICON), radius, fade);
         } else {
             wchar_t ini[8];
+            unsigned bg = lerp_argb(ARGB(C_ITEM), ARGB(C_BRAND), t), ink = ARGB(t >= .5f ? C_RAIL : C_INK);
             initials(model_str(g_ui.model, gd->name), ini, 8);
-            r_round(x, y, S(ICON), S(ICON), radius, lerp_argb(ARGB(C_ITEM), ARGB(C_BRAND), t));
-            text_w(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial, t >= .5f ? C_RAIL : C_INK,
-                   rect(x, y, S(ICON), S(ICON)), ini, -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            r_round(x, y, S(ICON), S(ICON), radius, (unsigned)((float)(bg >> 24) * fade) << 24 | (bg & 0xFFFFFF));
+            r_text(lstrlenW(ini) > 2 ? g_ui.f_initial_small : g_ui.f_initial,
+                   (unsigned)((float)(ink >> 24) * fade) << 24 | (ink & 0xFFFFFF), x, y, S(ICON), S(ICON), ini, -1,
+                   R_CENTER | R_VCENTER | R_SINGLE);
         }
-        {
+        if (fade >= 1.f) { /* its pill and badge once it shows whole */
             int unread, mentions;
             guild_state(i, &unread, &mentions);
             paint_pill(TW_PILL, i, y, sel ? S(40) : hov ? S(20) : unread || mentions ? S(8) : 0, unread || mentions ? S(8) : 0);
@@ -3397,6 +3555,8 @@ static void paint_rail(RECT rc)
                 paint_badge(x + S(ICON) + S(2), y + S(ICON) - S(8), mentions);
             }
         }
+        if (sliding)
+            r_unclip();
     }
     r_unclip();
 }
@@ -7602,10 +7762,18 @@ static void on_click(int kind, int index)
         voice_leave();
         break;
     case HIT_FOLDER:
-        if (index >= 0 && index < (int)sizeof g_ui.folder_open)
+        if (index >= 0 && index < (int)sizeof g_ui.folder_open) {
             g_ui.folder_open[index] ^= 1;
+            g_ui.folder_anim = index + 1;
+            g_ui.folder_anim_t0 = (unsigned)qpc_ms();
+        }
         clamp_scroll();
-        redraw();
+        { /* only the rail moves, and its tooltip beside it: a whole repaint would eat the animation's first frames */
+            RECT r;
+            GetClientRect(g_ui.wnd, &r);
+            r.right = S(RAIL_W) + S(4) + S(320);
+            InvalidateRect(g_ui.wnd, &r, FALSE);
+        }
         break;
     case HIT_FRIENDS:
         index = HOME_FRIENDS;

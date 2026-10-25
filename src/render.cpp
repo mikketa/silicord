@@ -582,6 +582,8 @@ static inline UINT32 blend(__m128i sv, UINT32 d, float cov)
 static tap_t g_taps[MAX_TAPS];
 
 /* Draws the source rectangle (su, sv, sw, sh) of img into (x, y, w, h), rounded by radius. */
+static float g_image_alpha = 1; /* r_image_fade(): how opaque the image is drawn */
+
 static void draw_image(const r_image_t *img, float su, float sv, float sw, float sh, int x, int y, int w, int h, int radius)
 {
     RECT r = clip_rect();
@@ -604,7 +606,7 @@ static void draw_image(const r_image_t *img, float su, float sv, float sw, float
         int plain = rad <= 0 || (py - (float)y >= rad + 1 && (float)(y + h) - py >= rad + 1);
         int xx = r.left;
 
-        if (exact && plain) {
+        if (exact && plain && g_image_alpha >= 1) {
             /* Four opaque pixels at a time replace the destination's, alpha byte cleared as blending leaves it. */
             const __m128i opaque = _mm_set1_epi32(~0x00FFFFFF), rgb = _mm_set1_epi32(0x00FFFFFF);
             for (; xx + 4 <= r.right; xx += 4, p += 4) {
@@ -621,6 +623,7 @@ static void draw_image(const r_image_t *img, float su, float sv, float sw, float
 
             if (!plain && (cov = rr_cover(px, py, (float)x, (float)y, (float)(x + w), (float)(y + h), rad)) <= 0)
                 continue;
+            cov *= g_image_alpha;
             if (exact)
                 s = px_lanes(src + (size_t)(xx - r.left) * 4);
             else if (shrink)
@@ -656,6 +659,15 @@ extern "C" void r_image(r_image_t *img, int x, int y, int w, int h, int radius)
         if (img->frames > 1)
             note_drawn(img, x, y, w, h);
     }
+}
+
+extern "C" void r_image_fade(r_image_t *img, int x, int y, int w, int h, int radius, float alpha)
+{
+    if (alpha <= 0)
+        return;
+    g_image_alpha = alpha < 1 ? alpha : 1;
+    r_image(img, x, y, w, h, radius);
+    g_image_alpha = 1;
 }
 
 /* The image's alpha as a mask, filled with one color, at its own size (icons drawn in the color of the moment). */
