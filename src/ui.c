@@ -136,7 +136,7 @@ enum { TAB_EMOJI, TAB_GIFS, TAB_STICKERS };
 
 typedef struct {
     int kind;
-    int index;          /* unicode: into k_emoji; header: category, or -1 - guild for a server */
+    int index;          /* unicode: an emoji index (emoji.h); header: category, or -1 - guild for a server */
     char id[24];        /* custom emoji, sticker */
     char name[40];
     int animated;       /* stickers: their format_type */
@@ -11835,7 +11835,7 @@ static void picker_paint(RECT rc)
             if ((img = image_get(key, path, S(32))) != NULL)
                 r_image(img, x_ + S(4), y_ + S(4), S(32), S(32), 0);
         } else {
-            unicode_emoji8(k_emoji[it->index].emoji, x_ + S(4), y_ + S(4), S(32), g_ui.f_emoji);
+            unicode_emoji8(emoji_text(it->index), x_ + S(4), y_ + S(4), S(32), g_ui.f_emoji);
         }
     }
     r_unclip();
@@ -11846,7 +11846,7 @@ static void picker_paint(RECT rc)
         const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[g_ui.pick_hover];
         char label[64];
         if (it->kind == PI_UNICODE)
-            unicode_emoji8(k_emoji[it->index].emoji, S(12) + (S(40) - S(28)) / 2, grid_bottom + (S(PICK_FOOT) - S(28)) / 2, S(28),
+            unicode_emoji8(emoji_text(it->index), S(12) + (S(40) - S(28)) / 2, grid_bottom + (S(PICK_FOOT) - S(28)) / 2, S(28),
                            g_ui.f_emoji);
         wsprintfA(label, it->kind == PI_STICKER ? "%.40s" : ":%.40s:", it->name);
         text(g_ui.f_h, C_INK, rect(S(60), grid_bottom, w - S(72), S(PICK_FOOT)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -11922,7 +11922,7 @@ static void picker_choose(int i)
                 lstrcpynA(r.emoji_id, it->id, sizeof r.emoji_id);
                 sb_add(&r.emoji, it->name);
             } else {
-                sb_add(&r.emoji, k_emoji[it->index].emoji);
+                sb_add(&r.emoji, emoji_text(it->index));
             }
             toggle_reaction(&g_ui.msgs[m], &r);
             sb_free(&r.emoji);
@@ -11934,7 +11934,7 @@ static void picker_choose(int i)
         if (it->kind == PI_CUSTOM)
             wsprintfA(ins, ":%s:", it->name);
         else
-            lstrcpynA(ins, k_emoji[it->index].emoji, sizeof ins);
+            lstrcpynA(ins, emoji_text(it->index), sizeof ins);
         w = utf8_to_wide(ins, lstrlenA(ins));
         SendMessageW(g_ui.composer, EM_REPLACESEL, TRUE, (LPARAM)w);
         mem_free(w);
@@ -12822,7 +12822,7 @@ static void ac_update(void)
             it->emoji = i;
             emoji_main_name(i, name, sizeof name);
             wsprintfA(it->label, ":%s:", name);
-            wsprintfA(it->insert, "%s ", k_emoji[i].emoji);
+            wsprintfA(it->insert, "%s ", emoji_text(i));
         }
     }
     if (!g_ui.ac_n)
@@ -12896,7 +12896,7 @@ static void paint_autocomplete(void)
             if (img)
                 r_image(img, x + S(8), y + S(7), S(24), S(24), 0);
         } else {
-            unicode_emoji8(k_emoji[it->emoji].emoji, x + S(8), y + S(7), S(24), g_ui.f_body);
+            unicode_emoji8(emoji_text(it->emoji), x + S(8), y + S(7), S(24), g_ui.f_body);
         }
         text(g_ui.f_body, C_INK, rect(x + S(44), y, r.right - x - S(60), S(AC_ROW)), it->label,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);

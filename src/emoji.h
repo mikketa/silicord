@@ -5,20 +5,24 @@
 /* Unicode emoji and their short names (":thumbsup:"), in Discord's picker order. */
 
 typedef struct {
-    const char *emoji;   /* UTF-8 */
-    const char *names;   /* space-separated short names, the first one is the main one */
-} emoji_t;
-
-typedef struct {
     const char *name;
-    int first, end;      /* range in k_emoji */
+    int first, end;      /* range of emoji indices */
 } emoji_category_t;
 
 #define EMOJI_CATEGORIES 8
 
-extern const emoji_t k_emoji[];
+/*
+ * The emoji one after another, each "emoji\0names\0": the emoji in UTF-8, its
+ * short names space-separated, the main one first. No pointers: the table
+ * needs no relocations, and stays in the exe's pages.
+ */
+extern const char k_emoji_data[];
 extern const int k_nemoji;
 extern const emoji_category_t k_emoji_categories[EMOJI_CATEGORIES];
+
+/* Emoji i (UTF-8), and its names. The first call indexes the table: from one thread at a time, the UI's. */
+const char *emoji_text(int i);
+const char *emoji_names(int i);
 /* Discord's other names (emoji_alias.c), sorted: "name\0emoji\0" each; not in the picker. */
 extern const char k_emoji_aliases[];
 extern const int k_nemoji_aliases;

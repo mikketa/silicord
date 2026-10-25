@@ -46,6 +46,19 @@ void entry(void)
           "categories cover the table");
     emoji_main_name(0, name, sizeof name);
     check(lstrcmpA(name, "grinning") == 0, "main name");
+    check(lstrcmpA(emoji_text(0), "\xF0\x9F\x98\x80") == 0 && lstrcmpA(emoji_names(k_nemoji - 1), "wales") == 0 &&
+              (e = emoji_by_name("100", 3)) && lstrcmpA(e, "\xF0\x9F\x92\xAF") == 0,
+          "the table from its first emoji to its last");
+    {
+        char main_name[64];
+        int found = 1;
+        for (int i = 0; i < k_nemoji; i++) { /* each emoji, by its main name, is itself */
+            emoji_main_name(i, main_name, sizeof main_name);
+            e = emoji_by_name(main_name, (size_t)lstrlenA(main_name));
+            found &= e && lstrcmpA(e, emoji_text(i)) == 0;
+        }
+        check(found, "every emoji is found by its name");
+    }
     check(emoji_matches(0, "GRIN") == 2 && emoji_matches(0, "nning") == 1 && !emoji_matches(0, "zzz") && emoji_matches(0, ""),
           "search: prefix, substring, none");
 

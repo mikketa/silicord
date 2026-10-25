@@ -7,10 +7,40 @@ static int name_char(char c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '+';
 }
 
+#define EMOJI_MAX 4096
+
+/* Where each emoji starts in k_emoji_data, found once. */
+static unsigned short g_at[EMOJI_MAX];
+static int g_indexed;
+
+const char *emoji_text(int i)
+{
+    if (!g_indexed) {
+        unsigned at = 0;
+        for (int k = 0; k < k_nemoji && k < EMOJI_MAX; k++) {
+            g_at[k] = (unsigned short)at;
+            for (int field = 0; field < 2; field++) /* the emoji, then its names */
+                while (k_emoji_data[at++])
+                    ;
+        }
+        g_indexed = 1;
+    }
+    return k_emoji_data + g_at[i];
+}
+
+const char *emoji_names(int i)
+{
+    const char *p = emoji_text(i);
+
+    while (*p)
+        p++;
+    return p + 1;
+}
+
 const char *emoji_by_name(const char *name, size_t n)
 {
     for (int i = 0; i < k_nemoji; i++) {
-        const char *p = k_emoji[i].names;
+        const char *p = emoji_names(i);
         while (*p) {
             size_t k = 0;
             while (p[k] && p[k] != ' ')
@@ -20,7 +50,7 @@ const char *emoji_by_name(const char *name, size_t n)
                 while (j < n && p[j] == name[j])
                     j++;
                 if (j == n)
-                    return k_emoji[i].emoji;
+                    return emoji_text(i);
             }
             p += k + (p[k] == ' ');
         }
@@ -108,7 +138,7 @@ static int emoji_append(const char *name, size_t n, sb_t *out)
 
 int emoji_matches(int i, const char *query)
 {
-    const char *p = k_emoji[i].names;
+    const char *p = emoji_names(i);
     int found = 0;
 
     if (!*query)
@@ -129,7 +159,7 @@ int emoji_matches(int i, const char *query)
 void emoji_main_name(int i, char *out, size_t size)
 {
     size_t k = 0;
-    const char *p = k_emoji[i].names;
+    const char *p = emoji_names(i);
 
     while (p[k] && p[k] != ' ' && k + 1 < size) {
         out[k] = p[k];
