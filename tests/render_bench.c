@@ -4,6 +4,9 @@
  * Not a test: run it by hand, before and after a change to the renderer.
  *
  *     render_bench DATA_DIR   (messages.json, from tools/make_bench_data.py)
+ *
+ * With BENCH_DUMP set, it times nothing and writes the frames instead, to
+ * compare a renderer's pixels before and after a change.
  */
 #include <windows.h>
 #include "test.h"
@@ -123,6 +126,58 @@ static void time_paint(HDC dc, const char *name, int what)
     report(name, best);
 }
 
+/* Text in the cases a renderer change can get wrong: sizes, colors, backgrounds, translucency, clips, bands. */
+static void paint_text_cases(HDC dc)
+{
+    static const wchar_t sample[] = L"The quick brown fox jumps over the lazy dog 0123456789 \x00E9\x00E8\x00E0 fi fl -> \x2192";
+    static const unsigned inks[] = {0xFFDBDEE1, 0xFFF2F3F5, 0xFF949BA4, 0xFF2781E7, 0xFFFF6B6B, 0xFF57F287, 0xFF000000,
+                                    0x80FFFFFF, 0xC0F0B232};
+    static const unsigned grounds[] = {0xFF1F1F23, 0xFF313338, 0xFFFFFFFF, 0xFF5865F2, 0xFF000000};
+    r_font_t *fonts[] = {g_small, g_body, g_bold, g_chan, g_mono, g_h1};
+
+    while (r_begin(dc, W, H)) {
+        r_fill(0, 0, W, H, 0xFF1F1F23);
+        for (int g = 0; g < 5; g++)
+            r_fill(0, g * 200, W / 2, 200, grounds[g]);
+        r_image(g_avatar[0], W / 2, 0, W / 2, H, 0); /* noise: every background at once */
+        for (int k = 0; k < 54; k++) {
+            int x = (k & 1) * (W / 2) + 8, y = 10 + (k / 2) * 39;
+            r_text(fonts[k % 6], inks[k % 9], x, y, W / 2 - 16, 36, sample, -1, R_SINGLE);
+        }
+        /* across the band edges (512, 1024) and inside clips */
+        r_text(g_h1, 0xFFFFFFFF, 30, 500, 900, 40, sample, -1, R_SINGLE);
+        r_clip(1000, 700, 300, 14);
+        r_text(g_h1, 0xFFFFFFFF, 980, 690, 900, 40, sample, -1, R_SINGLE);
+        r_unclip();
+        r_text(g_body, 0xFFDBDEE1, 400, 1015, 600, 60, sample, -1, 0);
+        r_end(dc);
+    }
+    GdiFlush();
+}
+
+/* BENCH_DUMP=PREFIX: the frame and the text cases as raw BGRA, PREFIX.frame.raw and PREFIX.text.raw. */
+static void dump_frames(HDC dc, const void *bits, const char *prefix)
+{
+    char path[MAX_PATH];
+    DWORD put;
+    HANDLE f;
+
+    for (int k = 0; k < 2; k++) {
+        if (k == 0)
+            paint(dc, ALL);
+        else
+            paint_text_cases(dc);
+        wsprintfA(path, "%s.%s.raw", prefix, k == 0 ? "frame" : "text");
+        f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (f == INVALID_HANDLE_VALUE) {
+            out("cannot write the dump\r\n");
+            ExitProcess(1);
+        }
+        WriteFile(f, bits, W * H * 4, &put, NULL);
+        CloseHandle(f);
+    }
+}
+
 static void load_messages(const char *dir)
 {
     char path[MAX_PATH];
@@ -195,6 +250,13 @@ void entry(void)
         g_avatar[i] = noise_image(48, 48, (unsigned)i * 7919u + 1);
     load_messages(dir);
 
+    {
+        char dump[MAX_PATH];
+        if (GetEnvironmentVariableA("BENCH_DUMP", dump, sizeof dump)) {
+            dump_frames(dc, bits, dump);
+            ExitProcess(0);
+        }
+    }
     time_paint(dc, "frame: everything", ALL);
     time_paint(dc, "frame: shapes", SHAPES);
     time_paint(dc, "frame: images", IMAGES);
