@@ -3633,6 +3633,35 @@ static const struct {
      "<path d=\"M19 14a1 1 0 0 1 1 1v3h3a1 1 0 1 1 0 2h-3v3a1 1 0 1 1-2 0v-3h-3a1 1 0 1 1 0-2h3v-3a1 1 0 0 1 1-1Z\"/>"
      "<path d=\"M20.76 12.57c.4.3 1.23.13 1.24-.37V12a10 10 0 1 0-18.44 5.36c.12.19.1.44-.04.61l-2.07 2.37A1 1 0 0 0 2.2 "
      "22h10c.5-.01.67-.84.37-1.24A3 3 0 0 1 15 16h.5a.5.5 0 0 0 .5-.5V15a3 3 0 0 1 4.76-2.43Z\"/>"},
+    /* The message toolbar's buttons. */
+    {0xE76E, /* add reaction: a smiley with a plus */
+     "<path d=\"M19 14a1 1 0 0 1 .1 0l.05.01h.04l.01.01.07.02h.01l.06.02h.02A1 1 0 0 1 20 15v3h3a1 1 0 1 1 0 2h-3v3a1 1 0 1 "
+     "1-2 0v-3h-3a1 1 0 0 1-.96-.72l-.01-.05A1 1 0 0 1 14 19a1.01 1.01 0 0 1 .35-.76l.02-.02a.95.95 0 0 1 .05-.04c.01 0 "
+     ".02 0 .03-.02a.96.96 0 0 1 .06-.03l.02-.01.05-.03.04-.02a.98.98 0 0 1 .07-.02h.01a1 1 0 0 1 .2-.05H18v-3a1 1 0 0 1 "
+     "1-1Z\"/>"
+     "<path fill-rule=\"evenodd\" d=\"M10.67 1.33a9.33 9.33 0 0 1 9.22 10.76c-.04.29-.34.45-.63.42L19 12.5a2.5 2.5 0 0 "
+     "0-2.5 2.5v1a.5.5 0 0 1-.5.5h-1a2.5 2.5 0 0 0-2.49 2.24l-.01.26.01.26c.03.29-.13.59-.42.63a9.31 9.31 0 0 1-10.76-9.22 "
+     "9.33 9.33 0 0 1 9.34-9.34Zm3.64 11.18a.85.85 0 0 0-1.17.23 2.97 2.97 0 0 1-4.94 0 .85.85 0 1 0-1.41.94 4.66 4.66 0 0 "
+     "0 7.76 0 .85.85 0 0 0-.24-1.17ZM6 8.97a1.27 1.27 0 1 0 0 2.54 1.27 1.27 0 0 0 0-2.54Zm9.33 0a1.27 1.27 0 1 0 0 2.55 "
+     "1.27 1.27 0 0 0 0-2.55Z\"/>"},
+    {0xE97A, /* reply: an arrow turning back */
+     "<path d=\"M2.3 7.3a1 1 0 0 0 0 1.4l5 5a1 1 0 0 0 1.4-1.4L5.42 9H11a7 7 0 0 1 7 7v4a1 1 0 1 0 2 0v-4a9 9 0 0 0-9-9H5.41l3.3"
+     "-3.3a1 1 0 0 0-1.42-1.4l-5 5Z\"/>"},
+    {0xE70F, /* edit: a pencil */
+     "<path d=\"m13.96 5.46 4.58 4.58a1 1 0 0 0 1.42 0l1.38-1.38a2 2 0 0 0 0-2.82l-3.18-3.18a2 2 0 0 0-2.82 0l-1.38 1.38a1 1 0 "
+     "0 0 0 1.42ZM2.11 20.16l.73-4.22a3 3 0 0 1 .83-1.61l7.87-7.87a1 1 0 0 1 1.42 0l4.58 4.58a1 1 0 0 1 0 1.42l-7.87 7.87a3 3 "
+     "0 0 1-1.6.83l-4.23.73a1.5 1.5 0 0 1-1.73-1.73Z\"/>"},
+    {0xE72D, /* forward: an arrow turning ahead */
+     "<path d=\"M21.7 7.3a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4L18.58 9H13a7 7 0 0 0-7 7v4a1 1 0 1 1-2 0v-4a9 9 0 0 1 9-9h5.59"
+     "l-3.3-3.3a1 1 0 0 1 1.42-1.4l5 5Z\"/>"},
+    {0xE712, /* more: three dots */
+     "<path fill-rule=\"evenodd\" d=\"M4 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm10-2a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm8 0a2 2 0 1 1-4 0 2 2 "
+     "0 0 1 4 0Z\"/>"},
+    {0xE74D, /* delete: a bin */
+     "<path d=\"M14.25 1c.41 0 .75.34.75.75V3h5.25c.41 0 .75.34.75.75v.5c0 .41-.34.75-.75.75H3.75A.75.75 0 0 1 3 4.25v-.5c0-.41"
+     ".34-.75.75-.75H9V1.75c0-.41.34-.75.75-.75h4.5Z\"/>"
+     "<path fill-rule=\"evenodd\" d=\"M5.06 7a1 1 0 0 0-1 1.06l.76 12.13a3 3 0 0 0 3 2.81h8.36a3 3 0 0 0 3-2.81l.75-12.13a1 1 0 0 "
+     "0-1-1.06H5.07ZM11 12a1 1 0 1 0-2 0v6a1 1 0 1 0 2 0v-6Zm3-1a1 1 0 0 1 1 1v6a1 1 0 1 1-2 0v-6a1 1 0 0 1 1-1Z\"/>"},
     /* The user panel's buttons. */
     {0xE720, /* microphone */
      "<path d=\"M12 2a4 4 0 0 0-4 4v4a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4Z\"/><path d=\"M6 10a1 1 0 0 0-2 0 8 8 0 0 0 7 7.94V20H9a1 1 0 "
@@ -9943,12 +9972,29 @@ static void open_self(void)
 
 /* ---- Message actions: hover toolbar, reply and edit bar, delete confirmation, typing ---- */
 
-#define TOOL_BTN 32
+/*
+ * Discord's hover bar (its popover and hoverBarButton classes): 28px buttons
+ * (a 24px box with the 20px icon in its middle, and 2px of padding) side by
+ * side, a line after the quick reactions, 2px of padding and a 1px border
+ * around them all.
+ */
+#define TOOL_BTN 28
+#define TOOL_ICON 20
+#define TOOL_PAD 3  /* border and padding */
+#define TOOL_SEP 9  /* the line after the reactions: 1px and 4px of margin each side */
+#define TOOL_H 34   /* the line's row is 28px high (24px and 2px of margin above and under) */
+#define TOOL_BG 0xFF0A0A0Cu           /* background-surface-high */
+#define TOOL_BORDER 0x2997979Fu       /* border-muted */
+#define TOOL_BORDER_HOVER 0x3397979Fu /* border-subtle, while the pointer is over the bar */
+#define TOOL_HOVER 0x1F97979Fu        /* interactive-background-hover */
+#define TOOL_DANGER 0xFFEB5F5Eu       /* control-critical-secondary-text-default */
+#define TIP_H 34 /* a tooltip: a 16px line, 8px of padding, a 1px border */
 #define TIMER_TYPING 2
 #define TYPING_MS 10000
 
 static const wchar_t *const k_quick[] = {L"\xD83D\xDC4D", L"\x2764\xFE0F", L"\xD83D\xDE02"}; /* thumbs up, heart, joy */
-enum { TOOL_REACT0, TOOL_REACT1, TOOL_REACT2, TOOL_ADD, TOOL_REPLY, TOOL_EDIT, TOOL_DELETE, TOOL_COUNT };
+static const char *const k_quick_names[] = {":thumbsup:", ":heart:", ":joy:"};
+enum { TOOL_REACT0, TOOL_REACT1, TOOL_REACT2, TOOL_ADD, TOOL_REPLY, TOOL_EDIT, TOOL_FORWARD, TOOL_DELETE, TOOL_MORE, TOOL_COUNT };
 
 static int own_message(const msg_t *m)
 {
@@ -9967,28 +10013,110 @@ static int msg_top(int i)
     return y;
 }
 
-/* Buttons shown for message i, in order; returns how many. */
+/*
+ * Buttons shown for message i, in order; returns how many. Discord's: the
+ * quick reactions, Add Reaction, Edit on ours or else Reply, Forward, More;
+ * holding Shift adds Delete on ours.
+ */
 static int tool_buttons(int i, int *out)
 {
-    int n = 0;
+    int n = 0, own = own_message(&g_ui.msgs[i]);
 
-    for (int k = TOOL_REACT0; k <= TOOL_REPLY; k++)
+    for (int k = TOOL_REACT0; k <= TOOL_ADD; k++)
         out[n++] = k;
-    if (own_message(&g_ui.msgs[i])) {
-        out[n++] = TOOL_EDIT;
+    out[n++] = own ? TOOL_EDIT : TOOL_REPLY;
+    out[n++] = TOOL_FORWARD;
+    if (own && GetKeyState(VK_SHIFT) < 0)
         out[n++] = TOOL_DELETE;
-    }
+    out[n++] = TOOL_MORE;
     return n;
 }
 
+/*
+ * Where the bar is drawn: over the message's top right corner, 14px in from
+ * its right edge (and the 16px of the list's scrollbar), 25px above a message
+ * that follows another of the same author or answers one, 16px above the
+ * first of a group.
+ */
 static RECT toolbar_rect(int i, int n)
 {
     RECT a = message_area();
-    int w = n * S(TOOL_BTN) + S(8), y = msg_top(i) + (g_ui.msgs[i].grouped == 1 ? -S(20) : S(0));
+    const msg_t *m = &g_ui.msgs[i];
+    int w = 2 * S(TOOL_PAD) + n * S(TOOL_BTN) + S(TOOL_SEP);
+    int y = msg_top(i) + (m->grouped == 1 ? 0 : S(12)) - (m->grouped == 1 || m->reply.len ? S(25) : S(16));
 
     if (y < a.top + S(4))
         y = a.top + S(4);
-    return rect(a.right - S(24) - w, y, w, S(TOOL_BTN) + S(4));
+    return rect(a.right - S(16) - S(14) - w, y, w, S(TOOL_H));
+}
+
+/* Button k of a bar at r: the reactions, then the line, then the others. */
+static RECT tool_button_rect(RECT r, int k)
+{
+    int x = r.left + S(TOOL_PAD) + k * S(TOOL_BTN) + (k > TOOL_REACT2 ? S(TOOL_SEP) : 0);
+
+    return rect(x, r.top + (r.bottom - r.top - S(TOOL_BTN)) / 2, S(TOOL_BTN), S(TOOL_BTN));
+}
+
+static const char *tool_label(int action)
+{
+    switch (action) {
+    case TOOL_REACT0:
+    case TOOL_REACT1:
+    case TOOL_REACT2: return k_quick_names[action];
+    case TOOL_ADD: return "Add Reaction";
+    case TOOL_REPLY: return "Reply";
+    case TOOL_EDIT: return "Edit";
+    case TOOL_FORWARD: return "Forward";
+    case TOOL_DELETE: return "Delete";
+    default: return "More";
+    }
+}
+
+/*
+ * A button's tooltip, as Discord's (tooltipPrimary): 14px medium text in a
+ * box with 8px/12px of padding, centered 8px above the button, its 5px
+ * pointer in the gap; under the button when there is no room above.
+ */
+static RECT tool_tip_rect(RECT b, const char *s, int *below)
+{
+    RECT a = message_area();
+    int w = text_width(g_ui.f_menu, s) + S(24) + 2, x = (b.left + b.right - w) / 2, y = b.top - S(8) - S(TIP_H);
+
+    *below = y < a.top;
+    if (*below)
+        y = b.bottom + S(8);
+    if (x + w > a.right - S(8))
+        x = a.right - S(8) - w;
+    if (x < a.left + S(8))
+        x = a.left + S(8);
+    return rect(x, y, w, S(TIP_H));
+}
+
+/* All the bar of message i can paint: the bar and any of its tooltips, with their pointers. */
+static RECT toolbar_dirty(int i)
+{
+    int btn[TOOL_COUNT], n = tool_buttons(i, btn), below;
+    RECT r = toolbar_rect(i, n), all = r;
+
+    for (int k = 0; k < n; k++) {
+        RECT b = tool_button_rect(r, k), t = tool_tip_rect(b, tool_label(btn[k]), &below);
+        UnionRect(&all, &all, &t);
+    }
+    return all;
+}
+
+static void paint_tool_tip(RECT b, const char *s)
+{
+    int below, h = S(5), cx = (b.left + b.right) / 2;
+    RECT t = tool_tip_rect(b, s, &below);
+
+    r_round(t.left, t.top, t.right - t.left, t.bottom - t.top, S(8), TOOL_BG);
+    r_round_outline(t.left, t.top, t.right - t.left, t.bottom - t.top, S(8), 1, TOOL_BORDER_HOVER);
+    for (int k = 0; k < h; k++) /* the pointer, toward the button */
+        r_fill(cx - (h - k), below ? t.top - k - 1 : t.bottom + k, 2 * (h - k), 1, TOOL_BG);
+    text(g_ui.f_menu, C_TEXT, rect(t.left + S(12) + 1, t.top + 1, t.right - t.left - S(24) - 2, t.bottom - t.top - 2), s,
+         DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 static void paint_toolbar(void)
@@ -10000,24 +10128,34 @@ static void paint_toolbar(void)
         return;
     n = tool_buttons(i, btn);
     r = toolbar_rect(i, n);
-    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 0xFF121214);
-    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1, 0xFF242426);
+    r_round(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), TOOL_BG);
+    r_round_outline(r.left, r.top, r.right - r.left, r.bottom - r.top, S(8), 1,
+                    g_ui.hover_tool >= 0 ? TOOL_BORDER_HOVER : TOOL_BORDER);
+    r_round(r.left + S(TOOL_PAD) + 3 * S(TOOL_BTN) + S(4), r.top + S(TOOL_PAD) + S(2), S(1) > 1 ? S(1) : 1, S(24), S(1),
+            TOOL_BORDER_HOVER);
     for (int k = 0; k < n; k++) {
-        int x = r.left + S(4) + k * S(TOOL_BTN), y = r.top + S(2);
-        if (g_ui.hover_tool == k)
-            r_round(x, y, S(TOOL_BTN), S(TOOL_BTN), S(6), ARGB(C_SELECT));
-        if (btn[k] <= TOOL_REACT2)
-            text_w(g_ui.f_body, C_INK, rect(x, y, S(TOOL_BTN), S(TOOL_BTN)), k_quick[btn[k]], -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        else
-            text_w(g_ui.f_icon, btn[k] == TOOL_DELETE && g_ui.hover_tool == k ? C_RED : C_MUTED,
-                   rect(x, y, S(TOOL_BTN), S(TOOL_BTN)),
-                   btn[k] == TOOL_ADD ? L"\xE76E" : btn[k] == TOOL_REPLY ? L"\xE97A" : btn[k] == TOOL_EDIT ? L"\xE70F" : L"\xE74D", -1,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT b = tool_button_rect(r, k);
+        int hot = g_ui.hover_tool == k, px = hot ? S(TOOL_ICON) * 11 / 10 : S(TOOL_ICON); /* the icon grows by 10% */
+        int cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+        if (hot)
+            r_round(b.left, b.top, S(TOOL_BTN), S(TOOL_BTN), S(6), TOOL_HOVER);
+        if (btn[k] <= TOOL_REACT2) {
+            unicode_emoji(k_quick[btn[k]], -1, cx - px / 2, cy - px / 2, px, g_ui.f_body);
+        } else {
+            static const wchar_t *const glyphs[TOOL_COUNT] = {
+                [TOOL_ADD] = L"\xE76E", [TOOL_REPLY] = L"\xE97A", [TOOL_EDIT] = L"\xE70F",
+                [TOOL_FORWARD] = L"\xE72D", [TOOL_DELETE] = L"\xE74D", [TOOL_MORE] = L"\xE712"};
+            dicon(glyphs[btn[k]], cx, cy, px, btn[k] == TOOL_DELETE ? TOOL_DANGER : hot ? ARGB(C_INK) : ARGB(C_MUTED));
+        }
     }
+    if (g_ui.hover_tool >= 0 && g_ui.hover_tool < n)
+        paint_tool_tip(tool_button_rect(r, g_ui.hover_tool), tool_label(btn[g_ui.hover_tool]));
 }
 
-/* Index (in the toolbar) of the button under (x, y), or -1. */
+/*
+ * Index (in the toolbar) of the button under (x, y); n (the number of
+ * buttons) over the bar between them, with *action -1; -1 off the bar.
+ */
 static int toolbar_hit(int x, int y, int *action)
 {
     int i = g_ui.hover_msg, btn[TOOL_COUNT], n;
@@ -10027,14 +10165,37 @@ static int toolbar_hit(int x, int y, int *action)
         return -1;
     n = tool_buttons(i, btn);
     r = toolbar_rect(i, n);
-    if (x < r.left + S(4) || x >= r.right - S(4) || y < r.top || y >= r.bottom)
+    if (x < r.left || x >= r.right || y < r.top || y >= r.bottom)
         return -1;
-    int k = (x - r.left - S(4)) / S(TOOL_BTN);
-    if (k >= n)
-        return -1;
+    for (int k = 0; k < n; k++) {
+        RECT b = tool_button_rect(r, k);
+        if (x >= b.left && x < b.right && y >= b.top && y < b.bottom) {
+            if (action)
+                *action = btn[k];
+            return k;
+        }
+    }
     if (action)
-        *action = btn[k];
-    return k;
+        *action = -1;
+    return n;
+}
+
+static void redraw_rect(RECT r);
+
+/* Shift shows Delete on the hovered message of ours, as in Discord: a key going down or up repaints its bar. */
+static void toolbar_shift(void)
+{
+    static int was;
+    int now = GetKeyState(VK_SHIFT) < 0;
+
+    if (now != was && g_ui.hover_msg >= 0 && g_ui.hover_msg < g_ui.nmsgs && own_message(&g_ui.msgs[g_ui.hover_msg])) {
+        RECT r = toolbar_dirty(g_ui.hover_msg), o = r; /* and as it was, one button wider or narrower */
+        OffsetRect(&o, -S(TOOL_BTN), 0);
+        UnionRect(&r, &r, &o);
+        g_ui.hover_tool = -1;
+        redraw_rect(r);
+    }
+    was = now;
 }
 
 /* ---- Reply / edit bar above the composer ---- */
@@ -10241,15 +10402,38 @@ static void toggle_reaction(msg_t *m, const msg_reaction_t *r)
     apply_reaction(m, r, add ? 1 : -1, 1);
 }
 
+static void forward_open(const char *id);
+static void message_menu(int i);
+
 static void run_tool(int action)
 {
     int i = g_ui.hover_msg;
     msg_t *m;
 
-    if (i < 0 || i >= g_ui.nmsgs)
+    if (i < 0 || i >= g_ui.nmsgs || action < 0)
         return;
     m = &g_ui.msgs[i];
     switch (action) {
+    case TOOL_FORWARD:
+        forward_open(m->id);
+        break;
+    case TOOL_MORE: {
+        /* Discord's menu, opening under the button */
+        int btn[TOOL_COUNT], n = tool_buttons(i, btn), k;
+        RECT r = toolbar_rect(i, n), b;
+        POINT pt;
+        for (k = 0; k < n && btn[k] != TOOL_MORE; k++)
+            ;
+        b = tool_button_rect(r, k);
+        pt.x = b.left;
+        pt.y = r.bottom + S(4);
+        ClientToScreen(g_ui.wnd, &pt);
+        g_menu_at = pt;
+        g_menu_at_set = 1;
+        message_menu(i);
+        g_menu_at_set = 0;
+        return; /* the menu redraws what it changes; the message may be gone */
+    }
     case TOOL_REACT0:
     case TOOL_REACT1:
     case TOOL_REACT2: {
@@ -16623,6 +16807,8 @@ static void send_composer(void)
 
 static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_SHIFT)
+        toolbar_shift();
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_ESCAPE && g_check_wnd && IsWindowVisible(g_check_wnd)) {
         check_close_click();
         return 0;
@@ -16681,12 +16867,23 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     return CallWindowProcW(g_ui.composer_proc, h, msg, wp, lp);
 }
 
+/* ---- Repainting a part ---- */
+
+/*
+ * A full frame takes milliseconds: a hover or a scroll step repaints only
+ * the part it changes, so they keep up with a fast display.
+ */
+static void redraw_rect(RECT r)
+{
+    InvalidateRect(g_ui.wnd, &r, FALSE);
+}
+
 /* ---- Window procedure ---- */
 
 static void update_hover(int x, int y)
 {
     int um = -1, ul = -1, kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, &um, &ul), i = -1, ax, ay;
-    int tool = toolbar_hit(x, y, NULL);
+    int tool_action = -1, tool = toolbar_hit(x, y, &tool_action);
     part_t part = {PART_NONE, -1};
 
     if (um != g_ui.under_msg || ul != g_ui.under_link) {
@@ -16785,7 +16982,7 @@ static void update_hover(int x, int y)
         g_ui.hover_tool = tool;
         redraw();
     }
-    link = link || tool >= 0;
+    link = link || tool_action >= 0; /* a hand on the buttons, not between them */
 
     link = link || author_hit(x, y, &i, &ax, &ay) || part_hit(x, y, &i, &part);
     react_hover(part.kind == PART_REACTION ? i : -1, part.index, x, y);
@@ -16806,6 +17003,8 @@ static void update_hover(int x, int y)
 
 static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_SHIFT)
+        toolbar_shift();
     switch (msg) {
     case WM_CREATE:
         g_ui.wnd = wnd;
