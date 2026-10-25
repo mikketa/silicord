@@ -155,19 +155,73 @@ static void paint_text_cases(HDC dc)
     GdiFlush();
 }
 
-/* BENCH_DUMP=PREFIX: the frame and the text cases as raw BGRA, PREFIX.frame.raw and PREFIX.text.raw. */
+/* Images in the cases a renderer change can get wrong: sizes up and down, radii, fades, alpha, clips, bands. */
+static void paint_image_cases(HDC dc)
+{
+    static r_image_t *src[4];
+    static const int sizes[] = {40, 48, 32, 24, 18, 64, 20, 36, 44};
+    int x, y;
+
+    if (!src[0]) {
+        src[0] = g_avatar[1];               /* 48 px, opaque */
+        src[1] = noise_image(40, 40, 4242); /* 40 px, as avatars are decoded */
+        src[2] = noise_image(48, 48, 777);  /* translucent: premultiplied, alpha across it */
+        for (int i = 0; i < 48 * 48; i++) {
+            unsigned *p = r_image_bits(src[2]) + i, a = (unsigned)(i % 48 * 255 / 47);
+            *p = a << 24 | ((*p >> 16 & 0xFF) * a / 255) << 16 | ((*p >> 8 & 0xFF) * a / 255) << 8 | (*p & 0xFF) * a / 255;
+        }
+        src[3] = noise_image(200, 150, 99); /* large, shrunk */
+    }
+    while (r_begin(dc, W, H)) {
+        r_fill(0, 0, W, H, 0xFF313338);
+        r_image(g_avatar[0], W / 2, 0, W / 2, H, 0);
+        x = 6;
+        y = 6;
+        for (int s = 0; s < 4; s++)
+            for (int k = 0; k < 4; k++)
+                for (int i = 0; i < (int)(sizeof sizes / sizeof *sizes); i++) {
+                    int d = sizes[i], radius = k == 0 ? 0 : k == 1 ? 4 : k == 2 ? 8 : d / 2;
+                    if (x + d > W - 6) {
+                        x = 6;
+                        y += 70;
+                    }
+                    r_image(src[s], x, y, d, d, radius);
+                    x += d + 6;
+                }
+        y += 80;
+        for (int i = 0; i < 9; i++) { /* fades, as folders open */
+            r_image_fade(src[i % 2], 6 + i * 50, y, 40, 40, 20, (float)(i + 1) / 10.f);
+            r_image_fade(src[3], 500 + i * 50, y, 40, 40, 8, (float)(i + 1) / 10.f);
+        }
+        r_image_cover(src[3], 1000, y, 160, 60, 8);
+        r_image_cover(src[3], 1200, y, 60, 120, 30);
+        r_image(src[3], 1300, y, 300, 220, 12); /* enlarged */
+        r_clip(1650, y + 10, 30, 25);          /* a circle seen through a clip */
+        r_image(src[1], 1640, y, 40, 40, 20);
+        r_unclip();
+        for (int i = 0; i < 12; i++) /* across the band edge (512) */
+            r_image(src[i % 3], 6 + i * 60, 492, 40, 40, i % 2 ? 20 : 6);
+        r_end(dc);
+    }
+    GdiFlush();
+}
+
+/* BENCH_DUMP=PREFIX: the frame, the text and the image cases as raw BGRA, PREFIX.frame.raw and so on. */
 static void dump_frames(HDC dc, const void *bits, const char *prefix)
 {
+    static const char *const names[] = {"frame", "text", "images"};
     char path[MAX_PATH];
     DWORD put;
     HANDLE f;
 
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 3; k++) {
         if (k == 0)
             paint(dc, ALL);
-        else
+        else if (k == 1)
             paint_text_cases(dc);
-        wsprintfA(path, "%s.%s.raw", prefix, k == 0 ? "frame" : "text");
+        else
+            paint_image_cases(dc);
+        wsprintfA(path, "%s.%s.raw", prefix, names[k]);
         f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
         if (f == INVALID_HANDLE_VALUE) {
             out("cannot write the dump\r\n");
