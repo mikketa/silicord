@@ -1431,6 +1431,62 @@ extern "C" int r_text_height(r_font_t *f, const wchar_t *s, int len, int width)
     return h;
 }
 
+/* ---- Selection ---- */
+
+/* The caret position nearest to (x, y) in l: before or after the character there. */
+static int layout_pos(IDWriteTextLayout *l, float x, float y)
+{
+    BOOL trailing, inside;
+    DWRITE_HIT_TEST_METRICS m;
+
+    if (FAILED(l->HitTestPoint(x, y, &trailing, &inside, &m)))
+        return 0;
+    return (int)m.textPosition + (trailing ? (int)m.length : 0);
+}
+
+/* Fills the boxes covering [a, a + n) of l drawn at (x, y): one per line, or per run of a direction. */
+static void mark_range(IDWriteTextLayout *l, int x, int y, int a, int n, unsigned argb)
+{
+    DWRITE_HIT_TEST_METRICS few[16], *boxes = few;
+    UINT32 count = 0;
+    HRESULT hr = l->HitTestTextRange((UINT32)a, (UINT32)n, 0, 0, few, 16, &count);
+
+    if (hr == E_NOT_SUFFICIENT_BUFFER && count) {
+        boxes = (DWRITE_HIT_TEST_METRICS *)mem_alloc(count * sizeof *boxes);
+        hr = l->HitTestTextRange((UINT32)a, (UINT32)n, 0, 0, boxes, count, &count);
+    }
+    for (UINT32 k = 0; SUCCEEDED(hr) && k < count; k++) {
+        int x0 = x + (int)(boxes[k].left + 0.5f), x1 = x + (int)(boxes[k].left + boxes[k].width + 0.5f);
+        int y0 = y + (int)(boxes[k].top + 0.5f), y1 = y + (int)(boxes[k].top + boxes[k].height + 0.5f);
+        r_fill(x0, y0, x1 - x0, y1 - y0, argb);
+    }
+    if (boxes != few)
+        mem_free(boxes);
+}
+
+extern "C" int r_text_pos(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags, int x, int y)
+{
+    IDWriteTextLayout *l;
+    int pos = 0;
+
+    if (f && w > 0 && (l = layout(f, s, len, w, h, flags))) {
+        pos = layout_pos(l, (float)x, (float)y);
+        l->Release();
+    }
+    return pos;
+}
+
+extern "C" void r_text_mark(r_font_t *f, unsigned argb, int x, int y, int w, int h, const wchar_t *s, int len,
+                            unsigned flags, int a, int b)
+{
+    IDWriteTextLayout *l;
+
+    if (!f || w <= 0 || b <= a || !box_visible(x, y, w, h) || !(l = layout(f, s, len, w, h, flags)))
+        return;
+    mark_range(l, x, y, a, b - a, argb);
+    l->Release();
+}
+
 /* ---- Styled display names ---- */
 
 static unsigned mix(unsigned a, unsigned b, int pct) /* pct of b, 0xRRGGBB */
@@ -1739,6 +1795,7 @@ struct r_rich {
     int nblocks;
     int height;
     int hover; /* the link underlined under the mouse, -1 for none */
+    int sel_a, sel_b; /* the selected text, in the doc */
     ColorEffect *link, *mention, *muted;
 };
 
@@ -1920,12 +1977,30 @@ extern "C" void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers)
                         st->radius / 2, (flags & MD_MENTION) ? st->mention_bg : st->code_bg);
             });
         }
+        {
+            int a = r->sel_a > b->start ? r->sel_a : b->start;
+            int e = r->sel_b < b->start + b->len ? r->sel_b : b->start + b->len;
+            if (e > a)
+                mark_range(b->layout, bx, by, a - b->start, e - a, st->select);
+        }
         draw_layout(b->layout, bx, by, NULL, st->ink, PASS_ALL);
-        if (!reveal_spoilers)
+        if (!reveal_spoilers) {
             span_boxes(r, b, MD_SPOILER, [&](const DWRITE_HIT_TEST_METRICS &m, unsigned) {
                 r_round(bx + (int)m.left - 1, by + (int)m.top, (int)(m.width + 0.5f) + 2, (int)(m.height + 0.5f),
                         st->radius / 2, st->spoiler);
             });
+            /* Selected, a hidden spoiler shows the selection's color, its text still hidden (as Discord). */
+            for (int s = 0; s < r->doc->nspans && r->sel_b > r->sel_a; s++) {
+                const md_span_t *sp = &r->doc->spans[s];
+                int a = sp->start, e = sp->start + sp->len;
+                a = a > r->sel_a ? a : r->sel_a;
+                a = a > b->start ? a : b->start;
+                e = e < r->sel_b ? e : r->sel_b;
+                e = e < b->start + b->len ? e : b->start + b->len;
+                if ((sp->flags & MD_SPOILER) && e > a)
+                    mark_range(b->layout, bx, by, a - b->start, e - a, st->select);
+            }
+        }
     }
 }
 
@@ -1979,6 +2054,42 @@ extern "C" void r_rich_hover(r_rich_t *r, int link)
     if (link >= 0)
         underline_link(r, link, TRUE);
     r->hover = link;
+}
+
+extern "C" int r_rich_pos(r_rich_t *r, int x, int y)
+{
+    rich_block *b;
+    int i = 0;
+
+    if (!r->nblocks)
+        return 0;
+    /* The block at y, or the next one down from a gap; the last one below them all. */
+    while (i + 1 < r->nblocks && y >= r->blocks[i].y + r->blocks[i].h)
+        i++;
+    b = &r->blocks[i];
+    return b->start + layout_pos(b->layout, (float)(x - b->x), (float)(y - b->y));
+}
+
+extern "C" int r_rich_over(r_rich_t *r, int x, int y)
+{
+    for (int i = 0; i < r->nblocks; i++) {
+        rich_block *b = &r->blocks[i];
+        BOOL trailing, inside;
+        DWRITE_HIT_TEST_METRICS m;
+
+        if (y >= b->y && y < b->y + b->h)
+            return SUCCEEDED(b->layout->HitTestPoint((float)(x - b->x), (float)(y - b->y), &trailing, &inside, &m)) &&
+                   inside;
+    }
+    return 0;
+}
+
+extern "C" void r_rich_select(r_rich_t *r, int a, int b)
+{
+    if (!r)
+        return;
+    r->sel_a = a;
+    r->sel_b = b;
 }
 
 extern "C" void r_rich_free(r_rich_t *r)

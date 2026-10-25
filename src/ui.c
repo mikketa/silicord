@@ -360,6 +360,7 @@ typedef struct {
     md_doc_t pop_bio;
     r_rich_t *pop_rich;
     int pop_rich_w;
+    int pop_text_y[4];        /* where its selectable texts (POP_TEXT_*) were laid out, -1 when not shown */
     char pending_dm[24];      /* user whose new DM we open once it exists */
 
     /* Statuses of friends and people we see (PRESENCE_UPDATE). */
@@ -503,6 +504,7 @@ static void rel_remove(const char *id);
 #define TIMER_VOICE 10 /* refreshes who is speaking in our call */
 #define TIMER_MIC 11   /* the microphone meter in the voice settings */
 #define TIMER_ACTIVE 14 /* Active Now's elapsed times, each second while shown */
+#define TIMER_SELECT 15 /* scrolls the messages while selecting past their edge */
 #define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
@@ -6016,6 +6018,85 @@ static void paint_divider(int x0, int y, int w, const char *id, int is_new)
            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+/* ---- Selecting text ---- */
+
+/*
+ * Text selected with the mouse, as in Discord: from where the button went
+ * down (the anchor) to where it is (the focus), in the message list or in
+ * the profile popout, one at a time. In the list an end is a message, by id
+ * since messages come and go, and a UTF-16 offset in its parsed text; in
+ * the popout it is one of its texts (POP_TEXT_*) and an offset in it.
+ */
+enum { SEL_NONE, SEL_MESSAGES, SEL_POPOUT };
+enum { POP_TEXT_NAME, POP_TEXT_USER, POP_TEXT_BIO, POP_TEXT_SINCE, POP_TEXT_COUNT };
+
+typedef struct {
+    char id[24];
+    int part; /* POP_TEXT_* */
+    int at;
+} sel_end_t;
+
+static struct {
+    int where;           /* SEL_* */
+    int down, moved;     /* the button is down to select; it moved far enough to drag */
+    int hover;           /* the mouse is over message text: an I-beam */
+    POINT press;
+    sel_end_t anchor, focus;
+    int live, i0, a0, i1, a1; /* the selected messages in order, resolved for a paint */
+    int scrolling;       /* TIMER_SELECT runs: the mouse is past the messages' edge */
+} g_sel;
+
+static int sel_copy(void);
+static void sel_clear(void);
+
+/* Selected text's background: the system's highlight, as Discord's (Chromium's) on Windows. */
+static unsigned sel_color(void)
+{
+    COLORREF c = GetSysColor(COLOR_HIGHLIGHT);
+
+    return 0xFF000000u | (unsigned)GetRValue(c) << 16 | (unsigned)GetGValue(c) << 8 | GetBValue(c);
+}
+
+/* The selection's ends in the message list, in order; 0 when nothing is selected there. */
+static int sel_msgs(int *i0, int *a0, int *i1, int *a1)
+{
+    int ia, ib, aa = g_sel.anchor.at, ab = g_sel.focus.at;
+
+    if (g_sel.where != SEL_MESSAGES || (ia = find_msg(g_sel.anchor.id)) < 0 || (ib = find_msg(g_sel.focus.id)) < 0)
+        return 0;
+    if (ia > ib || (ia == ib && aa > ab)) {
+        int t = ia;
+        ia = ib;
+        ib = t;
+        t = aa;
+        aa = ab;
+        ab = t;
+    }
+    *i0 = ia;
+    *a0 = aa;
+    *i1 = ib;
+    *a1 = ab;
+    return ia != ib || aa != ab;
+}
+
+/* The selected part [*a, *b) of the popout's text `part`, len long. */
+static void pop_sel_range(int part, int len, int *a, int *b)
+{
+    sel_end_t e0 = g_sel.anchor, e1 = g_sel.focus;
+
+    *a = *b = 0;
+    if (g_sel.where != SEL_POPOUT)
+        return;
+    if (e0.part > e1.part || (e0.part == e1.part && e0.at > e1.at)) {
+        e0 = g_sel.focus;
+        e1 = g_sel.anchor;
+    }
+    if (part < e0.part || part > e1.part)
+        return;
+    *a = part == e0.part ? e0.at : 0;
+    *b = part == e1.part ? e1.at : len;
+}
+
 static void paint_message(int i, int x0, int y, int w)
 {
     msg_t *m = &g_ui.msgs[i];
@@ -6171,7 +6252,13 @@ static void paint_message(int i, int x0, int y, int w)
     }
     if (m->text.len || m->edited) {
         r_rich_t *r = msg_rich(m, tw);
+        int sa = 0, sb = 0;
+        if (g_sel.live && i >= g_sel.i0 && i <= g_sel.i1) {
+            sa = i == g_sel.i0 ? g_sel.a0 : 0;
+            sb = i == g_sel.i1 ? g_sel.a1 : ((msg_view_t *)m->ui)->doc.len;
+        }
         r_rich_hover(r, i == g_ui.under_msg ? g_ui.under_link : -1);
+        r_rich_select(r, sa, sb);
         r_rich_draw(r, tx, y, m->revealed);
         y += r_rich_height(r);
     }
@@ -6195,6 +6282,7 @@ static void paint_messages(const char *name)
         return;
     }
     r_clip(a.left, a.top, a.right - a.left, a.bottom - a.top);
+    g_sel.live = sel_msgs(&g_sel.i0, &g_sel.a0, &g_sel.i1, &g_sel.a1);
 
     for (int i = g_ui.nmsgs; i-- > 0;) {
         int h = msg_height(&g_ui.msgs[i]);
@@ -7464,6 +7552,7 @@ static void make_fonts(void)
         .subtext = g_ui.f_small,
         .ink = ARGB(C_TEXT), .muted = ARGB(C_MUTED), .link = 0xFF2781E7u, .mention = 0xFF9EC1FFu, /* text-link, mention text in the accent's tint */
         .mention_bg = 0x3D4C8DFFu, .code_bg = 0xFF0A0A0Cu, .quote_bar = 0xFF424246u, .spoiler = 0xFF17181Bu,
+        .select = sel_color(),
         .quote_indent = S(16), .code_pad = S(8), .block_gap = S(4), .radius = S(6),
         .emoji_px = S(22), .jumbo_px = S(48), .emoji = emoji_image,
     };
@@ -7732,6 +7821,8 @@ static void open_channel(int index)
     g_ui.msgs_older_loading = 0;
     g_ui.hover_msg = -1;
     g_ui.under_msg = -1;
+    if (g_sel.where == SEL_MESSAGES) /* it would come back with the channel */
+        g_sel.where = SEL_NONE;
     sb_clear(&g_ui.send_error);
     g_ui.msgs_channel[0] = 0;
     g_ui.detached = 0;
@@ -9279,6 +9370,110 @@ static int pop_width(void)
     return g_ui.pop_docked ? S(PROFILE_W) : S(POP_W);
 }
 
+/* The line under the display name: username, then pronouns. */
+static void pop_user_line(const profile_t *p, char *line)
+{
+    if (p->pronouns.len)
+        wsprintfA(line, "%.64s \xE2\x80\xA2 %.60s", p->username.data, p->pronouns.data);
+    else
+        wsprintfA(line, "%.64s", p->username.data);
+}
+
+/* When the popout's account was made, read from its id as Discord shows it ("Member Since"); 0 if unknown. */
+static int pop_member_since(wchar_t *date, int n)
+{
+    unsigned long long id = 0, t;
+    FILETIME ft, local;
+    SYSTEMTIME st;
+
+    for (const char *c = g_ui.pop_user; *c >= '0' && *c <= '9'; c++)
+        id = id * 10 + (unsigned long long)(*c - '0');
+    if (!id)
+        return 0;
+    t = ((id >> 22) + FILETIME_UNIX_MS + 1420070400000ull) * 10000ull;
+    ft.dwLowDateTime = (DWORD)t;
+    ft.dwHighDateTime = (DWORD)(t >> 32);
+    FileTimeToLocalFileTime(&ft, &local);
+    FileTimeToSystemTime(&local, &st);
+    if (!GetDateFormatEx(L"en-US", 0, &st, L"MMM d, yyyy", date, n, NULL))
+        date[0] = 0;
+    return 1;
+}
+
+/* A text of the popout that can be selected, where pop_render last laid it out. */
+typedef struct {
+    r_font_t *font;
+    unsigned flags;
+    int x, y, w, h;
+    wchar_t *s; /* to free; NULL for the bio, which is g_ui.pop_rich */
+    int len;
+} pop_text_t;
+
+/* Text `part` (POP_TEXT_*) of the popout, drawn exactly so by pop_render; 0 when it is not shown. */
+static int pop_text(int part, pop_text_t *t)
+{
+    const profile_t *p = g_ui.pop_profile;
+    char line[160];
+    wchar_t date[48];
+
+    ZeroMemory(t, sizeof *t);
+    if (g_ui.pop_text_y[part] < 0)
+        return 0;
+    t->x = S(POP_PAD);
+    t->y = g_ui.pop_text_y[part];
+    t->w = pop_width() - 2 * S(POP_PAD);
+    switch (part) {
+    case POP_TEXT_NAME: {
+        const char *name = p ? p->name.data : g_ui.pop_name.data;
+        t->font = p && (p->ncolors || p->font_id) ? name_font(p->font_id) : g_ui.f_name;
+        t->flags = R_SINGLE | R_ELLIPSIS | R_VCENTER;
+        t->h = S(28);
+        t->s = utf8_to_wide(name ? name : "", name ? (size_t)lstrlenA(name) : 0);
+        break;
+    }
+    case POP_TEXT_USER:
+        if (!p)
+            return 0;
+        pop_user_line(p, line);
+        t->font = g_ui.f_body;
+        t->flags = rflags(DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        t->h = S(POP_BADGE);
+        t->s = utf8_to_wide(line, (size_t)lstrlenA(line));
+        break;
+    case POP_TEXT_BIO:
+        if (!g_ui.pop_rich)
+            return 0;
+        t->h = r_rich_height(g_ui.pop_rich);
+        t->len = g_ui.pop_bio.len;
+        return 1;
+    case POP_TEXT_SINCE:
+        if (!pop_member_since(date, ARRAYSIZE(date)))
+            return 0;
+        t->font = g_ui.f_section;
+        t->flags = rflags(DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        t->h = S(20);
+        t->s = mem_alloc(sizeof date);
+        lstrcpynW(t->s, date, ARRAYSIZE(date));
+        break;
+    }
+    t->len = lstrlenW(t->s);
+    return 1;
+}
+
+/* Highlights the selected part of the popout's text `part`, before it is drawn. */
+static void pop_mark(int part)
+{
+    pop_text_t t;
+    int a, b;
+
+    if (g_sel.where != SEL_POPOUT || !pop_text(part, &t))
+        return;
+    pop_sel_range(part, t.len, &a, &b);
+    if (t.s)
+        r_text_mark(t.font, g_ui.rich.select, t.x, t.y, t.w, t.h, t.s, t.len, t.flags, a, b);
+    mem_free(t.s);
+}
+
 /* Walks the popout layout; paints when `draw` is set. Returns the height. */
 static int pop_render(int draw)
 {
@@ -9289,6 +9484,8 @@ static int pop_render(int draw)
     r_image_t *avatar = pop_avatar(p);
     const char *name = p ? p->name.data : g_ui.pop_name.data;
 
+    for (int k = 0; k < POP_TEXT_COUNT; k++)
+        g_ui.pop_text_y[k] = -1;
     if (p && p->ntheme == 2) {
         /* Nitro theme: the user's two colors, darkened like Discord's dark theme. */
         border = rgb_argb(p->theme[0], 0xFF);
@@ -9351,9 +9548,11 @@ static int pop_render(int draw)
     y = ay + S(POP_AVATAR) + S(12);
 
     /* Display name with its font and effect. */
+    g_ui.pop_text_y[POP_TEXT_NAME] = y;
     if (draw) {
         wchar_t *wn = utf8_to_wide(name ? name : "", name ? lstrlenA(name) : 0);
         unsigned ink = ARGB(C_INK) & 0xFFFFFF;
+        pop_mark(POP_TEXT_NAME);
         if (p && (p->ncolors || p->font_id))
             r_text_styled(name_font(p->font_id), p->ncolors ? p->colors : &ink, p->ncolors ? p->ncolors : 1,
                           p->ncolors ? p->effect_id : 1, pad, y, inner,
@@ -9369,12 +9568,12 @@ static int pop_render(int draw)
         int x = pad, lh = S(POP_BADGE);
         char line[160];
 
-        if (p->pronouns.len)
-            wsprintfA(line, "%.64s \xE2\x80\xA2 %.60s", p->username.data, p->pronouns.data);
-        else
-            wsprintfA(line, "%.64s", p->username.data);
-        if (draw)
+        pop_user_line(p, line);
+        g_ui.pop_text_y[POP_TEXT_USER] = y;
+        if (draw) {
+            pop_mark(POP_TEXT_USER);
             text(g_ui.f_body, C_INK, rect(x, y, inner, lh), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
         x += text_width(g_ui.f_body, line) + S(8);
         if (x > w - pad)
             x = w - pad;
@@ -9518,27 +9717,26 @@ static int pop_render(int draw)
             g_ui.pop_rich_w = inner;
         }
         y += S(12);
-        if (draw)
+        g_ui.pop_text_y[POP_TEXT_BIO] = y;
+        if (draw) {
+            int a, b;
+            pop_sel_range(POP_TEXT_BIO, g_ui.pop_bio.len, &a, &b);
+            r_rich_select(g_ui.pop_rich, a, b);
             r_rich_draw(g_ui.pop_rich, pad, y, 1);
+        }
         y += r_rich_height(g_ui.pop_rich);
     }
 
     /* When the account was made, read from its id as Discord shows it: "Member Since". */
     if (p && g_ui.pop_user[0]) {
-        unsigned long long id = 0;
-        for (const char *c = g_ui.pop_user; *c >= '0' && *c <= '9'; c++)
-            id = id * 10 + (unsigned long long)(*c - '0');
+        wchar_t date[48];
+        int known = pop_member_since(date, ARRAYSIZE(date));
         y += S(16);
-        if (draw && id) {
-            unsigned long long t = ((id >> 22) + FILETIME_UNIX_MS + 1420070400000ull) * 10000ull;
-            FILETIME ft = {(DWORD)t, (DWORD)(t >> 32)}, local;
-            SYSTEMTIME st;
-            wchar_t date[48];
-            FileTimeToLocalFileTime(&ft, &local);
-            FileTimeToSystemTime(&local, &st);
-            if (!GetDateFormatEx(L"en-US", 0, &st, L"MMM d, yyyy", date, ARRAYSIZE(date), NULL))
-                date[0] = 0;
+        if (known)
+            g_ui.pop_text_y[POP_TEXT_SINCE] = y + S(20);
+        if (draw && known) {
             text(g_ui.f_cat, C_INK, rect(pad, y, inner, S(18)), "Member Since", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            pop_mark(POP_TEXT_SINCE);
             text_w(g_ui.f_section, C_MUTED, rect(pad, y + S(20), inner, S(20)), date, -1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
         y += S(40);
@@ -9680,6 +9878,8 @@ static void pop_reset_bio(void)
     r_rich_free(g_ui.pop_rich);
     g_ui.pop_rich = NULL;
     md_free(&g_ui.pop_bio);
+    if (g_sel.where == SEL_POPOUT) /* its texts change or go */
+        g_sel.where = SEL_NONE;
 }
 
 /* Closes a floating popout; the profile docked beside a DM stays. */
@@ -9799,6 +9999,14 @@ static LRESULT CALLBACK pop_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_CHAR && wp == VK_ESCAPE)
         return 0;
+    if (msg == WM_CHAR && wp == 3) { /* Ctrl+C: the selected text when the box has none */
+        DWORD a = 0, b = 0;
+        SendMessageW(h, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+        if (a == b && sel_copy())
+            return 0;
+    }
+    if (msg == WM_LBUTTONDOWN)
+        sel_clear();
     return CallWindowProcW(g_ui.pop_edit_proc, h, msg, wp, lp);
 }
 
@@ -9858,6 +10066,294 @@ static int pop_hit(int x, int y)
     return -1;
 }
 
+/* ---- Copying and extending a selection ---- */
+
+/* The custom emoji or "(edited)" mark at offset `at` of d: its flags (0 if neither) and link. */
+static unsigned doc_mark_at(const md_doc_t *d, int at, int *link)
+{
+    for (int s = 0; s < d->nspans; s++) {
+        const md_span_t *sp = &d->spans[s];
+        if ((sp->flags & (MD_EMOJI | MD_EDITED)) && at >= sp->start && at < sp->start + sp->len) {
+            *link = sp->link;
+            return sp->flags;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Appends d's text [a, b) to out in UTF-8, as copying it gives it: blocks on
+ * lines of their own, custom emoji as ":name:", without the "(edited)" mark.
+ */
+static void doc_copy(const md_doc_t *d, int a, int b, sb_t *out)
+{
+    int first = 1;
+
+    for (int k = 0; k < d->nblocks; k++) {
+        const md_block_t *bl = &d->blocks[k];
+        int s = a > bl->start ? a : bl->start, e = b < bl->start + bl->len ? b : bl->start + bl->len, run = s;
+        if (e <= s)
+            continue;
+        if (!first)
+            sb_add(out, "\n");
+        first = 0;
+        for (; s < e; s++) {
+            int link = -1, next = -1;
+            unsigned f = doc_mark_at(d, s, &link);
+            /* the space the UI puts before "(edited)" goes with it */
+            int spacer = d->text[s] == ' ' && s + 1 < d->len && (doc_mark_at(d, s + 1, &next) & MD_EDITED);
+            if (!f && !spacer)
+                continue;
+            wide_to_utf8(d->text + run, (size_t)(s - run), out);
+            run = s + 1;
+            if (f & MD_EMOJI) {
+                sb_add(out, ":");
+                sb_add(out, md_link(d, link + 1));
+                sb_add(out, ":");
+            }
+        }
+        wide_to_utf8(d->text + run, (size_t)(e - run), out);
+    }
+}
+
+/* Copies the selected text to the clipboard; 0 when nothing is selected. */
+static int sel_copy(void)
+{
+    sb_t out = {0};
+    int i0, a0, i1, a1;
+
+    if (sel_msgs(&i0, &a0, &i1, &a1)) {
+        for (int i = i0; i <= i1; i++) {
+            msg_t *m = &g_ui.msgs[i];
+            size_t before = out.len;
+            const md_doc_t *d;
+            if (m->system || !(m->text.len || m->edited))
+                continue;
+            if (!m->ui)
+                msg_rich(m, text_w_px());
+            d = &((msg_view_t *)m->ui)->doc;
+            if (before)
+                sb_add(&out, "\n"); /* between messages */
+            doc_copy(d, i == i0 ? a0 : 0, i == i1 ? a1 : d->len, &out);
+            if (before && out.len == before + 1) {
+                out.len = before;
+                out.data[before] = 0;
+            }
+        }
+    } else if (g_sel.where == SEL_POPOUT) {
+        for (int k = 0; k < POP_TEXT_COUNT; k++) {
+            pop_text_t t;
+            int a, b;
+            if (!pop_text(k, &t))
+                continue;
+            pop_sel_range(k, t.len, &a, &b);
+            if (b > a && out.len)
+                sb_add(&out, "\n");
+            if (b > a && t.s)
+                wide_to_utf8(t.s + a, (size_t)(b - a), &out);
+            else if (b > a)
+                doc_copy(&g_ui.pop_bio, a, b, &out);
+            mem_free(t.s);
+        }
+    }
+    if (!out.len) {
+        sb_free(&out);
+        return 0;
+    }
+    copy_text(out.data);
+    sb_free(&out);
+    return 1;
+}
+
+/* Drops the selection, wherever it is. */
+static void sel_clear(void)
+{
+    if (g_sel.where == SEL_MESSAGES)
+        redraw();
+    if (g_sel.where == SEL_POPOUT && g_ui.pop)
+        InvalidateRect(g_ui.pop, NULL, FALSE);
+    g_sel.where = SEL_NONE;
+}
+
+/* Counts quick presses at one spot of `wnd`: 2 for a double-click (a word), 3 for a triple (a paragraph). */
+static int count_clicks(HWND wnd, int x, int y)
+{
+    static HWND last_wnd;
+    static DWORD last;
+    static POINT at;
+    static int n;
+    DWORD now = (DWORD)GetMessageTime();
+    int dx = x > at.x ? x - at.x : at.x - x, dy = y > at.y ? y - at.y : at.y - y;
+
+    if (wnd == last_wnd && n < 3 && now - last <= GetDoubleClickTime() && dx <= GetSystemMetrics(SM_CXDOUBLECLK) / 2 &&
+        dy <= GetSystemMetrics(SM_CYDOUBLECLK) / 2)
+        n++;
+    else
+        n = 1;
+    last_wnd = wnd;
+    last = now;
+    at.x = x;
+    at.y = y;
+    return n;
+}
+
+/* 2 for a word's characters, 1 for spaces, 0 for the rest: a double-click selects a run of one kind. */
+static int char_kind(wchar_t c)
+{
+    if (c == '_' || IsCharAlphaNumericW(c))
+        return 2;
+    return c == ' ' || c == '\t' || c == 0xA0;
+}
+
+/* What `clicks` select around offset `at` of s[from, to): the word there (2), or all of it (3). */
+static void sel_extend(const wchar_t *s, int from, int to, int at, int clicks, int *a, int *b)
+{
+    int k;
+
+    *a = from;
+    *b = to;
+    if (clicks >= 3 || to <= from)
+        return;
+    /* the caret right after a word belongs to it */
+    if (at >= to || (at > from && char_kind(s[at]) != 2 && char_kind(s[at - 1]) == 2))
+        at--;
+    if (at < from)
+        at = from;
+    k = char_kind(s[at]);
+    *a = at;
+    *b = at + 1;
+    while (*a > from && char_kind(s[*a - 1]) == k)
+        (*a)--;
+    while (*b < to && char_kind(s[*b]) == k)
+        (*b)++;
+}
+
+/* Extends a double or triple click at offset `at` of d to the word or the paragraph (its block). */
+static void doc_extend(const md_doc_t *d, int at, int clicks, int *a, int *b)
+{
+    int from = 0, to = d->len;
+
+    for (int k = 0; k < d->nblocks; k++)
+        if (at <= d->blocks[k].start + d->blocks[k].len) {
+            from = d->blocks[k].start;
+            to = from + d->blocks[k].len;
+            break;
+        }
+    sel_extend(d->text, from, to, at, clicks, a, b);
+}
+
+/* Whether the mouse went far enough from where the button went down to drag. */
+static int sel_dragging(int x, int y)
+{
+    int dx = x > g_sel.press.x ? x - g_sel.press.x : g_sel.press.x - x;
+    int dy = y > g_sel.press.y ? y - g_sel.press.y : g_sel.press.y - y;
+
+    if (!g_sel.moved && dx < GetSystemMetrics(SM_CXDRAG) && dy < GetSystemMetrics(SM_CYDRAG))
+        return 0;
+    g_sel.moved = 1;
+    return 1;
+}
+
+/* The button comes up after selecting: 1 if it dragged, which takes the click. */
+static int sel_release(void)
+{
+    int moved = g_sel.moved;
+
+    g_sel.down = 0;
+    g_sel.scrolling = 0;
+    KillTimer(g_ui.wnd, TIMER_SELECT);
+    ReleaseCapture();
+    return moved;
+}
+
+/* The popout's text under (x, y), POP_TEXT_*, or -1: where a selection starts. */
+static int pop_text_at(int x, int y)
+{
+    for (int k = 0; k < POP_TEXT_COUNT; k++) {
+        pop_text_t t;
+        int w;
+        if (!pop_text(k, &t))
+            continue;
+        w = t.s ? r_text_width(t.font, t.s, t.len) : t.w;
+        mem_free(t.s);
+        if (w > t.w)
+            w = t.w;
+        if (x >= t.x && x < t.x + w && y >= t.y && y < t.y + t.h)
+            return k;
+    }
+    return -1;
+}
+
+/* The end of a selection at (x, y) in the popout: in the text there, else the start of the next one down. */
+static void pop_sel_point(int x, int y, sel_end_t *e)
+{
+    for (int k = 0; k < POP_TEXT_COUNT; k++) {
+        pop_text_t t;
+        if (!pop_text(k, &t))
+            continue;
+        e->part = k;
+        if (y < t.y)
+            e->at = 0;
+        else if (y >= t.y + t.h)
+            e->at = t.len;
+        else if (t.s)
+            e->at = r_text_pos(t.font, t.s, t.len, t.w, t.h, t.flags, x - t.x, y - t.y);
+        else
+            e->at = r_rich_pos(g_ui.pop_rich, x - t.x, y - t.y);
+        mem_free(t.s);
+        if (y < t.y + t.h)
+            return;
+    }
+}
+
+/* The popout's mouse while selecting its text, as sel_mouse does in the message list. */
+static int pop_sel_mouse(UINT msg, int x, int y)
+{
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        int clicks = count_clicks(g_ui.pop, x, y), part = pop_hit(x, y) == -1 ? pop_text_at(x, y) : -1;
+        sel_clear();
+        if (part < 0)
+            return 0;
+        g_sel.where = SEL_POPOUT;
+        pop_sel_point(x, y, &g_sel.anchor);
+        g_sel.focus = g_sel.anchor;
+        g_sel.down = 1;
+        g_sel.moved = clicks > 1; /* a double-click selects at once, and its button coming up clicks nothing */
+        g_sel.press.x = x;
+        g_sel.press.y = y;
+        if (clicks > 1) {
+            pop_text_t t;
+            int at = g_sel.anchor.at;
+            if (pop_text(part, &t) && t.s)
+                sel_extend(t.s, 0, t.len, at, clicks, &g_sel.anchor.at, &g_sel.focus.at);
+            else if (part == POP_TEXT_BIO)
+                doc_extend(&g_ui.pop_bio, at, clicks, &g_sel.anchor.at, &g_sel.focus.at);
+            mem_free(t.s);
+        }
+        SetCapture(g_ui.pop);
+        InvalidateRect(g_ui.pop, NULL, FALSE);
+        return 1;
+    }
+    case WM_MOUSEMOVE: {
+        sel_end_t e = g_sel.focus;
+        if (!g_sel.down || g_sel.where != SEL_POPOUT)
+            return 0;
+        if (!sel_dragging(x, y))
+            return 1;
+        pop_sel_point(x, y, &e);
+        if (e.part != g_sel.focus.part || e.at != g_sel.focus.at) {
+            g_sel.focus = e;
+            InvalidateRect(g_ui.pop, NULL, FALSE);
+        }
+        return 1;
+    }
+    case WM_LBUTTONUP:
+        return g_sel.down && sel_release();
+    }
+    return 0;
+}
+
 /* Our status becomes the k-th of k_status_codes, here and on every client. */
 static void set_status(int k)
 {
@@ -9892,6 +10388,8 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         TRACKMOUSEEVENT tme = {sizeof tme, TME_LEAVE, wnd, 0};
         int hit = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         TrackMouseEvent(&tme);
+        if (pop_sel_mouse(msg, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+            return 0;
         if (hit != g_ui.pop_hover) {
             g_ui.pop_hover = hit;
             InvalidateRect(wnd, NULL, FALSE);
@@ -9907,19 +10405,39 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETCURSOR: {
         const profile_t *p = g_ui.pop_profile;
         int h = g_ui.pop_hover;
+        if ((HWND)wp != wnd) /* the message box shows its own I-beam */
+            return FALSE;
         if (LOWORD(lp) == HTCLIENT) {
             int hand = h == -2 || (h <= -10 && h >= -12) || (p && h >= 0 && h < p->nbadges && p->badges[h].link.len);
-            SetCursor(LoadCursorW(NULL, (LPCWSTR)(hand ? IDC_HAND : IDC_ARROW)));
+            int beam, box, part;
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(wnd, &pt);
+            box = g_ui.pop_edit && !g_ui.pop_docked && pt.y >= g_ui.pop_input_y && pt.y < g_ui.pop_input_y + S(POP_INPUT_H) &&
+                  pt.x >= S(POP_PAD) && pt.x < pop_width() - S(POP_PAD);
+            part = pop_text_at(pt.x, pt.y);
+            beam = box || (g_sel.down && g_sel.where == SEL_POPOUT) ||
+                   (part >= 0 && (part != POP_TEXT_BIO ||
+                                  r_rich_over(g_ui.pop_rich, pt.x - S(POP_PAD), pt.y - g_ui.pop_text_y[POP_TEXT_BIO])));
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(hand ? IDC_HAND : beam ? IDC_IBEAM : IDC_ARROW)));
             return TRUE;
         }
         break;
     }
     case WM_LBUTTONDOWN:
         SetFocus(wnd);
+        pop_sel_mouse(msg, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (g_sel.down && (HWND)lp != wnd) /* a menu took the mouse */
+            g_sel.down = 0;
         return 0;
     case WM_LBUTTONUP: {
         const profile_t *p = g_ui.pop_profile;
-        int h = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        int h;
+        if (pop_sel_mouse(msg, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+            return 0;
+        h = pop_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         if (h == -2) {
             pop_menu();
         } else if (h == -10) {
@@ -9956,6 +10474,8 @@ static LRESULT CALLBACK pop_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE)
             pop_close();
+        else if (wp == 'C' && GetKeyState(VK_CONTROL) < 0)
+            sel_copy();
         return 0;
     case WM_MOUSEWHEEL:
         return 0;
@@ -11405,6 +11925,8 @@ static LRESULT CALLBACK picker_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_SETCURSOR:
+        if ((HWND)wp != wnd) /* the search box shows its own I-beam */
+            return FALSE;
         if (LOWORD(lp) == HTCLIENT) {
             SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.pick_hover >= 0 ? IDC_HAND : IDC_ARROW)));
             return TRUE;
@@ -15712,7 +16234,7 @@ static LRESULT CALLBACK settings_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM l
 enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
-    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD, CM_THREAD,
+    CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD, CM_THREAD, CM_COPY_SELECTION,
     CM_USER_MUTE, CM_FOLDER_DEFAULT, CM_FOLDER_CUSTOM,
     CM_USER_VOLUME = 90, /* + index in k_user_volumes */
     CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
@@ -15840,10 +16362,14 @@ static void message_menu(int i)
 {
     HMENU menu = CreatePopupMenu();
     msg_t *m = &g_ui.msgs[i];
-    int own = own_message(m), cmd;
+    int own = own_message(m), cmd, i0, a0, i1, a1;
     char id[24];
 
-    /* Discord's order: the reaction, what answers, what copies or marks, the deletion, the ID */
+    /* Discord's order: the selected text, the reaction, what answers, what copies or marks, the deletion, the ID */
+    if (sel_msgs(&i0, &a0, &i1, &a1) && i >= i0 && i <= i1) {
+        AppendMenuW(menu, MF_STRING, CM_COPY_SELECTION, L"Copy");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    }
     AppendMenuW(menu, MF_STRING, CM_REACT, L"Add Reaction");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     if (own)
@@ -15886,6 +16412,9 @@ static void message_menu(int i)
         break;
     case CM_COPY_TEXT:
         copy_text(m->content.data);
+        break;
+    case CM_COPY_SELECTION:
+        sel_copy();
         break;
     case CM_COPY_LINK:
         copy_link(open_guild_id(), g_ui.msgs_channel, m->id);
@@ -16991,8 +17520,16 @@ static LRESULT CALLBACK composer_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     if (msg == WM_MOUSEWHEEL)
         return SendMessageW(g_ui.wnd, msg, wp, lp);
-    if (msg == WM_LBUTTONDOWN)
+    if (msg == WM_CHAR && wp == 3) { /* Ctrl+C: the selected messages' text when the composer has none */
+        DWORD a = 0, b = 0;
+        SendMessageW(h, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+        if (a == b && sel_copy())
+            return 0;
+    }
+    if (msg == WM_LBUTTONDOWN) {
         pop_dismiss();
+        sel_clear();
+    }
     return CallWindowProcW(g_ui.composer_proc, h, msg, wp, lp);
 }
 
@@ -17007,12 +17544,199 @@ static void redraw_rect(RECT r)
     InvalidateRect(g_ui.wnd, &r, FALSE);
 }
 
+/* The message list, with room under it for the toolbar of its last message. */
+static RECT messages_rect(void)
+{
+    RECT r = message_area();
+
+    r.bottom += S(TOOL_BTN) + S(12);
+    return r;
+}
+
+/* ---- Selecting messages' text ---- */
+
+/* Where the text of message m starts, the message starting at `top`. */
+static int msg_text_top(const msg_t *m, int top)
+{
+    return top + divider_h(m) + (m->grouped == 1 ? S(2) : S(16) + (m->reply.len ? S(22) : 0) + S(22));
+}
+
+/* Message m's laid-out text, or NULL when it has none to select. */
+static r_rich_t *sel_rich(msg_t *m)
+{
+    msg_view_t *v = m->ui;
+
+    if (m->system || !(m->text.len || m->edited))
+        return NULL;
+    return v && v->rich ? v->rich : msg_rich(m, text_w_px());
+}
+
+/*
+ * Whether (x, y) is over a message's text, with nothing on top of it: where a
+ * selection can start, anywhere in the text's box; or, `glyphs` set, on the
+ * text itself, where Discord (a browser) shows the I-beam.
+ */
+static int sel_text_at(int x, int y, int glyphs)
+{
+    POINT pt = {x, y};
+    RECT r;
+    int top, i;
+    r_rich_t *rich;
+
+    if (g_ui.view != VIEW_APP || g_ui.settings_open || (g_ui.pop && !g_ui.pop_docked) || g_ui.confirm ||
+        g_ui.share_pick || g_ui.picker)
+        return 0;
+    if (g_ui.pins_open && (r = pins_rect(), PtInRect(&r, pt)))
+        return 0;
+    if (g_ui.results_open && (r = results_rect(), PtInRect(&r, pt)))
+        return 0;
+    if (toolbar_hit(x, y, NULL) >= 0 || ac_hit(x, y) >= 0 || (i = message_at(x, y, &top)) < 0 ||
+        !(rich = sel_rich(&g_ui.msgs[i])))
+        return 0;
+    top = msg_text_top(&g_ui.msgs[i], top);
+    if (glyphs)
+        return r_rich_over(rich, x - text_x(), y - top);
+    return x >= text_x() && x < text_x() + text_w_px() && y >= top && y < top + r_rich_height(rich);
+}
+
+/* The end of a selection at (x, y) in the message list, held inside it; 0 over no message. */
+static int sel_point(int x, int y, sel_end_t *e)
+{
+    RECT a = message_area();
+    int top, i;
+    msg_t *m;
+    r_rich_t *r;
+
+    y = y < a.top ? a.top : y >= a.bottom ? a.bottom - 1 : y;
+    if ((i = message_at(x < a.left ? a.left : x, y, &top)) < 0)
+        return 0;
+    m = &g_ui.msgs[i];
+    lstrcpynA(e->id, m->id, sizeof e->id);
+    e->at = 0;
+    if ((r = sel_rich(m)) != NULL) {
+        top = msg_text_top(m, top);
+        if (y >= top + r_rich_height(r))
+            e->at = ((msg_view_t *)m->ui)->doc.len;
+        else if (y >= top)
+            e->at = r_rich_pos(r, x - text_x(), y - top);
+    }
+    return 1;
+}
+
+/* Moves the selection's focus to (x, y); past the list's edge, it scrolls on its own. */
+static void sel_drag_to(int x, int y)
+{
+    RECT a = message_area();
+    sel_end_t e = g_sel.focus;
+
+    if (sel_point(x, y, &e) && (lstrcmpA(e.id, g_sel.focus.id) || e.at != g_sel.focus.at)) {
+        g_sel.focus = e;
+        redraw_rect(messages_rect());
+    }
+    if ((y < a.top || y >= a.bottom) && !g_sel.scrolling) {
+        g_sel.scrolling = 1;
+        SetTimer(g_ui.wnd, TIMER_SELECT, 30, NULL);
+    }
+}
+
+/* TIMER_SELECT: scrolls toward the mouse past the list's edge, the faster the farther. */
+static void sel_scroll(void)
+{
+    RECT a = message_area();
+    POINT pt;
+    int d;
+
+    GetCursorPos(&pt);
+    ScreenToClient(g_ui.wnd, &pt);
+    d = pt.y < a.top ? a.top - pt.y : pt.y >= a.bottom ? a.bottom - 1 - pt.y : 0;
+    if (!g_sel.down || g_sel.where != SEL_MESSAGES || !d) {
+        g_sel.scrolling = 0;
+        KillTimer(g_ui.wnd, TIMER_SELECT);
+        return;
+    }
+    g_ui.msg_scroll += d / 2 + (d > 0 ? S(4) : -S(4));
+    clamp_msg_scroll();
+    maybe_load_older();
+    sel_drag_to(pt.x, pt.y);
+    redraw_rect(messages_rect());
+}
+
+/*
+ * The main window's mouse for selecting messages' text. Returns 1 when it
+ * takes the message: the button goes down over text, or the mouse drags.
+ * When the button comes up without having dragged, the click goes on to
+ * what is under it, so links, mentions and spoilers still work.
+ */
+static int sel_mouse(UINT msg, int x, int y)
+{
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        int clicks = count_clicks(g_ui.wnd, x, y);
+        sel_clear();
+        if (!sel_text_at(x, y, 0))
+            return 0;
+        g_sel.where = SEL_MESSAGES;
+        sel_point(x, y, &g_sel.anchor);
+        g_sel.focus = g_sel.anchor;
+        g_sel.down = 1;
+        g_sel.moved = clicks > 1; /* a double-click selects at once, and its button coming up clicks nothing */
+        g_sel.press.x = x;
+        g_sel.press.y = y;
+        if (clicks > 1) {
+            msg_t *m = &g_ui.msgs[find_msg(g_sel.anchor.id)];
+            doc_extend(&((msg_view_t *)m->ui)->doc, g_sel.anchor.at, clicks, &g_sel.anchor.at, &g_sel.focus.at);
+            redraw();
+        }
+        SetCapture(g_ui.wnd);
+        return 1;
+    }
+    case WM_MOUSEMOVE:
+        if (!g_sel.down || g_sel.where != SEL_MESSAGES)
+            return 0;
+        if (!g_sel.moved && sel_dragging(x, y))
+            SendMessageW(g_ui.composer, EM_SETSEL, (WPARAM)-1, 0); /* one selection at a time */
+        if (g_sel.moved)
+            sel_drag_to(x, y);
+        return 1;
+    case WM_LBUTTONUP:
+        return g_sel.down && sel_release();
+    }
+    return 0;
+}
+
 /* ---- Window procedure ---- */
+
+/* Whether the mouse is on the box drawn around one of the main window's text boxes: an I-beam there too. */
+static int on_text_box(void)
+{
+    POINT pt;
+    RECT rc;
+
+    GetCursorPos(&pt);
+    ScreenToClient(g_ui.wnd, &pt);
+    GetClientRect(g_ui.wnd, &rc);
+    for (HWND e = FindWindowExW(g_ui.wnd, NULL, L"EDIT", NULL); e; e = FindWindowExW(g_ui.wnd, e, L"EDIT", NULL)) {
+        RECT r;
+        if (!IsWindowVisible(e))
+            continue;
+        GetWindowRect(e, &r);
+        MapWindowPoints(NULL, g_ui.wnd, (POINT *)&r, 2);
+        if (e == g_ui.composer) { /* the whole height of the composer */
+            r.top = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H);
+            r.bottom = r.top + S(COMPOSER_H);
+        } else {
+            InflateRect(&r, S(10), S(6));
+        }
+        if (PtInRect(&r, pt))
+            return 1;
+    }
+    return 0;
+}
 
 static void update_hover(int x, int y)
 {
     int um = -1, ul = -1, kind, index, m = message_at(x, y, NULL), link = rich_hit(x, y, &um, &ul), i = -1, ax, ay;
-    int tool_action = -1, tool = toolbar_hit(x, y, &tool_action);
+    int tool_action = -1, tool = toolbar_hit(x, y, &tool_action), beam = sel_text_at(x, y, 1); /* on text, an I-beam */
     part_t part = {PART_NONE, -1};
 
     if (um != g_ui.under_msg || ul != g_ui.under_link) {
@@ -17122,10 +17846,13 @@ static void update_hover(int x, int y)
         g_ui.hover_link = link;
         redraw();
     }
+    if (kind != g_ui.hover_kind || index != g_ui.hover_index || beam != g_sel.hover) {
+        g_sel.hover = beam;
+        SetCursor(LoadCursorW(NULL, (LPCWSTR)(kind != HIT_NONE || link ? IDC_HAND : g_sel.hover ? IDC_IBEAM : IDC_ARROW)));
+    }
     if (kind != g_ui.hover_kind || index != g_ui.hover_index) {
         g_ui.hover_kind = kind;
         g_ui.hover_index = index;
-        SetCursor(LoadCursorW(NULL, (LPCWSTR)(kind != HIT_NONE || link ? IDC_HAND : IDC_ARROW)));
         redraw();
     }
 }
@@ -17177,6 +17904,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             qs_open();
             return 0;
         }
+        if (wp == 'C' && GetKeyState(VK_CONTROL) < 0 && sel_copy())
+            return 0;
         if (shortcut(wp))
             return 0;
         break;
@@ -17259,17 +17988,21 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         paint(wnd);
         return 0;
     case WM_SETCURSOR:
+        if ((HWND)wp != wnd) /* over a text box, which shows its own I-beam */
+            return FALSE;
         if (LOWORD(lp) == HTCLIENT && g_ui.view == VIEW_LOGIN) {
             int box = g_ui.login_hover == LH_EMAIL || g_ui.login_hover == LH_PASSWORD || g_ui.login_hover == LH_CODE;
             SetCursor(LoadCursorW(NULL, (LPCWSTR)(box ? IDC_IBEAM : g_ui.login_hover > 0 ? IDC_HAND : IDC_ARROW)));
             return TRUE;
         }
         if (LOWORD(lp) == HTCLIENT && g_ui.settings_open) {
-            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.settings_hover >= 0 ? IDC_HAND : IDC_ARROW)));
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.settings_hover >= 0 ? IDC_HAND : on_text_box() ? IDC_IBEAM : IDC_ARROW)));
             return TRUE;
         }
         if (LOWORD(lp) == HTCLIENT) {
-            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.hover_kind != HIT_NONE || g_ui.hover_link ? IDC_HAND : IDC_ARROW)));
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)(g_ui.hover_kind != HIT_NONE || g_ui.hover_link ? IDC_HAND
+                                                  : g_sel.hover || on_text_box()                    ? IDC_IBEAM
+                                                                                                    : IDC_ARROW)));
             return TRUE;
         }
         break;
@@ -17282,6 +18015,15 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 slider_drag(id, GET_X_LPARAM(lp));
             }
             return 0;
+        }
+        if (g_ui.view == VIEW_APP && sel_mouse(msg, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+            return 0;
+        break;
+    case WM_CAPTURECHANGED:
+        if (g_sel.down && (HWND)lp != wnd) { /* a menu took the mouse */
+            g_sel.down = 0;
+            g_sel.scrolling = 0;
+            KillTimer(wnd, TIMER_SELECT);
         }
         break;
     case WM_XBUTTONDOWN:
@@ -17300,6 +18042,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             slider_drag(g_ui.set_drag, GET_X_LPARAM(lp));
             return 0;
         }
+        if (sel_mouse(msg, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+            return 0;
         if (g_ui.view == VIEW_LOGIN) {
             int h = settings_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             if (h != g_ui.login_hover) {
@@ -17331,8 +18075,11 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             g_ui.under_msg = -1;
             redraw();
         }
+        g_sel.hover = 0;
         return 0;
     case WM_LBUTTONUP:
+        if (sel_mouse(msg, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+            return 0;
         if (g_ui.set_drag) {
             g_ui.set_drag = 0;
             ReleaseCapture();
@@ -17681,6 +18428,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             KillTimer(wnd, TIMER_FLASH);
             g_ui.flash_id[0] = 0;
             redraw();
+            return 0;
+        }
+        if (wp == TIMER_SELECT) {
+            sel_scroll();
             return 0;
         }
         if (wp == TIMER_MIC) {

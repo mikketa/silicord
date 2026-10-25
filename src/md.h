@@ -25,7 +25,7 @@ enum {
     MD_SPOILER = 32,
     MD_LINK = 64,
     MD_MENTION = 128,
-    MD_EMOJI = 256,   /* one U+FFFC standing for a custom emoji; `link` holds ["a"]id */
+    MD_EMOJI = 256,   /* one U+FFFC standing for a custom emoji; `link` holds ["a"]id, the link after it its name */
     MD_EDITED = 512,
 };
 

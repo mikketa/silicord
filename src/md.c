@@ -216,6 +216,7 @@ static void inline_md(md_doc_t *d, const char *s, size_t n, unsigned flags, int 
             FLUSH();
             if (colon != NPOS) {
                 int idx = add_link(d, s + i + 3, colon - i - 3);
+                add_link(d, s + colon + 1, j - colon - 1); /* its name, for copying it as ":name:" */
                 emit(d, "\xEF\xBF\xBC", 3, flags | MD_EMOJI, idx); /* U+FFFC */
             }
             i = run = j + 3;

@@ -85,6 +85,14 @@ enum {
 void r_text(r_font_t *f, unsigned argb, int x, int y, int w, int h, const wchar_t *s, int len, unsigned flags);
 int r_text_width(r_font_t *f, const wchar_t *s, int len);
 int r_text_height(r_font_t *f, const wchar_t *s, int len, int width);
+/*
+ * Selecting text drawn by r_text (or r_text_styled) in a w x h box with the
+ * same flags: the offset in s nearest to (x, y), relative to the box; and
+ * the boxes of s[a, b) filled with `argb`, drawn before the text.
+ */
+int r_text_pos(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags, int x, int y);
+void r_text_mark(r_font_t *f, unsigned argb, int x, int y, int w, int h, const wchar_t *s, int len, unsigned flags,
+                 int a, int b);
 
 /*
  * Text drawn with a Discord display name style: `effect` is
@@ -99,6 +107,7 @@ void r_text_styled(r_font_t *f, const unsigned *colors, int ncolors, int effect,
 typedef struct {
     r_font_t *body, *mono, *h1, *h2, *h3, *subtext;
     unsigned ink, muted, link, mention, mention_bg, code_bg, quote_bar, spoiler;
+    unsigned select; /* behind selected text */
     int quote_indent, code_pad, block_gap, radius;
     /* Custom emoji: size inline and in emoji-only messages, and where their images come from
        (`id` is the emoji id, prefixed by "a" when animated; NULL while it loads). */
@@ -116,6 +125,12 @@ void r_rich_draw(r_rich_t *r, int x, int y, int reveal_spoilers);
 int r_rich_hit(r_rich_t *r, int x, int y, unsigned *flags, int *link);
 /* Underlines link `link` (as r_rich_hit reports it), the one under the mouse; -1 for none. */
 void r_rich_hover(r_rich_t *r, int link);
+/* Offset in the doc's text nearest to (x, y), relative to the origin used to draw: an end of a selection. */
+int r_rich_pos(r_rich_t *r, int x, int y);
+/* Whether (x, y) is on the text itself, not beside a short line: where a browser shows the I-beam. */
+int r_rich_over(r_rich_t *r, int x, int y);
+/* Highlights the doc's text [a, b) behind the glyphs from the next draw on; a >= b for none. */
+void r_rich_select(r_rich_t *r, int a, int b);
 void r_rich_free(r_rich_t *r);
 
 /*

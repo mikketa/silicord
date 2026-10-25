@@ -86,8 +86,8 @@ static void test_links(void)
 static void test_emoji(void)
 {
     parse("hi " MD_EMOJI_OPEN "a55:party" MD_EMOJI_CLOSE "!");
-    check(text_is("hi \xEF\xBF\xBC!") && flags_of("\xEF\xBF\xBC") == MD_EMOJI && g_doc.nlinks == 1 &&
-              lstrcmpA(md_link(&g_doc, 0), "a55") == 0 && !g_doc.jumbo,
+    check(text_is("hi \xEF\xBF\xBC!") && flags_of("\xEF\xBF\xBC") == MD_EMOJI && g_doc.nlinks == 2 &&
+              lstrcmpA(md_link(&g_doc, 0), "a55") == 0 && lstrcmpA(md_link(&g_doc, 1), "party") == 0 && !g_doc.jumbo,
           "custom emoji become one object character");
     parse(MD_EMOJI_OPEN "1:a" MD_EMOJI_CLOSE " \xF0\x9F\x98\x80");
     check(g_doc.jumbo, "emoji-only messages are jumbo");
