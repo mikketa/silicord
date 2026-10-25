@@ -163,6 +163,7 @@ static inline float clamp01(float v)
 
 static inline int imin(int a, int b) { return a < b ? a : b; }
 static inline int imax(int a, int b) { return a > b ? a : b; }
+static inline int ifloor(float v) { return (int)v - ((float)(int)v > v); }
 
 /* Visible area: the band, then the clip stack. */
 static RECT clip_rect(void)
@@ -611,38 +612,63 @@ static void draw_image(const r_image_t *img, float su, float sv, float sw, float
         for (int xx = r.left; xx < r.right && xx - r.left < MAX_TAPS; xx++)
             g_taps[xx - r.left] = bilinear_tap(su + ((float)xx + 0.5f - (float)x) * kx, (int)img->w);
     for (int yy = r.top; yy < r.bottom; yy++) {
-        UINT32 *p = row(yy) + r.left;
         float py = (float)yy + 0.5f, v = sv + (py - (float)y) * ky;
         const BYTE *src = exact ? img->pixels + ((size_t)(yy - y) * img->w + (size_t)(r.left - x)) * 4 : NULL;
         /* Rows clear of the corners are covered whole, as rr_cover() would find. */
         int plain = rad <= 0 || (py - (float)y >= rad + 1 && (float)(y + h) - py >= rad + 1);
-        int xx = r.left;
-
-        if (exact && plain && g_image_alpha >= 1) {
-            /* Four opaque pixels at a time replace the destination's, alpha byte cleared as blending leaves it. */
-            const __m128i opaque = _mm_set1_epi32(~0x00FFFFFF), rgb = _mm_set1_epi32(0x00FFFFFF);
-            for (; xx + 4 <= r.right; xx += 4, p += 4) {
-                __m128i s4 = _mm_loadu_si128((const __m128i *)(src + (size_t)(xx - r.left) * 4));
-                if (_mm_movemask_epi8(_mm_cmpeq_epi32(_mm_and_si128(s4, opaque), opaque)) != 0xFFFF)
-                    break;
-                _mm_storeu_si128((__m128i *)p, _mm_and_si128(s4, rgb));
-            }
-        }
+        /*
+         * Along the row: nothing before out_l and from out_r, whole coverage
+         * in [full_l, full_r), rr_cover() only in between. The bounds come
+         * from the corners' circles with a pixel to spare, so rr_cover()
+         * would find exactly 0 and 1 where it is not asked.
+         */
+        int out_l = r.left, full_l = r.left, full_r = r.right, out_r = r.right;
         tap_t ty = bilinear_tap(v, (int)img->h);
-        for (; xx < r.right; xx++, p++) {
-            float px = (float)xx + 0.5f, u = su + (px - (float)x) * kx, cov = 1;
-            __m128i s;
 
-            if (!plain && (cov = rr_cover(px, py, (float)x, (float)y, (float)(x + w), (float)(y + h), rad)) <= 0)
-                continue;
-            cov *= g_image_alpha;
-            if (exact)
-                s = px_lanes(src + (size_t)(xx - r.left) * 4);
-            else if (shrink)
-                s = sample_box(img, u - kx / 2, v - ky / 2, u + kx / 2, v + ky / 2);
-            else
-                s = sample_bilinear(img, xx - r.left < MAX_TAPS ? g_taps[xx - r.left] : bilinear_tap(u, (int)img->w), ty);
-            *p = blend(s, *p, cov);
+        if (!plain) {
+            float cxl = (float)x + rad, cxr = (float)(x + w) - rad;
+            float cy = py < (float)y + rad ? (float)y + rad : py > (float)(y + h) - rad ? (float)(y + h) - rad : py;
+            float dy2 = (py - cy) * (py - cy), in2 = (rad - .5f) * (rad - .5f) - dy2, out2 = (rad + .5f) * (rad + .5f) - dy2;
+            float hw_out = out2 > 0 ? fsqrt(out2) : 0;
+            out_l = imax(r.left, ifloor(cxl - hw_out) - 2);
+            out_r = imin(r.right, ifloor(cxr + hw_out) + 2);
+            if (rad >= .5f && in2 > 0) {
+                float hw_in = fsqrt(in2);
+                full_l = imax(out_l, ifloor(cxl - hw_in) + 2);
+                full_r = imin(out_r, ifloor(cxr + hw_in) - 1);
+            }
+            if (rad < .5f || in2 <= 0 || full_r <= full_l)
+                full_l = full_r = out_l;
+        }
+        for (int part = 0; part < 3; part++) {
+            int xx = part == 0 ? out_l : part == 1 ? full_l : full_r, to = part == 0 ? full_l : part == 1 ? full_r : out_r;
+            UINT32 *p = row(yy) + xx;
+
+            if (part == 1 && exact && g_image_alpha >= 1) {
+                /* Four opaque pixels at a time replace the destination's, alpha byte cleared as blending leaves it. */
+                const __m128i opaque = _mm_set1_epi32(~0x00FFFFFF), rgb = _mm_set1_epi32(0x00FFFFFF);
+                for (; xx + 4 <= to; xx += 4, p += 4) {
+                    __m128i s4 = _mm_loadu_si128((const __m128i *)(src + (size_t)(xx - r.left) * 4));
+                    if (_mm_movemask_epi8(_mm_cmpeq_epi32(_mm_and_si128(s4, opaque), opaque)) != 0xFFFF)
+                        break;
+                    _mm_storeu_si128((__m128i *)p, _mm_and_si128(s4, rgb));
+                }
+            }
+            for (; xx < to; xx++, p++) {
+                float px = (float)xx + 0.5f, u = su + (px - (float)x) * kx, cov = 1;
+                __m128i s;
+
+                if (part != 1 && (cov = rr_cover(px, py, (float)x, (float)y, (float)(x + w), (float)(y + h), rad)) <= 0)
+                    continue;
+                cov *= g_image_alpha;
+                if (exact)
+                    s = px_lanes(src + (size_t)(xx - r.left) * 4);
+                else if (shrink)
+                    s = sample_box(img, u - kx / 2, v - ky / 2, u + kx / 2, v + ky / 2);
+                else
+                    s = sample_bilinear(img, xx - r.left < MAX_TAPS ? g_taps[xx - r.left] : bilinear_tap(u, (int)img->w), ty);
+                *p = blend(s, *p, cov);
+            }
         }
     }
 }
