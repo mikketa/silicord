@@ -4196,12 +4196,13 @@ static void paint_confirm(void);
 static void paint_typing(int x0, int w, int y);
 static void typing_stop(const char *user);
 static void typing_clear(void);
+static void typing_redraw(void);
 static void on_typing(const sb_t *p);
 
 #define GROUP_MS (7 * 60 * 1000)
 #define COMPOSER_H 56
 #define COMPOSER_GAP 8   /* around the box, as in Discord */
-#define TYPING_H 24      /* above the box: "X is typing..." */
+#define TYPING_H 24      /* above the box, over the list's end: "X is typing..." */
 /* The composer's buttons, right to left: emoji, stickers, GIFs. */
 enum { CB_NONE, CB_EMOJI, CB_STICKER, CB_GIF, CB_COUNT };
 #define WELCOME_H 190
@@ -4279,7 +4280,8 @@ static RECT message_area(void)
     r.left = S(RAIL_W + SIDE_W);
     r.right = main_right();
     r.top = S(HEADER_H) + call_h();
-    r.bottom = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H) - S(TYPING_H) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
+    /* Down to the composer, as in Discord: nothing kept empty for "X is typing...", drawn over it when it shows. */
+    r.bottom = rc.bottom - S(COMPOSER_GAP) - S(COMPOSER_H) - (g_ui.bar ? S(BAR_H) : 0) - tray_h();
     return r;
 }
 
@@ -8583,10 +8585,14 @@ static void on_worker(UINT msg, WPARAM wp, LPARAM lp)
         if (p)
             on_forum(p);
         break;
-    case UI_TYPING:
-        if (p)
+    case UI_TYPING: /* only its line changes */
+        if (p) {
             on_typing(p);
-        break;
+            sb_free(p);
+            mem_free(p);
+        }
+        typing_redraw();
+        return;
     case UI_VOICE:
         /* A late report from a connection we already left changes nothing. */
         if (p && p->len >= 2 && g_ui.voice_state != VOICE_OFF) {
@@ -10577,10 +10583,11 @@ static void run_tool(int action)
 
 /* ---- Typing ---- */
 
-static void typing_prune(void)
+/* Forgets who stopped typing; returns whether anyone did. */
+static int typing_prune(void)
 {
     DWORD now = GetTickCount();
-    int k = 0;
+    int k = 0, was = g_ui.ntyping;
 
     for (int i = 0; i < g_ui.ntyping; i++)
         if ((int)(g_ui.typing[i].until - now) > 0)
@@ -10590,6 +10597,18 @@ static void typing_prune(void)
     g_ui.ntyping = k;
     if (!k)
         KillTimer(g_ui.wnd, TIMER_TYPING);
+    return k != was;
+}
+
+/* "X is typing...": a line over the composer, painted again alone. */
+static void typing_redraw(void)
+{
+    RECT r = message_area(), c;
+
+    GetClientRect(g_ui.wnd, &c);
+    r.top = r.bottom - S(48);
+    r.bottom = c.bottom;
+    redraw_rect(r);
 }
 
 static void typing_stop(const char *user)
@@ -10655,6 +10674,8 @@ static void paint_typing(int x0, int w, int y)
                   g_ui.typing[2].name.data);
     else
         lstrcpyA(line, "Several people are typing\xE2\x80\xA6");
+    /* Over the end of the list: the chat's background fades in under it, as at the edge of Discord's composer. */
+    r_round_gradient(x0, y - S(8), w, S(TYPING_H) + S(8), 0, ARGB(C_MAIN) & 0x00FFFFFFu, ARGB(C_MAIN));
     text(g_ui.f_small, C_MUTED, rect(x0 + S(20), y, w - S(40), S(20)), line, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -17685,8 +17706,8 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         if (wp == TIMER_TYPING) {
-            typing_prune();
-            redraw();
+            if (typing_prune())
+                typing_redraw();
             return 0;
         }
         if (wp == TIMER_ACK) {
