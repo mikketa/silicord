@@ -47,7 +47,7 @@ Measured while connected to an account with 20 servers:
 
 | | Silicord |
 |---|---|
-| Executable | 480 KB, the emoji table and its search names included |
+| Executable | 1,025 KB, the Opus and VP8 codecs, the end-to-end encryption and the emoji tables included |
 | Other files | Microsoft's `WebView2Loader.dll`, beside it; nothing to install |
 | Memory | about 8 MB at startup (Task Manager), 9 MB after browsing eight servers |
 | CPU when idle | 0% over 30 seconds: the process sleeps until the next network event |
