@@ -26,7 +26,7 @@ static int twemoji_is(const wchar_t *s, int mode, int units, unsigned long long 
 {
     int index = -1, n = twemoji_match(s, lstrlenW(s), mode, &index);
 
-    return n == units && index >= 0 && k_twemoji[index].asset == asset;
+    return n == units && index >= 0 && k_twemoji_asset[index] == asset;
 }
 
 void entry(void)
@@ -69,12 +69,22 @@ void entry(void)
         char url[64];
         int sorted = 1, index = -1;
         for (int k = 1; k < k_ntwemoji; k++) { /* by code unit, strictly: what the lookup's binary search needs */
-            const wchar_t *a = k_twemoji[k - 1].seq, *b = k_twemoji[k].seq;
-            while (*a && *a == *b)
-                a++, b++;
-            sorted &= *a < *b;
+            const wchar_t *a, *b;
+            int an = twemoji_text(k - 1, &a), bn = twemoji_text(k, &b), j = 0;
+            while (j < an && j < bn && a[j] == b[j])
+                j++;
+            sorted &= an > 0 && (j < an && j < bn ? a[j] < b[j] : an < bn);
         }
         check(k_ntwemoji > 3500 && sorted, "twemoji table");
+        {
+            int found = 1;
+            for (int k = 0; k < k_ntwemoji; k++) { /* each emoji, looked up, is itself */
+                const wchar_t *s;
+                int n = twemoji_text(k, &s);
+                found &= twemoji_match(s, n, TWEMOJI_ANY, &index) == n && index == k;
+            }
+            check(found, "every emoji of the table is found");
+        }
         check(twemoji_is(L"\xD83D\xDC4D!", TWEMOJI_COLOR, 2, 0xa4faf6864a96a042ull), "thumbs up");
         check(twemoji_is(L"\xD83D\xDC4D\xD83C\xDFFD", TWEMOJI_COLOR, 4, 0x9c107220ede7ac6cull), "a skin tone");
         check(twemoji_is(L"\x2764\xFE0F a", TWEMOJI_COLOR, 2, 0x8838f014a5d2ce59ull), "U+FE0F goes with it");

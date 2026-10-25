@@ -137,7 +137,7 @@ void r_rich_free(r_rich_t *r);
 
 /*
  * Unicode emoji drawn as Discord draws them (twemoji.h) in all text from now
- * on: `image` returns emoji `index` of k_twemoji at px, or NULL while it
+ * on: `image` returns emoji `index` of twemoji.h's table at px, or NULL while it
  * loads, when the font's emoji shows in its place. In messages every
  * character with an image counts, elsewhere only what fonts draw in color.
  * Until it is set, the font draws them all.

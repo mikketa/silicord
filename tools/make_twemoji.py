@@ -54,6 +54,12 @@ def main():
         if key in table:
             sys.exit(f"make_twemoji: {name} and another emoji are the same without U+FE0F")
         table[key] = assets[module]
+    write_table(table)
+
+
+def write_table(table):
+    """src/twemoji_data.c from {UTF-16 units: asset as 16 hex digits}, in twemoji.h's layout."""
+    keys = sorted(table)
     lines = [
         "/*",
         " * Discord's image of each Unicode emoji (Twemoji): the emoji in UTF-16 without",
@@ -62,15 +68,26 @@ def main():
         " */",
         '#include "twemoji.h"',
         "",
-        "const twemoji_t k_twemoji[] = {",
+        "const wchar_t k_twemoji_text[] =",
     ]
-    for key in sorted(table):
-        units = "".join(f"\\x{u:04X}" for u in key)
-        lines.append(f'    {{L"{units}", 0x{table[key]}ull}},')
-    lines += ["};", f"const int k_ntwemoji = {len(table)};", ""]
+    for key in keys:
+        lines.append('    L"' + "".join(f"\\x{u:04X}" for u in key) + '"')
+    lines[-1] += ";"
+    ends, end = [], 0
+    for key in keys:
+        end += len(key)
+        ends.append(str(end))
+    if end > 0xFFFF:
+        sys.exit("make_twemoji: the emoji no longer fit unsigned short offsets")
+    lines.append("const unsigned short k_twemoji_end[] = {")
+    lines += ["    " + ", ".join(ends[i:i + 16]) + "," for i in range(0, len(ends), 16)]
+    lines += ["};", "const unsigned long long k_twemoji_asset[] = {"]
+    assets = [f"0x{table[key]}ull" for key in keys]
+    lines += ["    " + ", ".join(assets[i:i + 4]) + "," for i in range(0, len(assets), 4)]
+    lines += ["};", f"const int k_ntwemoji = {len(keys)};", ""]
     out = ROOT / "src" / "twemoji_data.c"
     out.write_text("\n".join(lines), encoding="utf-8", newline="\n")
-    print(f"{out.relative_to(ROOT)}: {len(table)} emoji")
+    print(f"{out.relative_to(ROOT)}: {len(keys)} emoji")
 
 
 if __name__ == "__main__":

@@ -2065,7 +2065,7 @@ struct EmojiObject : IDWriteInlineObject {
     int size;
     const r_rich_style_t *st;
     char id[32];      /* a custom emoji's id */
-    int unicode;      /* or a Unicode emoji's index in k_twemoji, plus one */
+    int unicode;      /* or a Unicode emoji's index in twemoji.h's table, plus one */
     wchar_t text[24]; /* its text, drawn by the font while the image loads */
     int len;
 

@@ -38,14 +38,21 @@ static int regional(unsigned c)
     return c >= 0x1F1E6 && c <= 0x1F1FF;
 }
 
-/* k against b[0, len), as the table is sorted: by code unit, a prefix first. */
-static int compare(const wchar_t *k, const wchar_t *b, int len)
+int twemoji_text(int k, const wchar_t **s)
 {
-    for (int j = 0; j < len; j++) {
-        if (!k[j] || k[j] != b[j])
-            return !k[j] || k[j] < b[j] ? -1 : 1;
-    }
-    return k[len] ? 1 : 0;
+    int start = k ? k_twemoji_end[k - 1] : 0;
+
+    *s = k_twemoji_text + start;
+    return k_twemoji_end[k] - start;
+}
+
+/* a[0, an) against b[0, bn), as the table is sorted: by code unit, a prefix first. */
+static int compare(const wchar_t *a, int an, const wchar_t *b, int bn)
+{
+    for (int j = 0; j < an && j < bn; j++)
+        if (a[j] != b[j])
+            return a[j] < b[j] ? -1 : 1;
+    return an < bn ? -1 : an > bn;
 }
 
 static int find(const wchar_t *key, int len)
@@ -53,7 +60,8 @@ static int find(const wchar_t *key, int len)
     int lo = 0, hi = k_ntwemoji - 1;
 
     while (lo <= hi) {
-        int mid = (lo + hi) / 2, c = compare(k_twemoji[mid].seq, key, len);
+        const wchar_t *s;
+        int mid = (lo + hi) / 2, n = twemoji_text(mid, &s), c = compare(s, n, key, len);
         if (!c)
             return mid;
         if (c < 0)
@@ -125,7 +133,7 @@ int twemoji_match(const wchar_t *s, int n, int mode, int *index)
 void twemoji_url(int index, char *out)
 {
     static const char hex[] = "0123456789abcdef", prefix[] = "https://discord.com/assets/";
-    unsigned long long a = k_twemoji[index].asset;
+    unsigned long long a = k_twemoji_asset[index];
     int n = 0;
 
     for (const char *p = prefix; *p; p++)
