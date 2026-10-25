@@ -77,6 +77,8 @@ add_library(silicord_core STATIC
   src/sha2.c
   src/stats.c
   src/tls.c
+  src/twemoji.c
+  src/twemoji_data.c
   src/utf.c
   asm/str.asm
 )

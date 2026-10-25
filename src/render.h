@@ -117,6 +117,15 @@ void r_rich_hover(r_rich_t *r, int link);
 void r_rich_free(r_rich_t *r);
 
 /*
+ * Unicode emoji drawn as Discord draws them (twemoji.h) in all text from now
+ * on: `image` returns emoji `index` of k_twemoji at px, or NULL while it
+ * loads, when the font's emoji shows in its place. In messages every
+ * character with an image counts, elsewhere only what fonts draw in color.
+ * Until it is set, the font draws them all.
+ */
+void r_set_emoji_images(r_image_t *(*image)(int index, int px));
+
+/*
  * PNG, JPEG, GIF, WebP... decoded to premultiplied BGRA, scaled down so that
  * neither side exceeds `max_px` (0 keeps the size). Safe from any thread.
  */

@@ -26,6 +26,7 @@
 #include "search.h"
 #include "stats.h"
 #include "emoji.h"
+#include "twemoji.h"
 #include "mem.h"
 #include "qr.h"
 #include "utf.h"
@@ -4465,6 +4466,43 @@ static r_image_t *emoji_image(const char *id, int px)
     return image_get(key, path, px);
 }
 
+/* Discord's image of Unicode emoji `index` (twemoji.h): its SVG, drawn at each size it shows at. */
+static r_image_t *twemoji_image(int index, int px)
+{
+    char key[32], path[64];
+
+    wsprintfA(key, "u:%d:%d", index, px);
+    twemoji_url(index, path);
+    return image_get(key, path, px);
+}
+
+/*
+ * The Unicode emoji s (len UTF-16 units, -1 for all) px square at (x, y), as
+ * Discord draws it; while its image loads, the font's in f (whose emoji are
+ * about px).
+ */
+static void unicode_emoji(const wchar_t *s, int len, int x, int y, int px, r_font_t *f)
+{
+    int index;
+    r_image_t *img;
+
+    if (len < 0)
+        len = lstrlenW(s);
+    if (twemoji_match(s, len, TWEMOJI_ANY, &index) > 0 && (img = twemoji_image(index, px)) != NULL)
+        r_image(img, x, y, px, px, 0);
+    else
+        r_text(f, ARGB(C_INK), x - px / 2, y - px / 2, 2 * px, 2 * px, s, len, R_CENTER | R_VCENTER | R_SINGLE);
+}
+
+/* Same, s in UTF-8. */
+static void unicode_emoji8(const char *s, int x, int y, int px, r_font_t *f)
+{
+    wchar_t *w = utf8_to_wide(s ? s : "", s ? lstrlenA(s) : 0);
+
+    unicode_emoji(w, -1, x, y, px, f);
+    mem_free(w);
+}
+
 /* Whether a URL is on one of Discord's resizing image proxies (*.discordapp.net). */
 static int proxied(const char *url)
 {
@@ -4881,8 +4919,7 @@ static int msg_extras(msg_t *m, int x, int y, int w, int draw, int hx, int hy, p
                     if (img)
                         r_image(img, rx + S(8), y + (S(REACTION_H) - S(18)) / 2, S(18), S(18), 0);
                 } else {
-                    text(g_ui.f_body, C_INK, rect(rx + S(6), y, S(24), S(REACTION_H)), r->emoji.data ? r->emoji.data : "",
-                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    unicode_emoji8(r->emoji.data, rx + S(8), y + (S(REACTION_H) - S(18)) / 2, S(18), g_ui.f_small);
                 }
                 text(g_ui.f_small, r->me ? C_BRAND : C_MUTED, rect(rx + S(32), y, cw + S(4), S(REACTION_H)), count,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -10643,9 +10680,7 @@ static void picker_paint(RECT rc)
             if ((img = image_get(key, path, S(32))) != NULL)
                 r_image(img, x_ + S(4), y_ + S(4), S(32), S(32), 0);
         } else {
-            wchar_t *we = utf8_to_wide(k_emoji[it->index].emoji, lstrlenA(k_emoji[it->index].emoji));
-            r_text(g_ui.f_emoji, ARGB(C_INK), x_, y_, w_, h_, we, -1, R_CENTER | R_VCENTER | R_SINGLE);
-            mem_free(we);
+            unicode_emoji8(k_emoji[it->index].emoji, x_ + S(4), y_ + S(4), S(32), g_ui.f_emoji);
         }
     }
     r_unclip();
@@ -10655,11 +10690,9 @@ static void picker_paint(RECT rc)
     if (g_ui.pick_hover >= 0 && g_ui.pick_hover < g_ui.npick) {
         const pick_item_t *it = &((pick_item_t *)g_ui.pick_items)[g_ui.pick_hover];
         char label[64];
-        if (it->kind == PI_UNICODE) {
-            wchar_t *we = utf8_to_wide(k_emoji[it->index].emoji, lstrlenA(k_emoji[it->index].emoji));
-            r_text(g_ui.f_emoji, ARGB(C_INK), S(12), grid_bottom, S(40), S(PICK_FOOT), we, -1, R_CENTER | R_VCENTER | R_SINGLE);
-            mem_free(we);
-        }
+        if (it->kind == PI_UNICODE)
+            unicode_emoji8(k_emoji[it->index].emoji, S(12) + (S(40) - S(28)) / 2, grid_bottom + (S(PICK_FOOT) - S(28)) / 2, S(28),
+                           g_ui.f_emoji);
         wsprintfA(label, it->kind == PI_STICKER ? "%.40s" : ":%.40s:", it->name);
         text(g_ui.f_h, C_INK, rect(S(60), grid_bottom, w - S(72), S(PICK_FOOT)), label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     } else {
@@ -11706,9 +11739,7 @@ static void paint_autocomplete(void)
             if (img)
                 r_image(img, x + S(8), y + S(7), S(24), S(24), 0);
         } else {
-            wchar_t *we = utf8_to_wide(k_emoji[it->emoji].emoji, lstrlenA(k_emoji[it->emoji].emoji));
-            r_text(g_ui.f_body, ARGB(C_INK), x + S(4), y, S(32), S(AC_ROW), we, -1, R_CENTER | R_VCENTER | R_SINGLE);
-            mem_free(we);
+            unicode_emoji8(k_emoji[it->emoji].emoji, x + S(8), y + S(7), S(24), g_ui.f_body);
         }
         text(g_ui.f_body, C_INK, rect(x + S(44), y, r.right - x - S(60), S(AC_ROW)), it->label,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -16480,6 +16511,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         make_fonts();
         g_ui.passkeys = app_passkeys();
         img_init(wnd, UI_IMAGE);
+        r_set_emoji_images(twemoji_image);
         paste_cleanup();
         prefs_load();
         DragAcceptFiles(wnd, TRUE);

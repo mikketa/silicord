@@ -55,6 +55,29 @@ static const unsigned char k_gif[] = {
     0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x02, 0x04, 0x8C, 0x8F, 0x19, 0x05, 0x00, 0x3B,
 };
 
+/* Discord's emoji images, as the client gives them: a blue square once "loaded". */
+static r_image_t *g_blue;
+static int g_emoji_asks;
+
+static r_image_t *blue_emoji(int index, int px)
+{
+    (void)index;
+    (void)px;
+    g_emoji_asks++;
+    return g_blue;
+}
+
+static void draw_emoji_text(HDC dc, r_font_t *f, r_rich_t *rich)
+{
+    while (r_begin(dc, W, H)) {
+        r_fill(0, 0, W, H, 0xFF101010);
+        r_text(f, 0xFFFFFFFF, 10, 300, 200, 50, L"a\xD83C\xDF38", -1, R_SINGLE);
+        r_rich_draw(rich, 10, 400, 0);
+        r_end(dc);
+    }
+    GdiFlush();
+}
+
 static unsigned draw_gif(HDC dc, r_image_t *gif)
 {
     while (r_begin(dc, W, H)) {
@@ -137,6 +160,37 @@ void entry(void)
             r_image_advance(gif, 1120);
         check(gif && r_image_frame(gif) == 0 && draw_gif(dc, gif) == 0xFF0000, "and it loops");
         r_image_free(gif);
+    }
+
+    {
+        /* Unicode emoji go through the client's images, the font's glyph standing in while they load. */
+        static const char text[] = "hi \xF0\x9F\x8C\xB8";
+        r_rich_style_t st = {.body = mid, .mono = mid, .h1 = big, .h2 = big, .h3 = big, .subtext = mid, .ink = 0xFFFFFFFF,
+                             .emoji_px = 44, .jumbo_px = 64};
+        md_doc_t doc;
+        r_rich_t *rich;
+        g_blue = r_image_blank(8, 8);
+        for (int k = 0; k < 64; k++)
+            r_image_bits(g_blue)[k] = 0xFF0000FF;
+        r_set_emoji_images(blue_emoji);
+        md_parse(text, sizeof text - 1, &doc);
+        rich = r_rich_build(&doc, &st, 360);
+        {
+            r_image_t *keep = g_blue;
+            g_blue = NULL; /* still loading */
+            draw_emoji_text(dc, mid, rich);
+            check(g_emoji_asks > 0 && any(30, 300, 90, 350, colorful) && !any(30, 300, 90, 350, bluish) &&
+                      any(40, 400, 140, 450, colorful),
+                  "an emoji whose image loads shows the font's");
+            g_blue = keep;
+        }
+        draw_emoji_text(dc, mid, rich);
+        check(px(50, 325) == 0x0000FF, "then its image, in plain text");
+        check(any(40, 400, 160, 450, bluish), "and in a message");
+        r_rich_free(rich);
+        md_free(&doc);
+        r_set_emoji_images(NULL);
+        r_image_free(g_blue);
     }
     finish();
 }

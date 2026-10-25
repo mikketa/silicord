@@ -1,7 +1,8 @@
-/* Emoji names and :shortcode: expansion. */
+/* Emoji names, :shortcode: expansion, and Discord's images of them. */
 #include <windows.h>
 #include "test.h"
 #include "emoji.h"
+#include "twemoji.h"
 
 static const char *custom(void *ctx, const char *name, size_t n)
 {
@@ -18,6 +19,14 @@ static int expands_to(const char *in, const char *want)
     ok = str_eq(&out, want);
     sb_free(&out);
     return ok;
+}
+
+/* Whether s (UTF-16) starts with an emoji of `units` units whose SVG is `asset`. */
+static int twemoji_is(const wchar_t *s, int mode, int units, unsigned long long asset)
+{
+    int index = -1, n = twemoji_match(s, lstrlenW(s), mode, &index);
+
+    return n == units && index >= 0 && k_twemoji[index].asset == asset;
 }
 
 void entry(void)
@@ -55,5 +64,40 @@ void entry(void)
     check(expands_to(":woman_lifting_weights_tone1:",
                      "\xF0\x9F\x8F\x8B\xF0\x9F\x8F\xBB\xE2\x80\x8D\xE2\x99\x80\xEF\xB8\x8F"),
           "the tone goes after the first character of a sequence");
+
+    {
+        char url[64];
+        int sorted = 1, index = -1;
+        for (int k = 1; k < k_ntwemoji; k++) { /* by code unit, strictly: what the lookup's binary search needs */
+            const wchar_t *a = k_twemoji[k - 1].seq, *b = k_twemoji[k].seq;
+            while (*a && *a == *b)
+                a++, b++;
+            sorted &= *a < *b;
+        }
+        check(k_ntwemoji > 3500 && sorted, "twemoji table");
+        check(twemoji_is(L"\xD83D\xDC4D!", TWEMOJI_COLOR, 2, 0xa4faf6864a96a042ull), "thumbs up");
+        check(twemoji_is(L"\xD83D\xDC4D\xD83C\xDFFD", TWEMOJI_COLOR, 4, 0x9c107220ede7ac6cull), "a skin tone");
+        check(twemoji_is(L"\x2764\xFE0F a", TWEMOJI_COLOR, 2, 0x8838f014a5d2ce59ull), "U+FE0F goes with it");
+        check(twemoji_is(L"\x2764", TWEMOJI_ANY, 1, 0x8838f014a5d2ce59ull) && !twemoji_match(L"\x2764", 1, TWEMOJI_COLOR, &index),
+              "a bare heart: an emoji in messages, text elsewhere");
+        check(twemoji_is(L"\xD83C\xDDEB\xD83C\xDDF7\xD83C\xDDEB", TWEMOJI_COLOR, 4, 0xfc3646af3ee101f7ull), "a flag is two letters");
+        check(twemoji_is(L"\xD83C\xDFF3\xFE0F\x200D\xD83C\xDF08", TWEMOJI_COLOR, 6, 0x43c4377ffbafe2daull),
+              "ZWJ sequence with U+FE0F inside");
+        check(twemoji_is(L"\xD83D\xDC41\xFE0F\x200D\xD83D\xDDE8\xFE0F", TWEMOJI_COLOR, 7, 0x339a006319d83b7full),
+              "ZWJ sequence Twemoji names without U+FE0F");
+        check(twemoji_is(L"\xD83D\xDC68\x200D\xD83D\xDC69\x200D\xD83D\xDC67", TWEMOJI_COLOR, 8, 0xdfb3740e7b2d0a65ull),
+              "a family");
+        check(twemoji_match(L"\xD83D\xDC68\x200D\xD83D\xDE00", 5, TWEMOJI_COLOR, &index) == 2,
+              "a sequence without an image: its first emoji");
+        check(twemoji_is(L"#\xFE0F\x20E3", TWEMOJI_COLOR, 3, 0xf8286e00b2b57f0dull), "a keycap");
+        check(!twemoji_match(L"#1 a", 4, TWEMOJI_ANY, &index) && !twemoji_match(L"\x2122", 1, TWEMOJI_COLOR, &index),
+              "plain text");
+        check(twemoji_match(L"\xD83C\xDFF4\xDB40\xDC67\xDB40\xDC62\xDB40\xDC65\xDB40\xDC6E\xDB40\xDC67\xDB40\xDC7F", 14,
+                            TWEMOJI_COLOR, &index) == 14,
+              "a tag sequence (England)");
+        twemoji_match(L"\xD83D\xDC4D", 2, TWEMOJI_COLOR, &index);
+        twemoji_url(index, url);
+        check(lstrcmpA(url, "https://discord.com/assets/a4faf6864a96a042.svg") == 0, "its URL");
+    }
     finish();
 }

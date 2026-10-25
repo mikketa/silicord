@@ -22,6 +22,7 @@ extern "C" {
 #include "apng.h"
 #include "lottie.h"
 #include "mem.h"
+#include "twemoji.h"
 }
 
 #define BAND 512
@@ -88,6 +89,7 @@ static RECT g_clip[MAX_CLIP];
 static int g_nclip;
 static UINT32 *g_scratch;           /* saved pixels while drawing text */
 static size_t g_scratch_n;
+static r_image_t *(*g_emoji_image)(int index, int px); /* Discord's images of Unicode emoji, once set */
 
 /* ---- Pixels ---- */
 
@@ -1343,12 +1345,21 @@ static IDWriteTextLayout *layout(r_font_t *f, const wchar_t *s, int len, int w, 
     return l;
 }
 
+#define R_PLAIN 0x40000000u /* internal: the font draws the emoji (an image's stand-in while it loads) */
+#define EMOJI_EM 1.375f     /* Discord's emoji in text: 1.375em, the height of its line */
+
+static void emoji_objects(IDWriteTextLayout *l, const wchar_t *s, int len, int size, int mode, const md_doc_t *doc,
+                          int start);
+
 static IDWriteTextLayout *layout_new(r_font_t *f, const wchar_t *s, int len, int w, int h, unsigned flags)
 {
     IDWriteTextLayout *l;
 
     if (FAILED(g_dw->CreateTextLayout(s, (UINT32)len, f->format, (float)w, (float)h, &l)))
         return NULL;
+    /* The interface's text: what the font would draw in color only, so arrows and "™" stay text. */
+    if (g_emoji_image && !(flags & R_PLAIN))
+        emoji_objects(l, s, len, (int)(f->format->GetFontSize() * EMOJI_EM + 0.5f), TWEMOJI_COLOR, NULL, 0);
     l->SetTextAlignment((flags & R_CENTER)  ? DWRITE_TEXT_ALIGNMENT_CENTER
                         : (flags & R_RIGHT) ? DWRITE_TEXT_ALIGNMENT_TRAILING
                                             : DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -1566,12 +1577,17 @@ struct rich_block {
     int x, y, h;      /* text origin relative to the rich origin, block height */
 };
 
-/* A custom emoji inside a text layout: reserves a square and draws the image there. */
+static void emoji_glyph(void *ctx, FLOAT x, FLOAT y, int size, const wchar_t *s, int len);
+
+/* An emoji inside a text layout: reserves a square and draws the image there. */
 struct EmojiObject : IDWriteInlineObject {
     LONG refs;
     int size;
     const r_rich_style_t *st;
-    char id[32];
+    char id[32];      /* a custom emoji's id */
+    int unicode;      /* or a Unicode emoji's index in k_twemoji, plus one */
+    wchar_t text[24]; /* its text, drawn by the font while the image loads */
+    int len;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override
     {
@@ -1596,8 +1612,16 @@ struct EmojiObject : IDWriteInlineObject {
         const draw_ctx *c = (const draw_ctx *)ctx;
         r_image_t *img;
 
-        if (c->pass == PASS_MONO || !st->emoji || !(img = st->emoji(id, size)))
+        if (c->pass == PASS_MONO)
             return S_OK;
+        if (unicode) {
+            if (!g_emoji_image || !(img = g_emoji_image(unicode - 1, size))) {
+                emoji_glyph(ctx, x, y, size, text, len);
+                return S_OK;
+            }
+        } else if (!st || !st->emoji || !(img = st->emoji(id, size))) {
+            return S_OK;
+        }
         r_image(img, (int)(x + 0.5f), (int)(y + 0.5f) + g_y0, size, size, 0);
         return S_OK;
     }
@@ -1620,6 +1644,80 @@ struct EmojiObject : IDWriteInlineObject {
         return S_OK;
     }
 };
+
+/* Fonts for emoji whose image is not there yet, by size. */
+static struct {
+    int px;
+    r_font_t *f;
+} g_emoji_fonts[8];
+
+/*
+ * The font's emoji in an object's square while its image loads. Drawn
+ * straight into the band: we are inside draw_layout(), whose save and
+ * restore of the pixels around already cover this.
+ */
+static void emoji_glyph(void *ctx, FLOAT x, FLOAT y, int size, const wchar_t *s, int len)
+{
+    int px = size * 3 / 4 > 1 ? size * 3 / 4 : 1, k;
+    IDWriteTextLayout *l;
+
+    for (k = 0; k < (int)ARRAYSIZE(g_emoji_fonts) && g_emoji_fonts[k].f && g_emoji_fonts[k].px != px; k++)
+        ;
+    if (k == (int)ARRAYSIZE(g_emoji_fonts)) { /* full: the first goes */
+        r_font_free(g_emoji_fonts[0].f);
+        g_emoji_fonts[0].f = NULL;
+        k = 0;
+    }
+    if (!g_emoji_fonts[k].f) {
+        g_emoji_fonts[k].px = px;
+        if (!(g_emoji_fonts[k].f = make_font(L"Segoe UI Emoji", NULL, px, DWRITE_FONT_WEIGHT_NORMAL, 0)))
+            return;
+    }
+    if (!(l = layout(g_emoji_fonts[k].f, s, len, size, size, R_CENTER | R_VCENTER | R_SINGLE | R_PLAIN)))
+        return;
+    l->Draw(ctx, g_renderer, x, y);
+    l->Release();
+}
+
+/*
+ * Puts an emoji object, `size` px square, on each Unicode emoji of s[0, len)
+ * in layout l, so that it shows Discord's image. In a message (doc given,
+ * s starting at doc position `start`), not inside code, as Discord.
+ */
+static void emoji_objects(IDWriteTextLayout *l, const wchar_t *s, int len, int size, int mode, const md_doc_t *doc,
+                          int start)
+{
+    for (int i = 0; i < len;) {
+        int index, n = twemoji_match(s + i, len - i, mode, &index), code = 0;
+        if (n <= 0) {
+            i++;
+            continue;
+        }
+        for (int k = 0; doc && k < doc->nspans; k++) {
+            const md_span_t *sp = &doc->spans[k];
+            code |= (sp->flags & (MD_CODE | MD_EMOJI)) && start + i < sp->start + sp->len && start + i + n > sp->start;
+        }
+        if (!code && n <= (int)ARRAYSIZE(EmojiObject::text)) {
+            EmojiObject *e = new (place_t(), mem_alloc(sizeof(EmojiObject))) EmojiObject();
+            DWRITE_TEXT_RANGE range = {(UINT32)i, (UINT32)n};
+            e->refs = 1;
+            e->size = size;
+            e->unicode = index + 1;
+            e->len = n;
+            for (int k = 0; k < n; k++)
+                e->text[k] = s[i + k];
+            l->SetInlineObject(e, range);
+            e->Release(); /* the layout holds it */
+        }
+        i += n;
+    }
+}
+
+extern "C" void r_set_emoji_images(r_image_t *(*image)(int index, int px))
+{
+    g_emoji_image = image;
+    layouts_drop(NULL); /* built without the images */
+}
 
 struct r_rich {
     const md_doc_t *doc;
@@ -1724,6 +1822,13 @@ extern "C" r_rich_t *r_rich_build(const md_doc_t *d, const r_rich_style_t *st, i
         if (b->kind != MD_CODEBLOCK)
             for (int s = 0; s < d->nspans; s++)
                 style_range(r, out->layout, &d->spans[s], b->start, b->len);
+        if (b->kind != MD_CODEBLOCK && g_emoji_image) {
+            /* Unicode emoji as Discord's images, the size of custom ones (in a heading, as much larger) */
+            float body = st->body ? st->body->format->GetFontSize() : 0;
+            int size = d->jumbo || body <= 0 ? (d->jumbo ? st->jumbo_px : st->emoji_px)
+                                             : (int)(f->format->GetFontSize() * (float)st->emoji_px / body + 0.5f);
+            emoji_objects(out->layout, d->text + b->start, b->len, size, TWEMOJI_ANY, d, b->start);
+        }
         if (b->kind == MD_SUBTEXT) {
             DWRITE_TEXT_RANGE all = {0, (UINT32)b->len};
             out->layout->SetDrawingEffect(r->muted, all);
