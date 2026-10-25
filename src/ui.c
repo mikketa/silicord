@@ -505,6 +505,7 @@ static void rel_remove(const char *id);
 #define TIMER_MIC 11   /* the microphone meter in the voice settings */
 #define TIMER_ACTIVE 14 /* Active Now's elapsed times, each second while shown */
 #define TIMER_SELECT 15 /* scrolls the messages while selecting past their edge */
+#define TIMER_SETTLE 16 /* the whole repaint held back while scrolling, once the wheel rests */
 #define REACTORS_DELAY 400
 #define ACK_DELAY 1500
 
@@ -1176,15 +1177,25 @@ static void tween_frame_end(void)
     vsync_request();
 }
 
-/* A refresh of the display: the transitions and fades still running take their next step. */
-static void on_vsync(void)
+static void glide_tick(void);
+
+static double g_vsync_ms; /* when the display last refreshed, in ms of QueryPerformanceCounter() */
+
+/* A refresh of the display, at `at` (QueryPerformanceCounter()): the transitions, fades and scrolling still running take their next step. */
+static void on_vsync(LONGLONG at)
 {
+    if (!g_ui.qpf.QuadPart)
+        QueryPerformanceFrequency(&g_ui.qpf);
+    g_vsync_ms = (double)at * 1000.0 / (double)g_ui.qpf.QuadPart;
     if (g_fade.n)
         fade_tick();
+    glide_tick();
     splash_tick();
     if (!IsRectEmpty(&g_tween.repaint)) {
         InvalidateRect(g_ui.wnd, &g_tween.repaint, FALSE);
         SetRectEmpty(&g_tween.repaint);
+        /* Painted now, just after the refresh: one that waited could be shown half drawn by the next. */
+        UpdateWindow(g_ui.wnd);
     }
 }
 
@@ -2199,6 +2210,12 @@ static float folder_slide(int f)
 static int folder_animating(void)
 {
     return g_ui.folder_anim && (int)(g_tween.now - g_ui.folder_anim_t0) < FOLDER_MS;
+}
+
+/* The same by the clock, outside a paint: none may come (a minimized window). */
+static int folder_moving(void)
+{
+    return g_ui.folder_anim && (int)((unsigned)qpc_ms() - g_ui.folder_anim_t0) < FOLDER_MS;
 }
 
 /*
@@ -6265,6 +6282,22 @@ static void paint_message(int i, int x0, int y, int w)
     msg_extras(m, tx, y, tw, 1, 0, 0, NULL);
 }
 
+/* The message list's scrollbar thumb with the list at `scroll`; 0 when everything fits. */
+static int msg_thumb(int scroll, RECT *r)
+{
+    RECT a = message_area();
+    int content = messages_height(), view = a.bottom - a.top, th, ty;
+
+    if (content <= view)
+        return 0;
+    th = view * view / content;
+    if (th < S(32))
+        th = S(32);
+    ty = a.top + (view - th) - (view - th) * scroll / (content - view);
+    *r = rect(a.right - S(10), ty, S(6), th);
+    return 1;
+}
+
 static void paint_messages(const char *name)
 {
     RECT a = message_area();
@@ -6299,14 +6332,9 @@ static void paint_messages(const char *name)
 
     /* Scrollbar */
     {
-        int content = messages_height(), view = a.bottom - a.top;
-        if (content > view) {
-            int th = view * view / content, ty;
-            if (th < S(32))
-                th = S(32);
-            ty = a.top + (view - th) - (view - th) * g_ui.msg_scroll / (content - view);
-            r_round(a.right - S(10), ty, S(6), th, S(3), 0xFF242426);
-        }
+        RECT t;
+        if (msg_thumb(g_ui.msg_scroll, &t))
+            r_round(t.left, t.top, t.right - t.left, t.bottom - t.top, S(3), 0xFF242426);
     }
 }
 
@@ -6860,15 +6888,19 @@ static void paint_app(RECT rc)
 {
     paint_main(rc);
     paint_call_card();
-    if (members_shown())
+    /* Lists outside a partial repaint (a hover, a scroll) are not walked at all. */
+    if (members_shown() && r_visible_box(main_right(), 0, rc.right - main_right(), rc.bottom))
         paint_members(rc);
-    paint_side(rc);
-    paint_rail(rc);
+    if (r_visible_box(S(RAIL_W), 0, S(SIDE_W), rc.bottom))
+        paint_side(rc);
+    if (r_visible_box(0, 0, S(RAIL_W), rc.bottom))
+        paint_rail(rc);
     /* The panels sit in a frame with a rounded top left corner, outlined, as in Discord. */
     r_clip(S(RAIL_W), 0, rc.right - S(RAIL_W), rc.bottom);
     r_round_outline(S(RAIL_W), 0, rc.right, rc.bottom + S(40), S(8), S(1) > 1 ? S(1) : 1, ARGB(C_LINE));
     r_unclip();
-    paint_panel(rc);
+    if (r_visible_box(0, panel_top(rc), panel_right(), rc.bottom - panel_top(rc)))
+        paint_panel(rc);
     paint_tooltip();
     paint_reactors();
     paint_confirm();
@@ -6930,20 +6962,53 @@ static void anim_tick(void)
  * are marked with it, and decoding from the disk cache is timed from its
  * start), drawn in bands. Returns the frame.
  */
+/*
+ * The rectangles of an update region left in pieces (a scroll: the strip
+ * coming into view, the scrollbar, the bars at the ends), when painting them
+ * one by one beats painting the box around them; else 0.
+ */
+static int region_parts(HRGN rgn, RECT *out, int max)
+{
+    BYTE buf[sizeof(RGNDATAHEADER) + 16 * sizeof(RECT)];
+    RGNDATA *d = (RGNDATA *)buf;
+    const RECT *r = (const RECT *)d->Buffer;
+    long long area = 0, box;
+
+    if (max > 16 || GetRegionData(rgn, sizeof buf, d) == 0 || (int)d->rdh.nCount > max)
+        return 0;
+    for (DWORD k = 0; k < d->rdh.nCount; k++) {
+        out[k] = r[k];
+        area += (long long)(r[k].right - r[k].left) * (r[k].bottom - r[k].top);
+    }
+    box = (long long)(d->rdh.rcBound.right - d->rdh.rcBound.left) * (d->rdh.rcBound.bottom - d->rdh.rcBound.top);
+    return area * 10 < box * 7 ? (int)d->rdh.nCount : 0;
+}
+
 static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
 {
     PAINTSTRUCT ps;
-    RECT rc;
+    RECT rc, parts[16];
+    HRGN rgn = CreateRectRgn(0, 0, 0, 0);
+    int nparts = GetUpdateRgn(wnd, rgn, FALSE) == COMPLEXREGION ? region_parts(rgn, parts, 16) : 0;
     HDC dc = BeginPaint(wnd, &ps);
 
+    DeleteObject(rgn);
     GetClientRect(wnd, &rc);
     g_ui.frame++;
     g_ui.paint_wnd = wnd;
     QueryPerformanceCounter(&g_ui.frame_start);
     tween_frame_start();
-    while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
-        draw(rc);
-        r_end(dc);
+    for (int k = 0; k < (nparts ? nparts : 1); k++) {
+        if (nparts) {
+            SaveDC(dc);
+            IntersectClipRect(dc, parts[k].left, parts[k].top, parts[k].right, parts[k].bottom);
+        }
+        while (rc.right > 0 && rc.bottom > 0 && r_begin(dc, rc.right, rc.bottom)) {
+            draw(rc);
+            r_end(dc);
+        }
+        if (nparts)
+            RestoreDC(dc, -1);
     }
     EndPaint(wnd, &ps);
     if (wnd == g_ui.wnd)
@@ -7465,8 +7530,23 @@ static void paint(HWND wnd)
     }
 }
 
+static int scrolling(void);
+static void settle_later(void);
+static int g_redraw_deferred; /* a whole repaint asked for while scrolling: done once the wheel rests */
+
 static void redraw(void)
 {
+    /*
+     * Gateway events and timers repaint everything, which takes one or two
+     * refreshes of the display: while the wheel turns, one would make the
+     * list stutter.
+     */
+    if (scrolling() || folder_moving()) {
+        g_redraw_deferred = 1;
+        settle_later();
+        return;
+    }
+    g_redraw_deferred = 0;
     InvalidateRect(g_ui.wnd, NULL, FALSE);
     if (g_ui.pop)
         InvalidateRect(g_ui.pop, NULL, FALSE); /* images it waits for arrive through the main window */
@@ -14449,6 +14529,20 @@ static int friends_active_w(int w)
     return w >= S(860) ? S(FR_ACTIVE_W) : 0;
 }
 
+/* The friends page's columns in the window: its list, or Active Now (empty when there is no room for it). */
+static RECT friends_rect(int active)
+{
+    RECT r;
+
+    GetClientRect(g_ui.wnd, &r);
+    r.left = S(RAIL_W + SIDE_W);
+    if (active)
+        r.left = r.right - friends_active_w(r.right - r.left);
+    else
+        r.right -= friends_active_w(r.right - r.left);
+    return r;
+}
+
 static int friends_search_y(void)
 {
     return S(HEADER_H) + S(12);
@@ -17553,6 +17647,112 @@ static RECT messages_rect(void)
     return r;
 }
 
+static RECT members_rect(void)
+{
+    RECT r;
+
+    GetClientRect(g_ui.wnd, &r);
+    r.left = main_right();
+    return r;
+}
+
+/* What hovering an item of kind HIT_* changes: a channel its column, a server the rail and its tooltip. 0: anywhere. */
+static int hover_rect(int kind, RECT *r)
+{
+    GetClientRect(g_ui.wnd, r);
+    switch (kind) {
+    case HIT_NONE:
+        SetRectEmpty(r);
+        return 1;
+    case HIT_CHANNEL:
+        r->left = S(RAIL_W);
+        r->right = S(RAIL_W + SIDE_W);
+        return 1;
+    case HIT_HOME:
+    case HIT_GUILD:
+    case HIT_FOLDER:
+        r->right = S(RAIL_W) + S(4) + S(320); /* paint_tooltip's widest */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Message i's row and its toolbar (which floats over the message above): what hovering it changes. */
+static void redraw_msg(int i)
+{
+    RECT r = messages_rect();
+    int top, bottom;
+
+    if (i < 0 || i >= g_ui.nmsgs)
+        return;
+    top = msg_top(i);
+    bottom = top - divider_h(&g_ui.msgs[i]) + msg_height(&g_ui.msgs[i]);
+    if (bottom < top + S(TOOL_BTN) + S(8))
+        bottom = top + S(TOOL_BTN) + S(8);
+    {
+        /* and the toolbar's tooltip, which can reach higher or lower */
+        RECT t = toolbar_dirty(i);
+        if (t.top < top)
+            top = t.top;
+        if (t.bottom > bottom)
+            bottom = t.bottom;
+    }
+    if (top - S(24) > r.top)
+        r.top = top - S(24);
+    if (bottom < r.bottom)
+        r.bottom = bottom;
+    if (r.bottom > r.top)
+        redraw_rect(r);
+}
+
+/*
+ * The message list scrolled by dy pixels (down when positive): the pixels on
+ * screen move, and only what comes into view is painted, with what stays in
+ * place over it (scrollbar, the bars at its ends). Not while something
+ * floats over the list: then it is painted whole.
+ * What is on screen must be current: the caller paints what was pending
+ * (UpdateWindow) before moving the list.
+ */
+static void scroll_messages(int dy)
+{
+    RECT a = message_area(), r, was;
+    int view = a.bottom - a.top;
+
+    if (!dy)
+        return;
+    if (g_ui.pins_open || g_ui.results_open || g_ui.ac_kind != AC_NONE || (g_ui.pop && !g_ui.pop_docked) || g_ui.picker ||
+        g_ui.confirm || g_ui.share_pick || g_ui.card_channel[0] || g_ui.react_shown || dy >= view / 2 || -dy >= view / 2) {
+        redraw_rect(messages_rect());
+        return;
+    }
+    ScrollWindowEx(g_ui.wnd, 0, dy, &a, &a, NULL, NULL, SW_INVALIDATE);
+    /*
+     * Each piece painted again costs a pass of the whole paint: as few as
+     * can be. The scrollbar thumb: where it is, where it was, and where the
+     * move took its old pixels, in one box.
+     */
+    if (msg_thumb(g_ui.msg_scroll, &r) && msg_thumb(g_ui.msg_scroll - dy, &was)) {
+        UnionRect(&r, &r, &was);
+        OffsetRect(&was, 0, dy);
+        UnionRect(&r, &r, &was);
+        InflateRect(&r, S(2), S(2));
+        redraw_rect(r);
+    }
+    if (g_ui.detached || g_ui.ntyping) {
+        r = messages_rect();
+        r.top = a.bottom - S(48); /* "Jump To Present", "X is typing...": they stay over the list's end */
+        redraw_rect(r);
+    }
+    if (g_ui.hover_msg >= 0 && g_ui.hover_msg < g_ui.nmsgs) {
+        /* The hovered message's toolbar and its tooltip, and where their pixels went if held at the top. */
+        r = toolbar_dirty(g_ui.hover_msg);
+        redraw_rect(r);
+        OffsetRect(&r, 0, dy);
+        redraw_rect(r);
+    }
+}
+
 /* ---- Selecting messages' text ---- */
 
 /* Where the text of message m starts, the message starting at `top`. */
@@ -17704,6 +17904,290 @@ static int sel_mouse(UINT msg, int x, int y)
     return 0;
 }
 
+/* ---- Smooth scrolling ----
+ * As in Discord (Chromium): a wheel notch glides over GLIDE_MS, fast then
+ * slowing down, one step at each refresh of the display; notches coming
+ * meanwhile push the end further. A touchpad's fine steps follow the fingers.
+ */
+
+#define GLIDE_MS 150.0
+#define GLIDE_GAP_MS (1000.0 / 60) /* a longer wait between steps is a hitch: the glide waits rather than jump */
+
+enum { GL_NONE, GL_MSGS, GL_SIDE, GL_RAIL, GL_MEMBERS, GL_FRIENDS, GL_FORUM, GL_RESULTS, GL_PINS };
+
+static struct {
+    int kind;        /* GL_*: the list gliding */
+    double from, to; /* its positions, growing as the wheel turns down */
+    double t0, dur;  /* when it set off and how long it takes, in ms */
+    double prev;     /* its last step, in ms */
+    int last;        /* where it put the list: anything else moving it stops the glide */
+} g_glide;
+
+#define SETTLE_MS 400 /* the wheel at rest that long: scrolling is over */
+
+static DWORD g_glide_end; /* when the last glide stopped (GetTickCount()), 0 once settled */
+
+static int glide_active(void)
+{
+    return g_glide.kind != GL_NONE;
+}
+
+/* A list glides, or did a moment ago and the next notch may come. */
+static int scrolling(void)
+{
+    return glide_active() || (g_glide_end && GetTickCount() - g_glide_end < SETTLE_MS);
+}
+
+/*
+ * Whole repaints held back are done SETTLE_MS after the last glide, unless
+ * another sets off, or once a folder has opened or closed.
+ */
+static void settle_later(void)
+{
+    UINT wait = FOLDER_MS + 20;
+
+    if (glide_active())
+        return; /* its end sets the timer */
+    if (g_glide_end && GetTickCount() - g_glide_end < SETTLE_MS)
+        wait = SETTLE_MS - (UINT)(GetTickCount() - g_glide_end);
+    SetTimer(g_ui.wnd, TIMER_SETTLE, wait, NULL);
+}
+
+static void glide_stopped(void)
+{
+    g_glide.kind = GL_NONE;
+    g_glide_end = GetTickCount();
+    if (g_redraw_deferred)
+        settle_later();
+}
+
+static void settle_now(void)
+{
+    KillTimer(g_ui.wnd, TIMER_SETTLE);
+    if (glide_active())
+        return; /* its end sets the timer again */
+    if (scrolling()) { /* woken a little early */
+        settle_later();
+        return;
+    }
+    g_glide_end = 0;
+    if (g_redraw_deferred)
+        redraw(); /* held back once more if a folder still moves */
+}
+
+static double glide_now(void)
+{
+    LARGE_INTEGER t;
+
+    if (!g_ui.qpf.QuadPart)
+        QueryPerformanceFrequency(&g_ui.qpf);
+    QueryPerformanceCounter(&t);
+    return (double)t.QuadPart * 1000.0 / (double)g_ui.qpf.QuadPart;
+}
+
+/* The scroll position of list `kind`; *sign turns it to grow as the wheel turns down. */
+static int *glide_value(int kind, int *sign)
+{
+    *sign = 1;
+    switch (kind) {
+    case GL_MSGS:
+        *sign = -1; /* counted up from the bottom */
+        return &g_ui.msg_scroll;
+    case GL_SIDE: return &g_ui.side_scroll;
+    case GL_RAIL: return &g_ui.rail_scroll;
+    case GL_MEMBERS: return &g_ui.ml_scroll;
+    case GL_FRIENDS: return &g_ui.friend_scroll;
+    case GL_FORUM: return &g_ui.forum_scroll;
+    case GL_RESULTS: return &g_ui.results_scroll;
+    default: return &g_ui.pins_scroll;
+    }
+}
+
+static void update_hover(int x, int y);
+
+static void clamp_to(int *v, int max)
+{
+    if (*v > max)
+        *v = max;
+    if (*v < 0)
+        *v = 0;
+}
+
+/* Puts list `kind` at `pos`, kept within its bounds (and what follows a move: loading, members). Returns where it is. */
+static int glide_set(int kind, int pos)
+{
+    int sign, *v = glide_value(kind, &sign);
+    RECT r;
+
+    *v = sign * pos;
+    switch (kind) {
+    case GL_MSGS:
+        clamp_msg_scroll();
+        maybe_load_older();
+        break;
+    case GL_MEMBERS:
+        ml_clamp();
+        ml_request_visible();
+        break;
+    case GL_FRIENDS:
+        if (g_ui.friend_scroll < 0)
+            g_ui.friend_scroll = 0;
+        break;
+    case GL_FORUM:
+        clamp_to(v, g_ui.forum_content - S(HEADER_H));
+        return *v;
+    case GL_RESULTS:
+        r = results_rect();
+        clamp_to(v, g_ui.results_content - (r.bottom - r.top - S(56)));
+        return *v;
+    case GL_PINS:
+        r = pins_rect();
+        clamp_to(v, g_ui.pins_content - (r.bottom - r.top - S(56)));
+        return *v;
+    }
+    clamp_scroll();
+    return sign * *v;
+}
+
+/* After a step: the list is painted again, alone, and what is under the mouse changed with it. */
+static void glide_moved(int kind, int dy, int last)
+{
+    RECT r;
+    POINT pt;
+
+    GetClientRect(g_ui.wnd, &r);
+    switch (kind) {
+    case GL_MSGS: r = messages_rect(); break;
+    case GL_MEMBERS: r = members_rect(); break;
+    case GL_SIDE:
+        r.left = S(RAIL_W);
+        r.right = S(RAIL_W + SIDE_W);
+        break;
+    case GL_FRIENDS: r = friends_rect(0); break; /* Active Now beside it stays */
+    case GL_FORUM: r.left = S(RAIL_W + SIDE_W); break;
+    case GL_RESULTS: r = results_rect(); break;
+    case GL_PINS: r = pins_rect(); break;
+    default: { /* the rail, and its tooltip when it shows one: it reaches out of it */
+        RECT tip;
+        r.right = S(RAIL_W);
+        if ((g_ui.hover_kind == HIT_HOME || g_ui.hover_kind == HIT_GUILD || g_ui.hover_kind == HIT_FOLDER) &&
+            hover_rect(g_ui.hover_kind, &tip))
+            r.right = tip.right;
+        break;
+    }
+    }
+    /* The messages' pixels move; their last step paints them whole, for animated images to know where they are. */
+    if (kind == GL_MSGS && !last)
+        scroll_messages(dy);
+    else
+        redraw_rect(r);
+    /*
+     * What is under the mouse once the list stops, as Chromium does: on each
+     * step, the row it leaves and the one it reaches would be painted again
+     * on top of the list, and a hover that repaints the whole window misses
+     * the refresh.
+     */
+    if (!last)
+        return;
+    GetCursorPos(&pt);
+    ScreenToClient(g_ui.wnd, &pt);
+    update_hover(pt.x, pt.y);
+}
+
+/*
+ * Where the glide is at time `now` (ms), eased out: fast at first, slowing
+ * to a stop on its end; *speed in pixels per ms if asked. Returns how far
+ * through it is, 0 to 1.
+ */
+static double glide_at(double now, double *pos, double *speed)
+{
+    double s = (now - g_glide.t0) / g_glide.dur, d = g_glide.to - g_glide.from, r;
+
+    s = s < 0 ? 0 : s > 1 ? 1 : s;
+    r = 1 - s;
+    *pos = g_glide.from + d * (1 - r * r * r);
+    if (speed)
+        *speed = 3 * d * r * r / g_glide.dur;
+    return s;
+}
+
+static void glide_by(int kind, int delta, int notch)
+{
+    int sign, *v = glide_value(kind, &sign), pos = *v * sign;
+
+    if (g_glide.kind == kind && !notch) { /* fine steps while a notch glides: the end moves */
+        g_glide.to += delta;
+        return;
+    }
+    if (!notch) {
+        glide_stopped();
+        glide_set(kind, pos + delta);
+        glide_moved(kind, 0, 1);
+        return;
+    }
+    {
+        double now = glide_now(), at = pos, speed = 0, to = (g_glide.kind == kind ? g_glide.to : pos) + delta, d;
+        if (g_glide.kind == kind)
+            glide_at(now, &at, &speed);
+        d = to - at;
+        /*
+         * Setting off as an ease-out goes at 3 d / dur: a notch coming while it
+         * glides keeps the speed it has by taking the time that speed asks for
+         * (within bounds), instead of jolting faster or slower.
+         */
+        g_glide.dur = GLIDE_MS;
+        if (speed * d > 0) {
+            g_glide.dur = 3 * d / speed;
+            if (g_glide.dur < GLIDE_MS / 2)
+                g_glide.dur = GLIDE_MS / 2;
+            if (g_glide.dur > GLIDE_MS * 2)
+                g_glide.dur = GLIDE_MS * 2;
+        }
+        g_glide.kind = kind;
+        g_glide.from = at;
+        g_glide.to = to;
+        g_glide.t0 = now;
+        g_glide.prev = now;
+        g_glide.last = pos;
+    }
+    vsync_request();
+}
+
+/* At each refresh of the display: the gliding list's next step. */
+static void glide_tick(void)
+{
+    int sign, *v, want, got, before, kind = g_glide.kind;
+    double t, at, now;
+
+    if (!g_glide.kind)
+        return;
+    v = glide_value(g_glide.kind, &sign);
+    if (*v * sign != g_glide.last) { /* moved by something else: a jump, a key */
+        glide_stopped();
+        return;
+    }
+    /* paced on the display's refreshes, not on when this message got through: even steps */
+    now = g_vsync_ms > g_glide.prev ? g_vsync_ms : glide_now();
+    if (now - g_glide.prev > GLIDE_GAP_MS)
+        g_glide.t0 += now - g_glide.prev - GLIDE_GAP_MS;
+    g_glide.prev = now;
+    t = glide_at(now, &at, NULL);
+    want = (int)(at < 0 ? at - 0.5 : at + 0.5);
+    if (kind == GL_MSGS)
+        UpdateWindow(g_ui.wnd); /* the list on screen is current before it moves */
+    before = g_glide.last;
+    got = glide_set(g_glide.kind, want);
+    g_glide.last = got;
+    if (t >= 1.0 || got != want) /* there, or at an end of the list */
+        glide_stopped();
+    else
+        vsync_request();
+    if (got != before || !g_glide.kind) /* the last step paints too */
+        glide_moved(kind, sign * (got - before), !g_glide.kind); /* back in the list's own terms: msg_scroll's change */
+    /* Painted now, while the display shows this refresh: the next one never shows the list moved but half drawn. */
+    UpdateWindow(g_ui.wnd);
+}
+
 /* ---- Window procedure ---- */
 
 /* Whether the mouse is on the box drawn around one of the main window's text boxes: an I-beam there too. */
@@ -17740,16 +18224,17 @@ static void update_hover(int x, int y)
     part_t part = {PART_NONE, -1};
 
     if (um != g_ui.under_msg || ul != g_ui.under_link) {
+        redraw_msg(g_ui.under_msg); /* the link's underline, off and on */
+        redraw_msg(um);
         g_ui.under_msg = um;
         g_ui.under_link = ul;
-        redraw();
     }
 
     {
         int mh = ml_hit(x, y, NULL);
         if (mh != g_ui.ml_hover) {
             g_ui.ml_hover = mh;
-            redraw();
+            redraw_rect(members_rect());
         }
         link = link || mh >= 0;
     }
@@ -17833,7 +18318,7 @@ static void update_hover(int x, int y)
         m = g_ui.hover_msg;
     if (tool != g_ui.hover_tool) {
         g_ui.hover_tool = tool;
-        redraw();
+        redraw_msg(g_ui.hover_msg); /* its toolbar */
     }
     link = link || tool_action >= 0; /* a hand on the buttons, not between them */
 
@@ -17842,18 +18327,28 @@ static void update_hover(int x, int y)
 
     hit_test(x, y, &kind, &index);
     if (m != g_ui.hover_msg || link != g_ui.hover_link) {
+        if (m != g_ui.hover_msg) { /* the link flag only picks the cursor */
+            redraw_msg(g_ui.hover_msg);
+            redraw_msg(m);
+        }
         g_ui.hover_msg = m;
         g_ui.hover_link = link;
-        redraw();
     }
     if (kind != g_ui.hover_kind || index != g_ui.hover_index || beam != g_sel.hover) {
         g_sel.hover = beam;
         SetCursor(LoadCursorW(NULL, (LPCWSTR)(kind != HIT_NONE || link ? IDC_HAND : g_sel.hover ? IDC_IBEAM : IDC_ARROW)));
     }
     if (kind != g_ui.hover_kind || index != g_ui.hover_index) {
+        RECT was, now;
+        int a = hover_rect(g_ui.hover_kind, &was), b = hover_rect(kind, &now), whole = !a || !b;
         g_ui.hover_kind = kind;
         g_ui.hover_index = index;
-        redraw();
+        if (whole) {
+            redraw();
+        } else {
+            redraw_rect(was);
+            redraw_rect(now);
+        }
     }
 }
 
@@ -18351,69 +18846,34 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             redraw();
             return 0;
         }
-        if (forum_view() && pt.x >= S(RAIL_W + SIDE_W) && pt.x < main_right()) {
-            int max = g_ui.forum_content - (int)(S(HEADER_H));
-            g_ui.forum_scroll += delta;
-            if (g_ui.forum_scroll > max)
-                g_ui.forum_scroll = max;
-            if (g_ui.forum_scroll < 0)
-                g_ui.forum_scroll = 0;
-            redraw();
-            return 0;
+        {
+            int kind = forum_view() && pt.x >= S(RAIL_W + SIDE_W) && pt.x < main_right() ? GL_FORUM : GL_NONE;
+            RECT r;
+            if (!kind && g_ui.results_open && (r = results_rect(), PtInRect(&r, pt)))
+                kind = GL_RESULTS;
+            else if (!kind && g_ui.pins_open && (r = pins_rect(), PtInRect(&r, pt)))
+                kind = GL_PINS;
+            else if (!kind && friends_view() && pt.x >= S(RAIL_W + SIDE_W))
+                kind = GL_FRIENDS;
+            else if (!kind && members_shown() && pt.x >= main_right())
+                kind = GL_MEMBERS;
+            else if (!kind && pt.x < S(RAIL_W))
+                kind = GL_RAIL;
+            else if (!kind && pt.x < S(RAIL_W + SIDE_W))
+                kind = GL_SIDE;
+            else if (!kind && open_is_text())
+                kind = GL_MSGS;
+            if (kind)
+                /* a mouse's notches glide, a touchpad's finer steps follow the fingers */
+                glide_by(kind, delta, GET_WHEEL_DELTA_WPARAM(wp) % WHEEL_DELTA == 0);
         }
-        if (g_ui.results_open) {
-            RECT sr = results_rect();
-            if (pt.x >= sr.left && pt.x < sr.right && pt.y >= sr.top && pt.y < sr.bottom) {
-                int max = g_ui.results_content - (sr.bottom - sr.top - S(56));
-                g_ui.results_scroll += delta;
-                if (g_ui.results_scroll > max)
-                    g_ui.results_scroll = max;
-                if (g_ui.results_scroll < 0)
-                    g_ui.results_scroll = 0;
-                redraw();
-                return 0;
-            }
-        }
-        if (g_ui.pins_open) {
-            RECT pr = pins_rect();
-            if (pt.x >= pr.left && pt.x < pr.right && pt.y >= pr.top && pt.y < pr.bottom) {
-                int max = g_ui.pins_content - (pr.bottom - pr.top - S(56));
-                g_ui.pins_scroll += delta;
-                if (g_ui.pins_scroll > max)
-                    g_ui.pins_scroll = max;
-                if (g_ui.pins_scroll < 0)
-                    g_ui.pins_scroll = 0;
-                redraw();
-                return 0;
-            }
-        }
-        if (friends_view() && pt.x >= S(RAIL_W + SIDE_W)) {
-            g_ui.friend_scroll += delta;
-            if (g_ui.friend_scroll < 0)
-                g_ui.friend_scroll = 0;
-        } else if (members_shown() && pt.x >= main_right()) {
-            g_ui.ml_scroll += delta;
-            ml_clamp();
-            ml_request_visible();
-        } else if (pt.x < S(RAIL_W)) {
-            g_ui.rail_scroll += delta;
-        } else if (pt.x < S(RAIL_W + SIDE_W)) {
-            g_ui.side_scroll += delta;
-        } else if (open_is_text()) {
-            g_ui.msg_scroll -= delta;
-            clamp_msg_scroll();
-            maybe_load_older();
-        }
-        clamp_scroll();
-        update_hover(pt.x, pt.y);
-        redraw();
         return 0;
     }
     case WM_TIMER:
         if (wp == TIMER_ACTIVE) {
-            /* the elapsed times move on while Active Now shows; the next paint arms it again */
+            /* the elapsed times move on while Active Now shows; the next paint arms it again (it alone) */
             KillTimer(g_ui.wnd, TIMER_ACTIVE);
-            redraw();
+            redraw_rect(friends_rect(1));
             return 0;
         }
         if (wp == TIMER_ANIM) {
@@ -18461,6 +18921,10 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 typing_redraw();
             return 0;
         }
+        if (wp == TIMER_SETTLE) {
+            settle_now();
+            return 0;
+        }
         if (wp == TIMER_ACK) {
             KillTimer(wnd, TIMER_ACK);
             if (g_ui.ack_pending && g_ui.model && g_ui.channel >= 0) {
@@ -18482,7 +18946,7 @@ static LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_VSYNC:
-        on_vsync();
+        on_vsync((LONGLONG)lp);
         return 0;
     case WM_TRAY:
         switch (LOWORD(lp)) {

@@ -282,6 +282,13 @@ extern "C" int r_visible(int y, int h)
     return y < r.bottom && y + h > r.top;
 }
 
+extern "C" int r_visible_box(int x, int y, int w, int h)
+{
+    RECT r = clip_rect();
+
+    return intersect(&r, x, y, w, h);
+}
+
 extern "C" void r_clip(int x, int y, int w, int h)
 {
     RECT r = g_nclip ? g_clip[g_nclip - 1] : RECT{-100000, -100000, 100000, 100000};

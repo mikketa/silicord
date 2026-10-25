@@ -26,6 +26,8 @@ int r_begin(HDC dc, int w, int h);
 void r_end(HDC dc);
 /* Whether rows [y, y + h) can be seen in the current band and clip: lets callers skip work. */
 int r_visible(int y, int h);
+/* Same for the box (x, y, w, h): when 0, nothing drawn there would show. */
+int r_visible_box(int x, int y, int w, int h);
 
 void r_fill(int x, int y, int w, int h, unsigned argb);
 void r_round(int x, int y, int w, int h, int radius, unsigned argb);

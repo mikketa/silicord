@@ -53,7 +53,11 @@ static DWORD WINAPI vsync_main(void *arg)
         if (!output || FAILED(IDXGIOutput_WaitForVBlank(output)))
             if (FAILED(DwmFlush()))
                 Sleep(4);
-        PostMessageW(g_vs.wnd, g_vs.msg, 0, 0);
+        {
+            LARGE_INTEGER now; /* when the refresh happened: steps paced on it come at even intervals */
+            QueryPerformanceCounter(&now);
+            PostMessageW(g_vs.wnd, g_vs.msg, 0, (LPARAM)now.QuadPart);
+        }
     }
 }
 

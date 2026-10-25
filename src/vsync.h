@@ -6,6 +6,7 @@
  * once per refresh of the monitor it is on (300 times a second on a 300 Hz
  * screen), instead of on a timer. Nothing runs while nothing moves: each
  * vsync_request() asks for one message, after the next refresh.
+ * Its lParam is the QueryPerformanceCounter() value read at that refresh.
  */
 void vsync_start(HWND wnd, UINT msg);
 void vsync_request(void);
