@@ -71,6 +71,18 @@ struct r_image {
     lottie_t *lottie;     /* Lottie stickers: each frame drawn as SVG when due */
     double lottie_first, lottie_step;
     svg_target_t *target; /* ... into a Direct2D target kept while it plays (UI thread) */
+    /*
+     * A still image drawn at another size is resampled into a copy of that
+     * size, kept for the next draws, two sizes at most (draw_image). Its
+     * version changes when its pixels may have, through r_image_bits().
+     */
+    struct {
+        int w, h;
+        float su, sv, sw, sh;
+        unsigned version;
+        BYTE *pixels;
+    } sized[2];
+    unsigned version, sized_next;
 };
 
 static IDWriteFactory *g_dw;
@@ -597,23 +609,77 @@ static tap_t g_taps[MAX_TAPS];
 /* Draws the source rectangle (su, sv, sw, sh) of img into (x, y, w, h), rounded by radius. */
 static float g_image_alpha = 1; /* r_image_fade(): how opaque the image is drawn */
 
-static void draw_image(const r_image_t *img, float su, float sv, float sw, float sh, int x, int y, int w, int h, int radius)
+#define SIZED_MAX (128 * 128) /* pixels of the largest resampled copy kept */
+
+/*
+ * The source rectangle of a still image resampled to w x h, as draw_image
+ * samples it pixel by pixel (the same operations: the same bytes), made
+ * once for the draws at that size; NULL when it is not kept.
+ */
+static const BYTE *sized_copy(r_image_t *img, float su, float sv, float sw, float sh, int w, int h)
+{
+    float kx = sw / (float)w, ky = sh / (float)h;
+    int shrink = kx > 1.5f || ky > 1.5f, k;
+    BYTE *out;
+
+    if (w * h > SIZED_MAX || img->frames > 1 || img->apng || img->lottie)
+        return NULL;
+    for (k = 0; k < 2; k++)
+        if (img->sized[k].pixels && img->sized[k].w == w && img->sized[k].h == h && img->sized[k].su == su &&
+            img->sized[k].sv == sv && img->sized[k].sw == sw && img->sized[k].sh == sh && img->sized[k].version == img->version)
+            return img->sized[k].pixels;
+    k = img->sized_next++ & 1;
+    mem_free(img->sized[k].pixels);
+    out = img->sized[k].pixels = (BYTE *)mem_alloc((size_t)w * h * 4);
+    img->sized[k].w = w;
+    img->sized[k].h = h;
+    img->sized[k].su = su;
+    img->sized[k].sv = sv;
+    img->sized[k].sw = sw;
+    img->sized[k].sh = sh;
+    img->sized[k].version = img->version;
+    for (int j = 0; j < h; j++) {
+        float v = sv + ((float)j + 0.5f) * ky;
+        tap_t ty = bilinear_tap(v, (int)img->h);
+        for (int i = 0; i < w; i++, out += 4) {
+            float u = su + ((float)i + 0.5f) * kx;
+            __m128i s = shrink ? sample_box(img, u - kx / 2, v - ky / 2, u + kx / 2, v + ky / 2)
+                               : sample_bilinear(img, bilinear_tap(u, (int)img->w), ty);
+            s = _mm_packus_epi16(_mm_packs_epi32(s, s), s); /* four lanes of 0 to 255 back to bytes */
+            *(UINT32 *)out = (UINT32)_mm_cvtsi128_si32(s);
+        }
+    }
+    return img->sized[k].pixels;
+}
+
+static void draw_image(r_image_t *img, float su, float sv, float sw, float sh, int x, int y, int w, int h, int radius)
 {
     RECT r = clip_rect();
     float kx = sw / (float)w, ky = sh / (float)h, rad = (float)imin(radius, imin(w, h) / 2);
     int shrink = kx > 1.5f || ky > 1.5f;
+    const BYTE *pixels;
+    int pw;
 
     if (!img || !img->pixels || w <= 0 || h <= 0 || !intersect(&r, x, y, w, h))
         return;
     /* Drawn whole at its own size: each pixel is a source pixel, which is what filtering would give. */
     int exact = su == 0 && sv == 0 && sw == (float)w && sh == (float)h && img->w == (UINT)w && img->h == (UINT)h;
+    pixels = img->pixels;
+    pw = (int)img->w;
+    /* At another size: from the copy resampled to it, when there is one, as if drawn at its own size. */
+    if (!exact && (pixels = sized_copy(img, su, sv, sw, sh, w, h)) != NULL) {
+        exact = 1;
+        pw = w;
+    } else if (!exact) {
+        pixels = img->pixels;
+    }
     /* A column's horizontal taps are the same on every row: worked out once. */
     if (!exact && !shrink)
         for (int xx = r.left; xx < r.right && xx - r.left < MAX_TAPS; xx++)
             g_taps[xx - r.left] = bilinear_tap(su + ((float)xx + 0.5f - (float)x) * kx, (int)img->w);
     for (int yy = r.top; yy < r.bottom; yy++) {
         float py = (float)yy + 0.5f, v = sv + (py - (float)y) * ky;
-        const BYTE *src = exact ? img->pixels + ((size_t)(yy - y) * img->w + (size_t)(r.left - x)) * 4 : NULL;
+        const BYTE *src = exact ? pixels + ((size_t)(yy - y) * pw + (size_t)(r.left - x)) * 4 : NULL;
         /* Rows clear of the corners are covered whole, as rr_cover() would find. */
         int plain = rad <= 0 || (py - (float)y >= rad + 1 && (float)(y + h) - py >= rad + 1);
         /*
@@ -976,9 +1042,14 @@ extern "C" unsigned r_image_advance(r_image_t *img, unsigned now)
 
 extern "C" size_t r_image_bytes(const r_image_t *img)
 {
+    size_t sized = 0;
+
+    for (int k = 0; img && k < 2; k++)
+        if (img->sized[k].pixels)
+            sized += (size_t)img->sized[k].w * img->sized[k].h * 4;
     return img ? sizeof *img + (size_t)img->w * img->h * 4 * (img->saved ? 2 : 1) + img->file_n +
                      (img->apng ? apng_bytes(img->apng) : 0) + lottie_bytes(img->lottie) +
-                     (img->target ? (size_t)img->w * img->h * 4 : 0)
+                     (img->target ? (size_t)img->w * img->h * 4 : 0) + sized
                : 0;
 }
 
@@ -2983,7 +3054,10 @@ extern "C" r_image_t *r_image_blank(int w, int h)
 
 extern "C" unsigned *r_image_bits(r_image_t *img)
 {
-    return img ? (unsigned *)img->pixels : NULL;
+    if (!img)
+        return NULL;
+    img->version++; /* written through this: the copies made from it are out of date */
+    return (unsigned *)img->pixels;
 }
 
 extern "C" void r_image_size(const r_image_t *img, int *w, int *h)
@@ -3011,6 +3085,8 @@ extern "C" void r_image_free(r_image_t *img)
     mem_free(img->file);
     mem_free(img->saved);
     mem_free(img->pixels);
+    for (int k = 0; k < 2; k++)
+        mem_free(img->sized[k].pixels);
     mem_free(img);
 }
 

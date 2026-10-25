@@ -174,6 +174,20 @@ void entry(void)
     }
 
     {
+        /* A still image drawn at another size is resampled once, and again once its pixels change. */
+        r_image_t *img = r_image_blank(8, 8);
+        unsigned *px8 = r_image_bits(img);
+        for (int k = 0; k < 64; k++)
+            px8[k] = 0xFFFF0000;
+        check(draw_gif(dc, img) == 0xFF0000 && draw_gif(dc, img) == 0xFF0000, "a still image drawn larger, twice");
+        px8 = r_image_bits(img);
+        for (int k = 0; k < 64; k++)
+            px8[k] = 0xFF0000FF;
+        check(draw_gif(dc, img) == 0x0000FF, "and again once its pixels change");
+        r_image_free(img);
+    }
+
+    {
         /* Unicode emoji go through the client's images, the font's glyph standing in while they load. */
         static const char text[] = "hi \xF0\x9F\x8C\xB8";
         r_rich_style_t st = {.body = mid, .mono = mid, .h1 = big, .h2 = big, .h3 = big, .subtext = mid, .ink = 0xFFFFFFFF,
