@@ -5611,6 +5611,102 @@ static void reserve_msgs(int extra)
     g_ui.msgs = mem_realloc(g_ui.msgs, (size_t)g_ui.cap_msgs * sizeof *g_ui.msgs);
 }
 
+/* ---- Recently opened channels ----
+ * As in Discord's client, the messages of the last channels left stay in
+ * memory: going back shows them at once while the fresh ones load.
+ */
+
+#define MSG_CACHE 8       /* channels */
+#define MSG_CACHE_KEEP 100 /* newest messages kept for each */
+
+static struct {
+    char channel[24];
+    msg_t *msgs;
+    int n, has_more;
+    unsigned used; /* when it was left, to replace the oldest */
+} g_msg_cache[MSG_CACHE];
+static unsigned g_msg_cache_clock;
+static int g_msg_cache_shown; /* the list shows kept messages while the fresh ones load */
+
+static void msg_cache_free(int k)
+{
+    for (int i = 0; i < g_msg_cache[k].n; i++)
+        ui_msg_free(&g_msg_cache[k].msgs[i]);
+    mem_free(g_msg_cache[k].msgs);
+    ZeroMemory(&g_msg_cache[k], sizeof g_msg_cache[k]);
+}
+
+static int msg_cache_find(const char *channel)
+{
+    for (int k = 0; k < MSG_CACHE; k++)
+        if (g_msg_cache[k].channel[0] && lstrcmpA(g_msg_cache[k].channel, channel) == 0)
+            return k;
+    return -1;
+}
+
+static void msg_cache_clear(void)
+{
+    for (int k = 0; k < MSG_CACHE; k++)
+        msg_cache_free(k);
+}
+
+/* Keeps the open channel's messages as it is left (not a jump into its past), emptying the list. */
+static void msg_cache_put(void)
+{
+    int k = msg_cache_find(g_ui.msgs_channel), skip = g_ui.nmsgs > MSG_CACHE_KEEP ? g_ui.nmsgs - MSG_CACHE_KEEP : 0;
+
+    if (!g_ui.msgs_channel[0] || !g_ui.nmsgs || g_ui.detached || g_ui.msgs_status || (g_ui.msgs_loading && !g_msg_cache_shown))
+        return;
+    if (k < 0)
+        for (int i = 0; i < MSG_CACHE; i++)
+            if (k < 0 || g_msg_cache[i].used < g_msg_cache[k].used)
+                k = i;
+    msg_cache_free(k);
+    lstrcpynA(g_msg_cache[k].channel, g_ui.msgs_channel, sizeof g_msg_cache[k].channel);
+    g_msg_cache[k].msgs = mem_alloc((size_t)(g_ui.nmsgs - skip) * sizeof *g_msg_cache[k].msgs);
+    g_msg_cache[k].has_more = g_ui.msgs_has_more || skip;
+    g_msg_cache[k].used = ++g_msg_cache_clock;
+    for (int i = 0; i < g_ui.nmsgs; i++) {
+        if (i < skip) {
+            ui_msg_free(&g_ui.msgs[i]);
+            continue;
+        }
+        drop_view(&g_ui.msgs[i]); /* laid out again when shown */
+        g_msg_cache[k].msgs[g_msg_cache[k].n++] = g_ui.msgs[i];
+    }
+    g_ui.nmsgs = 0;
+}
+
+/* Shows the messages kept for `channel`, if any: the list must be empty. */
+static int msg_cache_take(const char *channel)
+{
+    int k = msg_cache_find(channel);
+
+    if (k < 0)
+        return 0;
+    reserve_msgs(g_msg_cache[k].n);
+    CopyMemory(g_ui.msgs, g_msg_cache[k].msgs, (size_t)g_msg_cache[k].n * sizeof *g_ui.msgs);
+    g_ui.nmsgs = g_msg_cache[k].n;
+    g_ui.msgs_has_more = g_msg_cache[k].has_more;
+    g_msg_cache[k].n = 0; /* they are the list's now */
+    msg_cache_free(k);
+    return 1;
+}
+
+/*
+ * A live event for a channel no longer open (it was on its way as we left):
+ * its kept messages would miss it, so they go. Live events only come for
+ * the open channel, so the kept ones may lack what came since; the fetch
+ * made when the channel opens again brings it.
+ */
+static void msg_cache_event(const msg_batch_t *b)
+{
+    int k = msg_cache_find(b->channel_id);
+
+    if (k >= 0 && b->kind != BATCH_HISTORY && b->kind != BATCH_OLDER && b->kind != BATCH_PINS && b->kind != BATCH_SEARCH)
+        msg_cache_free(k);
+}
+
 static int same_reaction(const msg_reaction_t *a, const msg_reaction_t *b)
 {
     if (a->emoji_id[0] || b->emoji_id[0])
@@ -5668,6 +5764,7 @@ static void on_batch(msg_batch_t *b)
         return;
     }
     if (lstrcmpA(b->channel_id, g_ui.msgs_channel) != 0) {
+        msg_cache_event(b);
         msg_batch_free(b);
         return;
     }
@@ -5680,7 +5777,9 @@ static void on_batch(msg_batch_t *b)
         g_ui.msgs_loading = 0;
         g_ui.msgs_status = b->status;
         g_ui.msgs_has_more = b->has_more;
-        g_ui.msg_scroll = 0;
+        if (!g_msg_cache_shown) /* fresh messages over kept ones stay where the reader is */
+            g_ui.msg_scroll = 0;
+        g_msg_cache_shown = 0;
         g_ui.detached = b->around[0] != 0;
         g_ui.log_memory = 1; /* after the next paint lays the messages out */
         reserve_msgs(b->n);
@@ -7602,6 +7701,7 @@ static void hist_push(const char *id)
         InvalidateRect(g_ui.top, NULL, FALSE);
 }
 
+
 static void open_channel(int index)
 {
     const channel_t *c;
@@ -7622,7 +7722,9 @@ static void open_channel(int index)
     typing_clear();
     g_ui.bar = BAR_NONE;
     g_ui.confirm = 0;
+    msg_cache_put();
     free_messages();
+    g_msg_cache_shown = 0;
     g_ui.msg_scroll = 0;
     g_ui.msgs_status = 0;
     g_ui.msgs_older_loading = 0;
@@ -7660,6 +7762,10 @@ static void open_channel(int index)
         app_subscribe(g_ui.model->guilds[g_ui.guild].id, c->id);
     g_ui.msgs_loading = 1;
     g_ui.msgs_has_more = 1;
+    if (msg_cache_take(c->id)) { /* shown now, replaced when the fetch below comes back */
+        g_msg_cache_shown = 1;
+        update_grouping();
+    }
     app_open_channel(c->id);
     app_fetch_messages(c->id, NULL);
 
@@ -7868,6 +7974,7 @@ static void go_to_channel(int i)
 
 static void set_model(model_t *m)
 {
+    msg_cache_clear(); /* another session, maybe another account */
     model_free(g_ui.model);
     mem_free(g_ui.last_channel);
     mem_free(g_ui.collapsed);
@@ -8119,6 +8226,7 @@ static void clear_session(void)
     }
     pop_close();
     profiles_clear();
+    msg_cache_clear();
     members_clear();
     presences_clear();
     rels_clear();
