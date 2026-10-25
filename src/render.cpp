@@ -1,7 +1,8 @@
 /*
- * Software renderer: DirectWrite draws the text (color emoji included) into a
- * GDI bitmap we own, and everything else (anti-aliased shapes, scaled images)
- * is rasterized here. No Direct2D, so no WARP device and its caches.
+ * Software renderer: DirectWrite lays the text out and rasterizes its glyphs,
+ * once each (kept, then blended here), or draws them into a GDI bitmap we own
+ * (color emoji, large text); everything else (anti-aliased shapes, scaled
+ * images) is rasterized here. No Direct2D, so no WARP device and its caches.
  *
  * A frame is drawn in horizontal bands of BAND rows reusing one small bitmap:
  * the caller repeats its whole paint for each band and primitives outside it
@@ -22,6 +23,7 @@ extern "C" {
 #include "apng.h"
 #include "lottie.h"
 #include "mem.h"
+#include "opus_math.h"
 #include "twemoji.h"
 }
 
@@ -90,6 +92,8 @@ static int g_nclip;
 static UINT32 *g_scratch;           /* saved pixels while drawing text */
 static size_t g_scratch_n;
 static r_image_t *(*g_emoji_image)(int index, int px); /* Discord's images of Unicode emoji, once set */
+
+static void glyphs_frame_done(void);
 
 /* ---- Pixels ---- */
 
@@ -253,10 +257,11 @@ extern "C" int r_begin(HDC dc, int w, int h)
         g_y0 += BAND;
     }
     if (g_y0 >= g_y_end || g_y0 >= h || w <= 0 || !ensure_target(w, BAND)) {
-        /* Frame done: the text scratch can reach a band's size, do not keep it between frames. */
+        /* Frame done: the text scratches can reach a band's size, do not keep them between frames. */
         mem_free(g_scratch);
         g_scratch = NULL;
         g_scratch_n = 0;
+        glyphs_frame_done();
         g_active = 0;
         return 0;
     }
@@ -985,6 +990,17 @@ enum { PASS_ALL, PASS_MONO, PASS_COLOR }; /* PASS_MONO: coverage mask, no color 
 struct draw_ctx {
     unsigned argb;
     int pass;
+    /*
+     * draw_layout's: what shows (band, update box, clip) and what the layout
+     * can touch in the band. DirectWrite draws anywhere, opaque: when the ink
+     * is not all inside `vis` or the text is translucent (`guard`), what it
+     * draws is undone outside and made translucent after, from `saved`, the
+     * ink area as it was before DirectWrite first drew there. Glyphs from the
+     * cache are clipped and blended as they go and need none of it.
+     */
+    RECT vis, ink;
+    int guard;
+    UINT32 *saved;
 };
 
 /* A text color, set as a DirectWrite drawing effect on ranges of a layout. */
@@ -1034,6 +1050,293 @@ static void set_aa(DWRITE_TEXT_ANTIALIAS_MODE m)
     }
 }
 
+static UINT32 *scratch(size_t n);
+static void save_rect(const RECT *r, UINT32 *out);
+
+/* DirectWrite is about to draw for draw_layout: keeps what it can change, when that must be undone. */
+static void guard(draw_ctx *c)
+{
+    if (c->guard && !c->saved) {
+        c->saved = scratch((size_t)(c->ink.right - c->ink.left) * (size_t)(c->ink.bottom - c->ink.top));
+        save_rect(&c->ink, c->saved);
+    }
+}
+
+/* ---- Glyph cache ----
+ * DirectWrite's bitmap target rasterizes every glyph again at each draw, then
+ * blends it through GDI: about 2 us a glyph, most of a frame. Instead, the
+ * ClearType coverage of each glyph is made once (IDWriteGlyphRunAnalysis) at
+ * the sixth of a pixel DirectWrite places glyphs at, kept, and added up for
+ * each run: that is the run's own coverage, bit for bit. It is blended here
+ * as the bitmap target does, measured against it: in a space of gamma
+ * GetGamma() (1.8), coverage first raised by GetEnhancedContrast() (0.5),
+ * less for light text and not at all for white (the adjustment Windows
+ * Terminal's renderer documents, dwrite_helpers.hlsl). The result is
+ * DirectWrite's to a level or two of 255.
+ */
+
+#define GLYPH_BUCKETS 1024     /* a power of two */
+#define GLYPH_BUDGET (1 << 21) /* bytes of coverage kept; past it the cache starts over, between frames */
+#define GLYPH_MAX_EM 64.f      /* larger text goes through DirectWrite */
+
+struct glyph_t {
+    glyph_t *next;
+    IDWriteFontFace *face; /* held */
+    float em;
+    UINT16 index;
+    BYTE phase, mode, mm; /* x in sixths of a pixel (3 bits), y in quarters; rendering and measuring modes */
+    int left, top, w, h;  /* coverage box, from the glyph's origin */
+    BYTE cov[1];          /* w * h * 3: red, green and blue coverage */
+};
+
+static glyph_t *g_glyphs[GLYPH_BUCKETS];
+static size_t g_glyph_bytes;
+static int g_ct_ready, g_ct_bgr;  /* g_ct_ready -1: ClearType through DirectWrite only */
+static float g_contrast;
+static UINT16 g_lin[256];         /* a channel in the blending space, 0 to 65535 */
+static BYTE g_unlin[65536];       /* and back, rounded */
+static BYTE *g_run_cov;           /* a run's coverage, its glyphs added up */
+static size_t g_run_cov_n;
+
+static void glyphs_clear(void)
+{
+    for (int b = 0; b < GLYPH_BUCKETS; b++)
+        while (g_glyphs[b]) {
+            glyph_t *g = g_glyphs[b];
+            g_glyphs[b] = g->next;
+            g->face->Release();
+            mem_free(g);
+        }
+    g_glyph_bytes = 0;
+}
+
+/* After a frame: the run buffer goes, and the glyphs if they grew past their budget. */
+static void glyphs_frame_done(void)
+{
+    mem_free(g_run_cov);
+    g_run_cov = NULL;
+    g_run_cov_n = 0;
+    if (g_glyph_bytes > GLYPH_BUDGET)
+        glyphs_clear();
+}
+
+static float powf_(float x, float y)
+{
+    return x <= 0.f ? 0.f : om_exp2(y * om_log2(x));
+}
+
+static int ct_ready(void)
+{
+    if (!g_ct_ready) {
+        DWRITE_PIXEL_GEOMETRY geo = g_params->GetPixelGeometry();
+        float gamma = g_params->GetGamma();
+        int l = 0;
+
+        g_contrast = g_params->GetEnhancedContrast();
+        for (int v = 0; v < 256; v++)
+            g_lin[v] = (UINT16)(powf_((float)v / 255.f, gamma) * 65535.f + .5f);
+        /* each value takes the linear values closer to it than to its neighbours, in its own space */
+        for (int v = 0; v < 256; v++) {
+            int end = v == 255 ? 65536 : (int)(powf_(((float)v + .5f) / 255.f, gamma) * 65535.f + .5f);
+            for (; l < end; l++)
+                g_unlin[l] = (BYTE)v;
+        }
+        g_ct_bgr = geo == DWRITE_PIXEL_GEOMETRY_BGR;
+        g_ct_ready = geo == DWRITE_PIXEL_GEOMETRY_FLAT ? -1 : 1;
+    }
+    return g_ct_ready > 0;
+}
+
+/* Glyph `index` of a run's face at sub-pixel `phase`: from the cache, else rasterized; NULL if it cannot be. */
+static glyph_t *glyph_get(const DWRITE_GLYPH_RUN *run, UINT16 index, int phase, DWRITE_RENDERING_MODE mode,
+                          DWRITE_MEASURING_MODE mm)
+{
+    unsigned h = (unsigned)((size_t)run->fontFace >> 4) * 31u + (unsigned)(run->fontEmSize * 64.f);
+    glyph_t **bucket, *g;
+    IDWriteGlyphRunAnalysis *an;
+    DWRITE_GLYPH_RUN one = *run;
+    FLOAT advance = 0;
+    DWRITE_GLYPH_OFFSET offset = {0, 0};
+    RECT b;
+    UINT32 n;
+    float level;
+
+    h = (h * 31u + index) * 31u + (unsigned)phase;
+    bucket = &g_glyphs[(h ^ h >> 11) & (GLYPH_BUCKETS - 1)];
+    for (g = *bucket; g; g = g->next)
+        if (g->face == run->fontFace && g->em == run->fontEmSize && g->index == index && g->phase == phase &&
+            g->mode == (BYTE)mode && g->mm == (BYTE)mm)
+            return g;
+
+    one.glyphCount = 1;
+    one.glyphIndices = &index;
+    one.glyphAdvances = &advance;
+    one.glyphOffsets = &offset;
+    if (FAILED(g_dw->CreateGlyphRunAnalysis(&one, 1, NULL, mode, mm, (float)(phase & 7) / 6.f, (float)(phase >> 3) / 4.f,
+                                            &an)))
+        return NULL;
+    if (FAILED(an->GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1, &b))) {
+        an->Release();
+        return NULL;
+    }
+    if (b.right < b.left || b.bottom < b.top)
+        b.right = b.left = b.bottom = b.top = 0;
+    n = (UINT32)((b.right - b.left) * (b.bottom - b.top) * 3);
+    g = (glyph_t *)mem_alloc(sizeof(glyph_t) + n);
+    if (n && FAILED(an->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &b, g->cov, n))) {
+        an->Release();
+        mem_free(g);
+        return NULL;
+    }
+    an->Release();
+    /* Below a ClearType level of 1, the colored fringes give way to gray. */
+    level = g_params->GetClearTypeLevel();
+    for (UINT32 i = 0; n && level < 1.f && i < n; i += 3) {
+        float gray = ((float)g->cov[i] + (float)g->cov[i + 1] + (float)g->cov[i + 2]) / 3.f;
+        for (int c = 0; c < 3; c++)
+            g->cov[i + c] = (BYTE)(gray + ((float)g->cov[i + c] - gray) * level + .5f);
+    }
+    if (g_ct_bgr)
+        for (UINT32 i = 0; i < n; i += 3) {
+            BYTE t = g->cov[i];
+            g->cov[i] = g->cov[i + 2];
+            g->cov[i + 2] = t;
+        }
+    g->face = run->fontFace;
+    g->face->AddRef();
+    g->em = run->fontEmSize;
+    g->index = index;
+    g->phase = (BYTE)phase;
+    g->mode = (BYTE)mode;
+    g->mm = (BYTE)mm;
+    g->left = b.left;
+    g->top = b.top;
+    g->w = b.right - b.left;
+    g->h = b.bottom - b.top;
+    g->next = *bucket;
+    *bucket = g;
+    g_glyph_bytes += n;
+    return g;
+}
+
+/* Coverage (0 to 255) to the weight (0 to 256) of the text color, for the color of the last table made. */
+static unsigned g_weights_for = 0xFF000000u; /* rgb of the table, alpha bits set: never a text's */
+static unsigned short g_weights[256];
+
+static void make_weights(unsigned argb)
+{
+    float light = ((float)(argb >> 16 & 0xFF) * .30f + (float)(argb >> 8 & 0xFF) * .59f + (float)(argb & 0xFF) * .11f) / 255.f;
+    float k = g_contrast * clamp01(4.f * (.75f - light));
+
+    for (int v = 0; v < 256; v++) {
+        float a = (float)v / 255.f;
+        g_weights[v] = (unsigned short)(a * (k + 1.f) / (a * k + 1.f) * 256.f + .5f);
+    }
+    g_weights_for = argb;
+}
+
+/*
+ * A run of plain glyphs drawn from the cache at (x, y) (y in the band), in
+ * argb: their coverage added up as DirectWrite rasterizes a run whole, then
+ * blended once, inside c->vis. Returns 0 when the run is for DirectWrite.
+ */
+static int cached_run(draw_ctx *c, FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mm, const DWRITE_GLYPH_RUN *run, unsigned argb)
+{
+    enum { MAX_GLYPHS = 256 };
+    static glyph_t *gl[MAX_GLYPHS]; /* static: no __chkstk without the C runtime; text is drawn on one thread */
+    static int gx[MAX_GLYPHS], gy[MAX_GLYPHS];
+    DWRITE_RENDERING_MODE mode;
+    RECT box = {0x7FFFFFFF, 0x7FFFFFFF, -0x7FFFFFFF, -0x7FFFFFFF}, vis;
+    FLOAT pen = x;
+    int bw, bh;
+    unsigned color = c->argb & 0xFF000000u | argb & 0xFFFFFF;
+
+    if (g_aa != DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE || run->isSideways || (run->bidiLevel & 1) ||
+        run->glyphCount > MAX_GLYPHS || run->fontEmSize > GLYPH_MAX_EM || !ct_ready() ||
+        FAILED(run->fontFace->GetRecommendedRenderingMode(run->fontEmSize, 1, mm, g_params, &mode)) ||
+        mode == DWRITE_RENDERING_MODE_ALIASED || mode == DWRITE_RENDERING_MODE_OUTLINE)
+        return 0;
+    for (UINT32 i = 0; i < run->glyphCount; i++) {
+        FLOAT px = pen + (run->glyphOffsets ? run->glyphOffsets[i].advanceOffset : 0);
+        FLOAT py = y - (run->glyphOffsets ? run->glyphOffsets[i].ascenderOffset : 0);
+        int ix = (int)(px * 6.f + 393216.5f) - 393216, iy = (int)(py * 4.f + 262144.5f) - 262144; /* nearest 1/6, 1/4 */
+
+        if (!(gl[i] = glyph_get(run, run->glyphIndices[i], (ix + 393216) % 6 | (iy & 3) << 3, mode, mm)))
+            return 0;
+        gx[i] = (ix + 393216) / 6 - 65536 + gl[i]->left;
+        gy[i] = (iy >> 2) + gl[i]->top + g_y0;
+        if (gl[i]->w && gl[i]->h) {
+            box.left = imin(box.left, gx[i]);
+            box.top = imin(box.top, gy[i]);
+            box.right = imax(box.right, gx[i] + gl[i]->w);
+            box.bottom = imax(box.bottom, gy[i] + gl[i]->h);
+        }
+        pen += run->glyphAdvances[i];
+    }
+    vis = c->vis;
+    if (!(color >> 24) || !intersect(&vis, box.left, box.top, box.right - box.left, box.bottom - box.top))
+        return 1;
+    /* The coverage of the visible part, glyphs added up (they only overlap at their edges). */
+    bw = vis.right - vis.left;
+    bh = vis.bottom - vis.top;
+    if ((size_t)bw * bh * 3 > g_run_cov_n) {
+        mem_free(g_run_cov);
+        g_run_cov_n = (size_t)bw * bh * 3;
+        g_run_cov = (BYTE *)mem_alloc(g_run_cov_n);
+    }
+    memset(g_run_cov, 0, (size_t)bw * bh * 3);
+    for (UINT32 i = 0; i < run->glyphCount; i++) {
+        const glyph_t *g = gl[i];
+        int x0 = imax(gx[i], vis.left), x1 = imin(gx[i] + g->w, vis.right);
+        int y0 = imax(gy[i], vis.top), y1 = imin(gy[i] + g->h, vis.bottom);
+        for (int yy = y0; yy < y1; yy++) {
+            const BYTE *s = g->cov + ((size_t)(yy - gy[i]) * g->w + (x0 - gx[i])) * 3;
+            BYTE *d = g_run_cov + ((size_t)(yy - vis.top) * bw + (x0 - vis.left)) * 3;
+            for (int k = 0; k < (x1 - x0) * 3; k++) {
+                unsigned v = d[k] + s[k];
+                d[k] = (BYTE)(v > 255 ? 255 : v);
+            }
+        }
+    }
+    if ((color & 0xFFFFFF) != g_weights_for)
+        make_weights(color & 0xFFFFFF);
+    {
+        int fr = g_lin[color >> 16 & 0xFF], fg = g_lin[color >> 8 & 0xFF], fb = g_lin[color & 0xFF];
+        unsigned alpha = color >> 24;
+        for (int yy = vis.top; yy < vis.bottom; yy++) {
+            const BYTE *s = g_run_cov + (size_t)(yy - vis.top) * bw * 3;
+            UINT32 *p = row(yy) + vis.left;
+            for (int xx = 0; xx < bw; xx++, s += 3, p++) {
+                UINT32 d;
+                int r, gg, b;
+                if (!(s[0] | s[1] | s[2]))
+                    continue;
+                d = *p;
+                r = g_lin[d >> 16 & 0xFF];
+                gg = g_lin[d >> 8 & 0xFF];
+                b = g_lin[d & 0xFF];
+                r += (fr - r) * (int)g_weights[s[0]] >> 8;
+                gg += (fg - gg) * (int)g_weights[s[1]] >> 8;
+                b += (fb - b) * (int)g_weights[s[2]] >> 8;
+                if (alpha >= 255) {
+                    *p = (UINT32)g_unlin[r] << 16 | (UINT32)g_unlin[gg] << 8 | (UINT32)g_unlin[b];
+                } else { /* translucent text: drawn opaque, then laid over what was there, as draw_layout does */
+                    *p = d;
+                    blend(p, (unsigned)g_unlin[r] << 16 | (unsigned)g_unlin[gg] << 8 | g_unlin[b], alpha);
+                }
+            }
+            /* Already clipped and blended: draw_layout's undoing, if it comes, must leave these pixels be. */
+            if (c->saved && yy >= c->ink.top && yy < c->ink.bottom) {
+                int a0 = imax(vis.left, c->ink.left), a1 = imin(vis.right, c->ink.right);
+                if (a1 > a0)
+                    memcpy(c->saved + (size_t)(yy - c->ink.top) * (c->ink.right - c->ink.left) + (a0 - c->ink.left),
+                           row(yy) + a0, (size_t)(a1 - a0) * 4);
+            }
+        }
+    }
+    return 1;
+}
+
 /* Receives the glyph runs of a layout and draws them into the band bitmap. */
 struct TextRenderer : IDWriteTextRenderer {
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override
@@ -1068,7 +1371,7 @@ struct TextRenderer : IDWriteTextRenderer {
                                            const DWRITE_GLYPH_RUN *run, const DWRITE_GLYPH_RUN_DESCRIPTION *desc,
                                            IUnknown *effect) override
     {
-        const draw_ctx *c = (const draw_ctx *)ctx;
+        draw_ctx *c = (draw_ctx *)ctx;
         unsigned argb = c->pass == PASS_MONO ? 0xFFFFFFFFu : effect ? ((ColorEffect *)effect)->argb : c->argb;
         IDWriteColorGlyphRunEnumerator1 *layers = NULL;
         DWRITE_GLYPH_IMAGE_FORMATS formats =
@@ -1080,10 +1383,14 @@ struct TextRenderer : IDWriteTextRenderer {
             /* Plain glyphs (DWRITE_E_NOCOLOR). */
             if (c->pass == PASS_COLOR)
                 return S_OK;
+            if (c->pass == PASS_ALL && cached_run(c, x, y, mm, run, argb))
+                return S_OK;
+            guard(c);
             return g_target->DrawGlyphRun(x, y, mm, run, g_params, gdi_color(argb), NULL);
         }
         if (c->pass != PASS_MONO) {
             /* Color font layers (emoji); ClearType fringes would tint them. */
+            guard(c);
             set_aa(DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             for (;;) {
                 BOOL more = FALSE;
@@ -1105,12 +1412,13 @@ struct TextRenderer : IDWriteTextRenderer {
 
     void line(void *ctx, FLOAT x, FLOAT y, FLOAT width, FLOAT offset, FLOAT thickness, IUnknown *effect)
     {
-        const draw_ctx *c = (const draw_ctx *)ctx;
+        draw_ctx *c = (draw_ctx *)ctx;
         unsigned argb = c->pass == PASS_MONO ? 0xFFFFFFFFu : effect ? ((ColorEffect *)effect)->argb : c->argb;
         int t = (int)(thickness + 0.5f);
 
         if (c->pass == PASS_COLOR)
             return;
+        guard(c); /* drawn opaque, made translucent with the rest */
         r_fill((int)(x + 0.5f), (int)(y + offset + 0.5f) + g_y0, (int)(width + 0.5f), t > 0 ? t : 1, argb | 0xFF000000u);
     }
     HRESULT STDMETHODCALLTYPE DrawUnderline(void *ctx, FLOAT x, FLOAT y, const DWRITE_UNDERLINE *u, IUnknown *effect) override
@@ -1127,6 +1435,7 @@ struct TextRenderer : IDWriteTextRenderer {
     HRESULT STDMETHODCALLTYPE DrawInlineObject(void *ctx, FLOAT x, FLOAT y, IDWriteInlineObject *obj, BOOL sideways,
                                                BOOL rtl, IUnknown *effect) override
     {
+        guard((draw_ctx *)ctx);
         return obj->Draw(ctx, this, x, y, sideways, rtl, effect);
     }
 };
@@ -1183,14 +1492,13 @@ static void draw_layout(IDWriteTextLayout *l, int x, int y, const RECT *box, uns
         !intersect(&ink, vis.left, vis.top, vis.right - vis.left, vis.bottom - vis.top))
         return; /* nothing visible */
     ink = area; /* now: what the drawing can touch, inside the band */
-    if (a >= 255 && ink.left >= vis.left && ink.top >= vis.top && ink.right <= vis.right && ink.bottom <= vis.bottom) {
-        l->Draw(&ctx, g_renderer, (FLOAT)x, (FLOAT)(y - g_y0));
-        return;
-    }
-    w = ink.right - ink.left;
-    saved = scratch((size_t)w * (size_t)(ink.bottom - ink.top));
-    save_rect(&ink, saved);
+    ctx.vis = vis;
+    ctx.ink = ink;
+    ctx.guard = a < 255 || ink.left < vis.left || ink.top < vis.top || ink.right > vis.right || ink.bottom > vis.bottom;
     l->Draw(&ctx, g_renderer, (FLOAT)x, (FLOAT)(y - g_y0));
+    if (!(saved = ctx.saved))
+        return;
+    w = ink.right - ink.left;
     for (int yy = ink.top; yy < ink.bottom; yy++) {
         UINT32 *p = row(yy) + ink.left, *s = saved + (size_t)(yy - ink.top) * w;
         int inside_y = yy >= vis.top && yy < vis.bottom;

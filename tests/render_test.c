@@ -124,6 +124,9 @@ void entry(void)
         }
         r_text(mid, 0xFFFFFFFF, 10, 130, 200, 50, L"\xD83C\xDF38", -1, R_SINGLE);
         r_fill(0, 490, W, 40, 0x80FFFFFF);
+        /* Text across the band edge (512), and translucent text. */
+        r_text(mid, 0xFFFFFFFF, 10, 490, 200, 44, L"IIIIIIII", -1, R_SINGLE | R_VCENTER);
+        r_text(mid, 0x80FFFFFF, 10, 545, 200, 44, L"IIIIIIII", -1, R_SINGLE | R_VCENTER);
         r_end(dc);
     }
     GdiFlush();
@@ -145,6 +148,14 @@ void entry(void)
     check(any(10, 130, 60, 180, colorful), "emoji drawn in color");
     check(ch(px(5, 500), 16) > 0x80 && ch(px(5, 500), 16) < 0xA0 && ch(px(5, 520), 16) == ch(px(5, 500), 16),
           "translucent fill blends the same in both bands");
+    check(any(10, 500, 200, 512, white) && any(10, 512, 200, 524, white), "text across the band edge is drawn in both");
+    {
+        int brightest = 0;
+        for (int y = 545; y < 589; y++)
+            for (int x = 10; x < 210; x++)
+                brightest = ch(px(x, y), 8) > brightest ? ch(px(x, y), 8) : brightest;
+        check(brightest > 0x70 && brightest < 0xA0, "translucent text is half way to white");
+    }
 
     {
         r_image_t *gif = r_image_decode(k_gif, sizeof k_gif, 0);
