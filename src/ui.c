@@ -3019,16 +3019,21 @@ static int panel_right(void)
     return S(RAIL_W + SIDE_W) - S(PANEL_GAP);
 }
 
-/* The user row's buttons, right to left: settings, deafen's menu, deafen, mute's menu, mute. */
+/*
+ * The user row's buttons, right to left: settings, deafen's menu, deafen,
+ * mute's menu, mute. As in Discord, mute and deafen are each joined to their
+ * menu's chevron (1 px apart), 8 px between the groups.
+ */
 static const int k_panel_buttons[5] = {HIT_LOGOUT, HIT_VOICE_MENU, HIT_DEAFEN, HIT_VOICE_MENU, HIT_MIC};
-static const int k_panel_button_w[5] = {32, 18, 32, 18, 32};
+static const int k_panel_button_w[5] = {32, 16, 32, 16, 32};
+static const int k_panel_button_gap[5] = {0, 8, 1, 8, 1}; /* on each one's right */
 
 static int panel_button_x(int k)
 {
     int x = panel_right() - S(8);
 
     for (int i = 0; i <= k; i++)
-        x -= S(k_panel_button_w[i]) + (i == 2 ? S(6) : 0);
+        x -= S(k_panel_button_gap[i]) + S(k_panel_button_w[i]);
     return x;
 }
 
@@ -3078,6 +3083,7 @@ static void hit_test(int x, int y, int *kind, int *index)
             for (int k = 0; k < 5; k++)
                 if (x >= panel_button_x(k) && x < panel_button_x(k) + S(k_panel_button_w[k])) {
                     *kind = k_panel_buttons[k];
+                    *index = k; /* which of the two chevrons */
                     return;
                 }
             if (g_ui.disconnected && x >= panel_button_x(4) - S(36) && x < panel_button_x(4) - S(4))
@@ -3467,6 +3473,37 @@ static const struct {
      "<path d=\"M19 14a1 1 0 0 1 1 1v3h3a1 1 0 1 1 0 2h-3v3a1 1 0 1 1-2 0v-3h-3a1 1 0 1 1 0-2h3v-3a1 1 0 0 1 1-1Z\"/>"
      "<path d=\"M20.76 12.57c.4.3 1.23.13 1.24-.37V12a10 10 0 1 0-18.44 5.36c.12.19.1.44-.04.61l-2.07 2.37A1 1 0 0 0 2.2 "
      "22h10c.5-.01.67-.84.37-1.24A3 3 0 0 1 15 16h.5a.5.5 0 0 0 .5-.5V15a3 3 0 0 1 4.76-2.43Z\"/>"},
+    /* The user panel's buttons. */
+    {0xE720, /* microphone */
+     "<path d=\"M12 2a4 4 0 0 0-4 4v4a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4Z\"/><path d=\"M6 10a1 1 0 0 0-2 0 8 8 0 0 0 7 7.94V20H9a1 1 0 "
+     "1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.06A8 8 0 0 0 20 10a1 1 0 1 0-2 0 6 6 0 0 1-12 0Z\"/>"},
+    {0xEC54, /* microphone, muted: struck through */
+     "<path d=\"m2.7 22.7 20-20a1 1 0 0 0-1.4-1.4l-20 20a1 1 0 1 0 1.4 1.4ZM10.8 17.32c-.21.21-.1.58.2.62V20H9a1 1 0 1 0 0 "
+     "2h6a1 1 0 1 0 0-2h-2v-2.06A8 8 0 0 0 20 10a1 1 0 0 0-2 0c0 1.45-.52 2.79-1.38 3.83l-.02.02A5.99 5.99 0 0 1 12.32 16a.52"
+     ".52 0 0 0-.34.15l-1.18 1.18ZM15.36 4.52c.15-.15.19-.38.08-.56A4 4 0 0 0 8 6v4c0 .3.03.58.1.86.07.34.49.43.74.18l6.52-"
+     "6.52ZM5.06 13.98c.16.28.53.31.75.09l.75-.75c.16-.16.19-.4.08-.61A5.97 5.97 0 0 1 6 10a1 1 0 0 0-2 0c0 1.45.39 2.81 "
+     "1.06 3.98Z\"/>"},
+    {0xE7F6, /* headphones */
+     "<path d=\"M12 3a9 9 0 0 0-8.95 10h1.87a5 5 0 0 1 4.1 2.13l1.37 1.97a3.1 3.1 0 0 1-.17 3.78 2.85 2.85 0 0 1-3.55.74 11 11 "
+     "0 1 1 10.66 0c-1.27.71-2.73.23-3.55-.74a3.1 3.1 0 0 1-.17-3.78l1.38-1.97a5 5 0 0 1 4.1-2.13h1.86A9 9 0 0 0 12 3Z\"/>"},
+    {0xE74F, /* headphones, deafened: struck through */
+     "<path d=\"M22.7 2.7a1 1 0 0 0-1.4-1.4l-20 20a1 1 0 1 0 1.4 1.4l20-20ZM17.06 2.94a.48.48 0 0 0-.11-.77A11 11 0 0 0 2.18 "
+     "16.94c.14.3.53.35.76.12l3.2-3.2c.25-.25.15-.68-.2-.76a5 5 0 0 0-1.02-.1H3.05a9 9 0 0 1 12.66-9.2c.2.09.44.05.59-.1l.76"
+     "-.76ZM20.2 8.28a.52.52 0 0 1 .1-.58l.76-.76a.48.48 0 0 1 .77.11 11 11 0 0 1-4.5 14.57c-1.27.71-2.73.23-3.55-.74a3.1 3.1 "
+     "0 0 1-.17-3.78l1.38-1.97a5 5 0 0 1 4.1-2.13h1.86a9.1 9.1 0 0 0-.75-4.72ZM10.1 17.9c.25-.25.65-.18.74.14a3.1 3.1 0 0 1"
+     "-.62 2.84 2.85 2.85 0 0 1-3.55.74.16.16 0 0 1-.04-.25l3.48-3.48Z\"/>"},
+    {0xE713, /* settings: a cog */
+     "<path fill-rule=\"evenodd\" d=\"M10.56 1.1c-.46.05-.7.53-.64.98.18 1.16-.19 2.2-.98 2.53-.8.33-1.79-.15-2.49-1.1-.27-.36"
+     "-.78-.52-1.14-.24-.77.59-1.45 1.27-2.04 2.04-.28.36-.12.87.24 1.14.96.7 1.43 1.7 1.1 2.49-.33.8-1.37 1.16-2.53.98-.45"
+     "-.07-.93.18-.99.64a11.1 11.1 0 0 0 0 2.88c.06.46.54.7.99.64 1.16-.18 2.2.19 2.53.98.33.8-.14 1.79-1.1 2.49-.36.27-.52"
+     ".78-.24 1.14.59.77 1.27 1.45 2.04 2.04.36.28.87.12 1.14-.24.7-.95 1.7-1.43 2.49-1.1.8.33 1.16 1.37.98 2.53-.07.45.18.93"
+     ".64.99a11.1 11.1 0 0 0 2.88 0c.46-.06.7-.54.64-.99-.18-1.16.19-2.2.98-2.53.8-.33 1.79.14 2.49 1.1.27.36.78.52 1.14.24"
+     ".77-.59 1.45-1.27 2.04-2.04.28-.36.12-.87-.24-1.14-.96-.7-1.43-1.7-1.1-2.49.33-.8 1.37-1.16 2.53-.98.45.07.93-.18.99"
+     "-.64a11.1 11.1 0 0 0 0-2.88c-.06-.46-.54-.7-.99-.64-1.16.18-2.2-.19-2.53-.98-.33-.8.14-1.79 1.1-2.49.36-.27.52-.78.24"
+     "-1.14a11.07 11.07 0 0 0-2.04-2.04c-.36-.28-.87-.12-1.14.24-.7.96-1.7 1.43-2.49 1.1-.8-.33-1.16-1.37-.98-2.53.07-.45-.18"
+     "-.93-.64-.99a11.1 11.1 0 0 0-2.88 0ZM16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z\"/>"},
+    {0xE70D, /* a small chevron, down */
+     "<path d=\"M5.3 9.3a1 1 0 0 1 1.4 0l5.3 5.29 5.3-5.3a1 1 0 1 1 1.4 1.42l-6 6a1 1 0 0 1-1.4 0l-6-6a1 1 0 0 1 0-1.42Z\"/>"},
 };
 
 static struct {
@@ -3612,31 +3649,57 @@ static void paint_channel_row(unsigned i, int y)
     }
 }
 
-/* A small icon button: hover eases in a background, `on` shows it red (muted, deafened). */
-static void panel_button(int kind, int x, int y, int w, const wchar_t *glyph, r_font_t *font, int on)
-{
-    float t = tween_on(kind + 2000, x, g_ui.hover_kind == kind, TW_FAST, x, y, w, S(32));
+/* Discord's user panel colors: its icons, and red ones (muted) over a red glow. */
+#define PANEL_ICON 0xFFC5C6CAu     /* --icon-subtle */
+#define PANEL_ICON_RED 0xFFFFA09Bu /* --icon-feedback-critical */
+#define PANEL_GRAY 0x97979Fu       /* the --background-mod-* and --control-* overlays' color */
+#define PANEL_RED 0xD22D39u        /* --opacity-red-12 and -24's */
 
-    if (t > 0.f)
-        r_round(x, y, w, S(32), S(8), lerp_argb(ARGB(C_PANEL), 0xFF1E1E20u, t));
-    r_text(font, on ? ARGB(C_RED) : lerp_argb(ARGB(C_MUTED), ARGB(C_INK), t), x, y, w, S(32), glyph, -1,
-           R_CENTER | R_VCENTER | R_SINGLE);
+/* A rounded rectangle with its corners on one side square (flat: 1 right, 2 left), half of a joined pair. */
+static void half_round(int x, int y, int w, int h, int radius, int flat, unsigned argb)
+{
+    r_clip(x, y, w, h);
+    r_round(flat == 2 ? x - radius : x, y, w + (flat ? radius : 0), h, radius, argb);
+    r_unclip();
+}
+
+/*
+ * An icon button of the user panel, 32 high, as Discord's: its icon (px,
+ * Discord's own when there is one) in a muted gray, white on hover over a
+ * light square. `on` (muted, deafened) shows it red over a red glow. A
+ * chevron joined to its button shares its hover (`group`), and `flat` squares
+ * the corners where the two meet.
+ */
+static void panel_button(int kind, int index, int x, int y, int w, const wchar_t *glyph, int px, int on, int flat, int group)
+{
+    int hov = g_ui.hover_kind == kind && (index < 0 || g_ui.hover_index == index);
+    float t = tween_on(kind + 2000, index < 0 ? x : index, hov, TW_FAST, x, y, w, S(32));
+    float g = flat ? tween_on(kind + 3000, index < 0 ? x : index, group, TW_FAST, x, y, w, S(32)) : 0.f;
+    /* at rest: nothing, the group's 8%, or the red 12%; hovered: 16% (20% in a group), or the red 24% */
+    float a = on ? .12f + .12f * t : (flat ? .08f * g + (.20f - .08f * g) * t : .16f * t);
+    unsigned ink = on ? PANEL_ICON_RED : lerp_argb(PANEL_ICON, 0xFFFFFFFFu, t > g ? t : g);
+
+    if (a > 0.f)
+        half_round(x, y, w, S(32), S(8), flat, (unsigned)(a * 255.f + .5f) << 24 | (on ? PANEL_RED : PANEL_GRAY));
+    if (!dicon(glyph, x + w / 2, y + S(16), px, ink))
+        r_text(g_ui.f_icon_mid, ink, x, y, w, S(32), glyph, -1, R_CENTER | R_VCENTER | R_SINGLE);
 }
 
 /* Our name and status, with mute, deafen and settings, as in Discord's user panel. */
 static void paint_user_panel(RECT rc)
 {
-    int x0 = S(PANEL_GAP), y = user_row_y(rc), cy = y + (S(PANEL_H) - S(32)) / 2, ax = x0 + S(12);
+    int x0 = S(PANEL_GAP), y = user_row_y(rc), cy = y + (S(PANEL_H) - S(32)) / 2, ax = x0 + S(8);
     const char *name = g_ui.model && g_ui.model->user_name ? model_str(g_ui.model, g_ui.model->user_name)
                                                           : str_or_empty(&g_ui.account);
     int dot = g_ui.disconnected ? C_FAINT : g_ui.model && !g_ui.reconnecting ? C_GREEN : C_WARN;
     int tw = panel_button_x(4) - S(4) - (ax + S(40)) - (g_ui.disconnected ? S(36) : 0);
     int muted = g_ui.voice_muted || g_ui.voice_deafened;
-    float hs = tween_on(HIT_SELF + 2000, 0, g_ui.hover_kind == HIT_SELF, TW_FAST, x0, y, S(PANEL_H), S(PANEL_H));
+    /* its transition repaints the whole lit box, not just the avatar's corner */
+    float hs = tween_on(HIT_SELF + 2000, 0, g_ui.hover_kind == HIT_SELF, TW_FAST, ax - S(4), cy - S(4), tw + S(48), S(40));
 
-    /* Hovering our name lights it like a button. */
+    /* Hovering our name lights it like a button: Discord's --background-mod-normal. */
     if (hs > 0.f)
-        r_round(ax - S(4), cy - S(4), tw + S(48), S(40), S(8), lerp_argb(ARGB(C_PANEL), 0xFF1E1E20u, hs));
+        r_round(ax - S(4), cy - S(4), tw + S(48), S(40), S(4), (unsigned)(.16f * hs * 255.f + .5f) << 24 | PANEL_GRAY);
     if (g_ui.model && g_ui.model->user_id[0]) {
         r_image_t *img = user_avatar(g_ui.model->user_id, g_ui.model->user_avatar);
         if (img)
@@ -3647,7 +3710,7 @@ static void paint_user_panel(RECT rc)
         r_circle(ax, cy, S(32), ARGB(C_ITEM));
     }
     if (g_ui.model && !g_ui.disconnected && !g_ui.reconnecting) {
-        paint_status(ax, cy, S(32), g_ui.my_status, hs > 0.f ? lerp_argb(ARGB(C_PANEL), 0xFF1E1E20u, hs) : ARGB(C_PANEL));
+        paint_status(ax, cy, S(32), g_ui.my_status, lerp_argb(ARGB(C_PANEL), 0xFF000000u | PANEL_GRAY, .16f * hs));
     } else {
         r_circle(ax + S(21), cy + S(21), S(14), ARGB(C_PANEL));
         r_circle(ax + S(23), cy + S(23), S(10), ARGB(dot));
@@ -3660,12 +3723,17 @@ static void paint_user_panel(RECT rc)
          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     /* Mute and deafen with their menus (the voice settings), then settings. */
-    panel_button(HIT_MIC, panel_button_x(4), cy, S(32), muted ? L"\xEC54" : L"\xE720", g_ui.f_icon_mid, muted);
-    panel_button(HIT_VOICE_MENU, panel_button_x(3), cy, S(18), ICON_CHEVRON_DOWN, g_ui.f_caption, 0);
-    panel_button(HIT_DEAFEN, panel_button_x(2), cy, S(32), g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6", g_ui.f_icon_mid,
-                 g_ui.voice_deafened);
-    panel_button(HIT_VOICE_MENU + 100, panel_button_x(1), cy, S(18), ICON_CHEVRON_DOWN, g_ui.f_caption, 0);
-    panel_button(HIT_LOGOUT, panel_button_x(0), cy, S(32), g_ui.model ? L"\xE713" : ICON_POWER, g_ui.f_icon_mid, 0);
+    {
+        /* a group is hovered when its button or its chevron is */
+        int over = g_ui.hover_kind == HIT_VOICE_MENU ? g_ui.hover_index : -1;
+        int mic = g_ui.hover_kind == HIT_MIC || over == 3, deaf = g_ui.hover_kind == HIT_DEAFEN || over == 1;
+        panel_button(HIT_MIC, -1, panel_button_x(4), cy, S(32), muted ? L"\xEC54" : L"\xE720", S(20), muted, 1, mic);
+        panel_button(HIT_VOICE_MENU, 3, panel_button_x(3), cy, S(16), ICON_CHEVRON_DOWN, S(16), 0, 2, mic);
+        panel_button(HIT_DEAFEN, -1, panel_button_x(2), cy, S(32), g_ui.voice_deafened ? L"\xE74F" : L"\xE7F6", S(20),
+                     g_ui.voice_deafened, 1, deaf);
+        panel_button(HIT_VOICE_MENU, 1, panel_button_x(1), cy, S(16), ICON_CHEVRON_DOWN, S(16), 0, 2, deaf);
+        panel_button(HIT_LOGOUT, -1, panel_button_x(0), cy, S(32), g_ui.model ? L"\xE713" : ICON_POWER, S(20), 0, 0, 0);
+    }
     if (g_ui.disconnected) {
         int rx = panel_button_x(4) - S(36);
         if (g_ui.hover_kind == HIT_RETRY)
@@ -3716,7 +3784,7 @@ static void paint_voice_bar(RECT rc)
                    b[k].icon, -1, rflags(DT_CENTER | DT_VCENTER | DT_SINGLELINE));
         }
     }
-    panel_button(HIT_VOICE_LEAVE, right - S(32), cy, S(32), L"\xE778", g_ui.f_icon_mid, 0);
+    panel_button(HIT_VOICE_LEAVE, -1, right - S(32), cy, S(32), L"\xE778", S(20), 0, 0, 0);
     fill(x0 + S(8), y + h - S(1), right - x0, S(1) > 1 ? S(1) : 1, C_LINE);
 }
 
@@ -9701,7 +9769,8 @@ static void open_self(void)
     if (!g_ui.model || !g_ui.model->user_id[0])
         return;
     GetClientRect(g_ui.wnd, &rc);
-    pop_open(g_ui.model->user_id, name, g_ui.model->user_avatar, S(RAIL_W) + S(8), rc.bottom - S(PANEL_H) - S(8), 1);
+    /* over the panel, flush with its left edge, as Discord's account popout */
+    pop_open(g_ui.model->user_id, name, g_ui.model->user_avatar, S(PANEL_GAP), panel_top(rc) - S(PANEL_GAP), 1);
 }
 
 /* ---- Message actions: hover toolbar, reply and edit bar, delete confirmation, typing ---- */
