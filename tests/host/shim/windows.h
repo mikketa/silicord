@@ -106,6 +106,15 @@ static inline int lstrlenA(const char *s)
     return s ? (int)strlen(s) : 0;
 }
 
+static inline int lstrlenW(const WCHAR *s)
+{
+    int n = 0;
+
+    while (s && s[n])
+        n++;
+    return n;
+}
+
 static inline int lstrcmpA(const char *a, const char *b)
 {
     int r = strcmp(a, b);
