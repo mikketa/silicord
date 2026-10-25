@@ -4,7 +4,7 @@
 #include "render.h"
 
 #define W 400
-#define H 300 /* more than one band */
+#define H 600 /* more than one band (512 rows) */
 
 static UINT32 *g_px;
 
@@ -100,7 +100,7 @@ void entry(void)
             r_stroke(hook, 2, 9, 0xFFFF0000);
         }
         r_text(mid, 0xFFFFFFFF, 10, 130, 200, 50, L"\xD83C\xDF38", -1, R_SINGLE);
-        r_fill(0, 240, W, 40, 0x80FFFFFF);
+        r_fill(0, 490, W, 40, 0x80FFFFFF);
         r_end(dc);
     }
     GdiFlush();
@@ -120,7 +120,7 @@ void entry(void)
     check(px(280, 200) == 0x101010, "arc turns only one way");
     check(ch(px(260, 175), 16) > 0x10 && ch(px(260, 175), 16) < 0xFF, "stroke edge is anti-aliased");
     check(any(10, 130, 60, 180, colorful), "emoji drawn in color");
-    check(ch(px(5, 250), 16) > 0x80 && ch(px(5, 250), 16) < 0xA0 && ch(px(5, 270), 16) == ch(px(5, 250), 16),
+    check(ch(px(5, 500), 16) > 0x80 && ch(px(5, 500), 16) < 0xA0 && ch(px(5, 520), 16) == ch(px(5, 500), 16),
           "translucent fill blends the same in both bands");
 
     {

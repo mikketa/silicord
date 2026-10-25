@@ -24,7 +24,7 @@ extern "C" {
 #include "mem.h"
 }
 
-#define BAND 256
+#define BAND 512
 #define MAX_CLIP 16
 
 /* Placement new without the C++ runtime. */
@@ -230,6 +230,8 @@ extern "C" int r_begin(HDC dc, int w, int h)
 {
     if (!g_active) {
         RECT clip;
+        if (GetClipBox(dc, &clip) == NULLREGION)
+            return 0; /* nothing to paint: a WM_PAINT with an empty update region */
         g_active = 1;
         g_y0 = 0;
         g_y_end = h;
@@ -1359,12 +1361,12 @@ static IDWriteTextLayout *layout_new(r_font_t *f, const wchar_t *s, int len, int
     return l;
 }
 
-/* Cheap test before building a layout: the box, with room for overhangs. */
-static int box_visible(int y, int h)
+/* Cheap test before building a layout: the box, with room for overhangs above and below (and on the sides). */
+static int box_visible(int x, int y, int w, int h)
 {
     RECT r = clip_rect();
 
-    return y - h < r.bottom && y + 2 * h > r.top;
+    return y - h < r.bottom && y + 2 * h > r.top && x - h < r.right && x + w + h > r.left;
 }
 
 extern "C" void r_text(r_font_t *f, unsigned argb, int x, int y, int w, int h, const wchar_t *s, int len, unsigned flags)
@@ -1372,7 +1374,7 @@ extern "C" void r_text(r_font_t *f, unsigned argb, int x, int y, int w, int h, c
     IDWriteTextLayout *l;
     RECT box = {x, y, x + w, y + h};
 
-    if (!f || w <= 0 || !box_visible(y, h) || !(l = layout(f, s, len, w, h, flags)))
+    if (!f || w <= 0 || !box_visible(x, y, w, h) || !(l = layout(f, s, len, w, h, flags)))
         return;
     draw_layout(l, x, y, &box, argb, PASS_ALL);
     l->Release();
@@ -1480,7 +1482,7 @@ extern "C" void r_text_styled(r_font_t *f, const unsigned *colors, int ncolors, 
     mask_t m;
     UINT32 *saved;
 
-    if (!f || w <= 0 || !box_visible(y, h) || !(l = layout(f, s, len, w, h, flags)))
+    if (!f || w <= 0 || !box_visible(x, y, w, h) || !(l = layout(f, s, len, w, h, flags)))
         return;
     if (!intersect(&vis, box.left - margin, box.top - margin, w + 2 * margin, h + 2 * margin)) {
         l->Release();
