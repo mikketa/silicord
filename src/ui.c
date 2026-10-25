@@ -6511,11 +6511,13 @@ static unsigned paint_frame(HWND wnd, void (*draw)(RECT rc))
  * (rounded by DWM, as Discord's), submenus opening on hover, the keyboard
  * as in any menu. An item's data says how it is ticked: MENU_CHECK, a box,
  * or MENU_RADIO, one choice of several; or MENU_STATUS + a status, its dot
- * before the label. A label may carry a line of help after a newline.
+ * before the label; or MENU_SWATCH + 0xRRGGBB, a square of that color there.
+ * A label may carry a line of help after a newline.
  */
 #define MENU_CHECK 1
 #define MENU_RADIO 2
 #define MENU_STATUS 0x100
+#define MENU_SWATCH 0x1000000
 #define MENU_ITEMS 40
 #define MENU_LEVELS 3
 #define MENU_PAD 8     /* the scroller's padding */
@@ -6786,7 +6788,10 @@ static void menu_paint(RECT rc)
             r_round(x, y, w, menu_item_h(it), S(4), bg);
         {
             int lx = x + S(8);
-            if (it->kind >= MENU_STATUS) { /* the status's dot, then its name */
+            if (it->kind >= MENU_SWATCH) { /* the color, then its name */
+                r_round(lx, y + (S(MENU_ITEM_H) - S(14)) / 2, S(14), S(14), S(4), 0xFF000000u | (unsigned)(it->kind & 0xFFFFFF));
+                lx += S(20);
+            } else if (it->kind >= MENU_STATUS) { /* the status's dot, then its name */
                 status_dot(lx, y + (S(MENU_ITEM_H) - S(12)) / 2, S(12), (int)(it->kind - MENU_STATUS), bg);
                 lx += S(20);
             }
@@ -15158,11 +15163,20 @@ enum {
     CM_REACT = 1, CM_REPLY, CM_EDIT, CM_DELETE, CM_COPY_TEXT, CM_COPY_LINK, CM_COPY_ID,
     CM_MARK_READ, CM_MUTE, CM_UNMUTE, CM_LEAVE, CM_PROFILE, CM_MESSAGE, CM_COPY_USERNAME, CM_COPY_USER_ID,
     CM_SUPPRESS_EVERYONE, CM_SUPPRESS_ROLES, CM_FORWARD, CM_PIN, CM_MARK_UNREAD, CM_THREAD,
-    CM_USER_MUTE,
+    CM_USER_MUTE, CM_FOLDER_DEFAULT, CM_FOLDER_CUSTOM,
     CM_USER_VOLUME = 90, /* + index in k_user_volumes */
     CM_MUTE_FOR = 100,   /* + index in k_mute_minutes */
     CM_NOTIFY = 120,     /* + NOTIFY_* */
+    CM_FOLDER_COLOR = 140, /* + index in k_folder_colors */
 };
+
+/* The colors Discord offers for a folder (and a role): ten, then the same darker. */
+static const unsigned k_folder_colors[20] = {
+    0x1ABC9C, 0x2ECC71, 0x3498DB, 0x9B59B6, 0xE91E63, 0xF1C40F, 0xE67E22, 0xE74C3C, 0x95A5A6, 0x607D8B,
+    0x11806A, 0x1F8B4C, 0x206694, 0x71368A, 0xAD1457, 0xC27C0E, 0xA84300, 0x992D22, 0x979C9F, 0x546E7A,
+};
+static const wchar_t *const k_folder_color_names[10] = {L"Teal",   L"Green",  L"Blue", L"Purple", L"Pink",
+                                                        L"Yellow", L"Orange", L"Red",  L"Gray",   L"Slate"};
 
 static const int k_mute_minutes[] = {15, 60, 180, 480, 1440, 0};
 static const int k_user_volumes[] = {200, 150, 125, 100, 75, 50, 25, 10};
@@ -15523,6 +15537,62 @@ static void guild_menu(int g)
     redraw();
 }
 
+/* A folder's menu: its color, as Discord's Folder Settings offer (saved to the user settings' guild_folders). */
+static void folder_menu(int f)
+{
+    static COLORREF custom[16];
+    HMENU menu = CreatePopupMenu(), colors = CreatePopupMenu(), dark = CreatePopupMenu();
+    const folder_t *fd = &g_ui.model->folders[f];
+    int cmd, color = -2;
+    char id[24];
+
+    AppendMenuW(colors, MF_STRING | (fd->has_color ? 0 : MF_CHECKED), CM_FOLDER_DEFAULT, L"Default");
+    menu_mark(colors, CM_FOLDER_DEFAULT, MENU_SWATCH + (int)(ARGB(C_BRAND) & 0xFFFFFF));
+    for (int k = 0; k < (int)ARRAYSIZE(k_folder_colors); k++) {
+        HMENU to = k < 10 ? colors : dark;
+        wchar_t label[24];
+        wsprintfW(label, k < 10 ? L"%s" : L"Dark %s", k_folder_color_names[k % 10]);
+        AppendMenuW(to, MF_STRING | (fd->has_color && fd->color == k_folder_colors[k] ? MF_CHECKED : 0),
+                    CM_FOLDER_COLOR + k, label);
+        menu_mark(to, CM_FOLDER_COLOR + k, MENU_SWATCH + (int)k_folder_colors[k]);
+    }
+    AppendMenuW(colors, MF_POPUP, (UINT_PTR)dark, L"Darker");
+    AppendMenuW(colors, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(colors, MF_STRING, CM_FOLDER_CUSTOM, L"Custom Color...");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)colors, L"Folder Color");
+    lstrcpynA(id, fd->id, sizeof id);
+    cmd = run_menu(menu);
+    for (f = 0; f < (int)g_ui.model->nfolders && lstrcmpA(g_ui.model->folders[f].id, id); f++)
+        ;
+    if (f == (int)g_ui.model->nfolders)
+        return;
+    fd = &g_ui.model->folders[f];
+    if (cmd == CM_FOLDER_DEFAULT) {
+        color = -1;
+    } else if (cmd >= CM_FOLDER_COLOR && cmd < CM_FOLDER_COLOR + (int)ARRAYSIZE(k_folder_colors)) {
+        color = (int)k_folder_colors[cmd - CM_FOLDER_COLOR];
+    } else if (cmd == CM_FOLDER_CUSTOM) { /* the system's picker, Discord's own colors among its custom ones */
+        CHOOSECOLORW cc = {sizeof cc};
+        unsigned rgb = fd->has_color ? fd->color : ARGB(C_BRAND) & 0xFFFFFF;
+        if (!custom[0])
+            for (int k = 0; k < 16; k++)
+                custom[k] = RGB(k_folder_colors[k] >> 16, k_folder_colors[k] >> 8 & 0xFF, k_folder_colors[k] & 0xFF);
+        cc.hwndOwner = g_ui.wnd;
+        cc.rgbResult = RGB(rgb >> 16, rgb >> 8 & 0xFF, rgb & 0xFF);
+        cc.lpCustColors = custom;
+        cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+        if (ChooseColorW(&cc))
+            color = (int)(GetRValue(cc.rgbResult) << 16 | GetGValue(cc.rgbResult) << 8 | GetBValue(cc.rgbResult));
+    }
+    if (color != -2) {
+        sb_t fields = {0};
+        if (model_set_folder_color(g_ui.model, f, color, &fields))
+            app_user_settings(fields.data);
+        sb_free(&fields);
+        redraw();
+    }
+}
+
 /* `voice`: someone in a voice channel, whose volume can be set. */
 static void user_menu(const char *user_id, const char *name, const char *avatar, int x, int y, int voice)
 {
@@ -15631,6 +15701,8 @@ static void on_right_click(int x, int y)
         channel_menu(index);
     else if (kind == HIT_GUILD)
         guild_menu(index);
+    else if (kind == HIT_FOLDER)
+        folder_menu(index);
 }
 
 /* ---- Search and jumping to messages ---- */

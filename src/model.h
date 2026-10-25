@@ -125,6 +125,12 @@ void model_free(model_t *m);
  * `m` is left untouched; read state carries over by channel id.
  */
 model_t *model_apply(const model_t *m, const char *event, json_t d);
+/*
+ * Sets folder f's color, 0xRRGGBB or -1 for none (Discord's default), here
+ * and in the kept guild_folders; appends those to `fields` as the user
+ * settings to send ("guild_folders":[...]). Returns 0 if f is not known.
+ */
+int model_set_folder_color(model_t *m, int f, int color, sb_t *fields);
 
 /* What notifies in channel i: NOTIFY_ALL, NOTIFY_MENTIONS or NOTIFY_NOTHING. DMs notify for everything. */
 int model_notify(const model_t *m, unsigned i);

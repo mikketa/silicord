@@ -950,6 +950,60 @@ static int guild_folder(model_t *m, const char *id)
     return found;
 }
 
+int model_set_folder_color(model_t *m, int f, int color, sb_t *fields)
+{
+    json_t settings, folders, folder, key, v;
+    json_iter_t it, fit;
+    sb_t copy = {0}, out = {0};
+
+    if (f < 0 || (unsigned)f >= m->nfolders || !folder_settings(m, &copy, &settings) ||
+        !json_get(settings, "guild_folders", &folders)) {
+        sb_free(&copy);
+        return 0;
+    }
+    /* The folders as they are, but for this one's color. */
+    sb_add(&out, "\"guild_folders\":[");
+    json_iter(folders, &it);
+    for (int first = 1; json_next(&it, NULL, &folder); first = 0) {
+        char fid[24] = "";
+        if (!first)
+            sb_add(&out, ",");
+        if (json_get(folder, "id", &v) && json_type(v) != JSON_NULL)
+            json_raw(v, fid, sizeof fid);
+        if (!fid[0] || !str_eq(fid, m->folders[f].id)) {
+            sb_addn(&out, folder.p, (size_t)(folder.end - folder.p));
+            continue;
+        }
+        sb_add(&out, "{");
+        json_iter(folder, &fit);
+        while (json_next(&fit, &key, &v))
+            if (!json_str_eq(key, "color")) {
+                sb_addn(&out, key.p, (size_t)(key.end - key.p));
+                sb_add(&out, ":");
+                sb_addn(&out, v.p, (size_t)(v.end - v.p));
+                sb_add(&out, ",");
+            }
+        sb_add(&out, "\"color\":");
+        if (color < 0)
+            sb_add(&out, "null");
+        else
+            sb_u64(&out, (unsigned)color & 0xFFFFFF);
+        sb_add(&out, "}");
+    }
+    sb_add(&out, "]");
+    sb_free(&copy);
+
+    m->folder_json = (unsigned)m->strings.len;
+    sb_add(&m->strings, "{");
+    sb_addn(&m->strings, out.data, out.len);
+    sb_addn(&m->strings, "}", 2);
+    m->folders[f].color = color < 0 ? 0 : (unsigned)color & 0xFFFFFF;
+    m->folders[f].has_color = color >= 0;
+    sb_addn(fields, out.data, out.len);
+    sb_free(&out);
+    return 1;
+}
+
 /* Rank of a guild in the user's sidebar order, -1 if unknown (new guilds go on top). */
 static int guild_rank(const model_t *m, const char *id)
 {
